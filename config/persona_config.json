@@ -1,56 +1,61 @@
 {
   "retail": {
+    "name": "retail",
     "capital_weight": 0.25,
     "noise_level": 0.35,
-    "crowd_pct": 0.6,
     "strategy_weights": {
       "trend": 0.65,
       "momentum": 0.15,
       "mean_rev": 0.2
     },
+    "crowd_pct": 0.6,
     "description": "Emotional trend chaser, news-reactive"
   },
   "institutional": {
+    "name": "institutional",
     "capital_weight": 0.35,
     "noise_level": 0.05,
-    "crowd_pct": 0.15,
     "strategy_weights": {
       "ict": 0.4,
       "smc": 0.3,
       "mean_rev": 0.3
     },
-    "description": "Smart money \u2014 hunts liquidity, trades structure"
+    "crowd_pct": 0.15,
+    "description": "Smart money, liquidity-aware macro participant"
   },
   "algo": {
+    "name": "algo",
     "capital_weight": 0.2,
     "noise_level": 0.02,
-    "crowd_pct": 0.2,
     "strategy_weights": {
       "momentum": 0.35,
       "trend": 0.4,
       "ict": 0.25
     },
-    "description": "Systematic \u2014 trend + exhaustion detection"
+    "crowd_pct": 0.2,
+    "description": "Systematic price-structure trader"
   },
   "whale": {
+    "name": "whale",
     "capital_weight": 0.15,
     "noise_level": 0.01,
-    "crowd_pct": 0.02,
     "strategy_weights": {
       "ict": 0.45,
       "smc": 0.35,
       "mean_rev": 0.2
     },
-    "description": "Macro-driven, Wyckoff accumulation"
+    "crowd_pct": 0.02,
+    "description": "Contrarian liquidity accumulator"
   },
   "noise": {
+    "name": "noise",
     "capital_weight": 0.05,
     "noise_level": 0.9,
-    "crowd_pct": 0.03,
     "strategy_weights": {
       "trend": 0.6,
       "momentum": 0.4
     },
-    "description": "Random retail gamblers"
+    "crowd_pct": 0.03,
+    "description": "Unstable crowd noise persona"
   }
 }
