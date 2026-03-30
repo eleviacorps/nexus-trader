@@ -165,7 +165,10 @@ def load_checkpoint_with_expansion(
 ):
     if torch is None:
         raise ImportError("PyTorch is required to load checkpoints.")
-    payload = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:  # pragma: no cover
+        payload = torch.load(checkpoint_path, map_location="cpu")
     legacy_state = payload.get("model_state_dict") or payload.get("state_dict") or payload
     migrated_state = migrate_legacy_state_dict(legacy_state, model.state_dict(), old_input_dim, new_input_dim)
     missing, unexpected = model.load_state_dict(migrated_state, strict=False)

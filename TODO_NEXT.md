@@ -1,21 +1,25 @@
 # TODO_NEXT
 
-## Notebook 08 - Confluence Gate
+## Server Execution
 
-- Add the post-forecast confluence gate that combines fused TFT probability, persona disagreement, dominant driver, and macro context into a final actionability score.
-- Define explicit suppression rules for wide-cone / low-consensus states.
-- Persist the confluence decision and rationale so the UI can expose why a forecast was gated down.
+- Run `00_environment_setup.ipynb` on the ROCm server to create the canonical `data/`, `models/`, and `outputs/` tree.
+- Move from placeholder local artifacts to real server-generated parquet and tensor outputs.
+- Re-run `10_validation_and_tests.ipynb` after each major artifact stage.
 
-## Notebook 09 - Backtesting
+## News And Crowd Perception
 
-- Build a backtest harness around the fused 1-minute pipeline instead of the legacy price-only flow.
-- Evaluate at least three policies: always-follow, consensus-thresholded, and cone-width-filtered.
-- Track precision, recall, expectancy, max drawdown, and behavior across low/high-volatility regimes.
-- Add a scenario report for macro shock windows and crowd-extreme windows.
+- Replace the local placeholder embedding artifacts with real `news_embedding.parquet` and `crowd_embedding.parquet` outputs.
+- Regenerate the embedding index parquet files with a real parquet writer on the server.
+- Add metric reports for semantic coverage, forward-fill coverage, and timestamp sparsity.
 
-## Notebook 10 - Chart UI
+## Fused Training
 
-- Convert the architecture SVG concepts into the live probability cone chart.
-- Surface current price, bullish probability, cone width, consensus score, dominant driver, and persona breakdown together.
-- Keep the UI explanatory rather than signal-only: disagreement should remain visible.
-- Add server-friendly loading states for missing embeddings, missing checkpoint, and stale feature matrices.
+- Validate the legacy checkpoint migration against a real ROCm `torch` runtime.
+- Save `models/tft/final_tft.ckpt` and `outputs/evaluation/tft_metrics.json` after fused training.
+- Add tensor artifact generation for `data/features/fused_tensor.npy` and `data/features/targets.npy`.
+
+## Branching And UI
+
+- Persist `data/branches/future_branches.json` from Notebook 08.
+- Render `outputs/charts/probability_cone.html` and `outputs/charts/persona_breakdown.html` from Notebook 09.
+- Promote the placeholder UI notebook into a real chart surface once the upstream artifacts exist.

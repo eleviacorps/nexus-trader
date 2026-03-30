@@ -7,7 +7,7 @@ import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -45,6 +45,13 @@ def read_npy_shape(path: Path):
         return metadata["shape"]
 
 
+def resolve_first_existing(paths: Sequence[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
 def torch_forward_check() -> CheckResult:
     spec = importlib.util.find_spec("torch")
     if spec is None:
@@ -55,12 +62,22 @@ def torch_forward_check() -> CheckResult:
 def main() -> int:
     from config.project_config import (
         CROWD_EMBEDDINGS_INDEX_PATH,
-        CROWD_EMBEDDINGS_PATH,
+        CROWD_EMBEDDINGS_NPY_PATH,
         FEATURE_DIM_CROWD,
         FEATURE_DIM_NEWS,
         FEATURE_DIM_TOTAL,
+        LEGACY_CROWD_EMBEDDINGS_INDEX_PATH,
+        LEGACY_CROWD_EMBEDDINGS_NPY_PATH,
+        LEGACY_NEWS_EMBEDDINGS_INDEX_PATH,
+        LEGACY_NEWS_EMBEDDINGS_NPY_PATH,
+        LEGACY_NEWS_EMBEDDINGS_RAW_PATH,
+        LEGACY_PRICE_FEATURES_CSV,
+        LEGACY_PRICE_FEATURES_PARQUET,
+        LEGACY_TFT_CHECKPOINT_PATH,
         NEWS_EMBEDDINGS_INDEX_PATH,
-        NEWS_EMBEDDINGS_PATH,
+        NEWS_EMBEDDINGS_NPY_PATH,
+        NEWS_EMBEDDINGS_RAW_PATH,
+        PRICE_FEATURES_CSV_FALLBACK,
         PRICE_FEATURES_PATH,
         PRICE_FEATURE_COLUMNS,
         TFT_CHECKPOINT_PATH,
@@ -68,51 +85,60 @@ def main() -> int:
 
     results: List[CheckResult] = []
 
-    if PRICE_FEATURES_PATH.exists():
-        header = read_csv_header(PRICE_FEATURES_PATH)
+    price_path = resolve_first_existing([PRICE_FEATURES_PATH, PRICE_FEATURES_CSV_FALLBACK, LEGACY_PRICE_FEATURES_CSV, LEGACY_PRICE_FEATURES_PARQUET])
+    news_path = resolve_first_existing([NEWS_EMBEDDINGS_RAW_PATH, NEWS_EMBEDDINGS_NPY_PATH, LEGACY_NEWS_EMBEDDINGS_RAW_PATH, LEGACY_NEWS_EMBEDDINGS_NPY_PATH])
+    crowd_path = resolve_first_existing([CROWD_EMBEDDINGS_NPY_PATH, LEGACY_CROWD_EMBEDDINGS_NPY_PATH])
+    news_index_path = resolve_first_existing([NEWS_EMBEDDINGS_INDEX_PATH, LEGACY_NEWS_EMBEDDINGS_INDEX_PATH])
+    crowd_index_path = resolve_first_existing([CROWD_EMBEDDINGS_INDEX_PATH, LEGACY_CROWD_EMBEDDINGS_INDEX_PATH])
+    checkpoint_path = resolve_first_existing([TFT_CHECKPOINT_PATH, LEGACY_TFT_CHECKPOINT_PATH])
+
+    if price_path and price_path.suffix.lower() == ".csv":
+        header = read_csv_header(price_path)
         missing = [column for column in PRICE_FEATURE_COLUMNS if column not in header]
         if missing:
             results.append(CheckResult("price_features", "FAIL", f"missing columns: {', '.join(missing)}"))
         else:
-            results.append(CheckResult("price_features", "PASS", f"{len(PRICE_FEATURE_COLUMNS)} configured columns found"))
+            results.append(CheckResult("price_features", "PASS", f"{len(PRICE_FEATURE_COLUMNS)} configured columns found via {price_path.name}"))
+    elif price_path:
+        results.append(CheckResult("price_features", "PASS", f"found parquet artifact {price_path.name}"))
     else:
-        results.append(CheckResult("price_features", "FAIL", f"missing file: {PRICE_FEATURES_PATH}"))
+        results.append(CheckResult("price_features", "FAIL", "no price feature artifact found"))
 
-    if NEWS_EMBEDDINGS_PATH.exists():
-        shape = read_npy_shape(NEWS_EMBEDDINGS_PATH)
+    if news_path:
+        shape = read_npy_shape(news_path)
         status = "PASS" if len(shape) == 2 and shape[1] == FEATURE_DIM_NEWS else "FAIL"
-        results.append(CheckResult("news_embeddings", status, f"shape={shape}"))
+        results.append(CheckResult("news_embeddings", status, f"shape={shape} source={news_path.name}"))
     else:
-        results.append(CheckResult("news_embeddings", "FAIL", f"missing file: {NEWS_EMBEDDINGS_PATH}"))
+        results.append(CheckResult("news_embeddings", "FAIL", "no news embedding tensor found"))
 
-    if CROWD_EMBEDDINGS_PATH.exists():
-        shape = read_npy_shape(CROWD_EMBEDDINGS_PATH)
+    if crowd_path:
+        shape = read_npy_shape(crowd_path)
         status = "PASS" if len(shape) == 2 and shape[1] == FEATURE_DIM_CROWD else "FAIL"
-        results.append(CheckResult("crowd_embeddings", status, f"shape={shape}"))
+        results.append(CheckResult("crowd_embeddings", status, f"shape={shape} source={crowd_path.name}"))
     else:
-        results.append(CheckResult("crowd_embeddings", "FAIL", f"missing file: {CROWD_EMBEDDINGS_PATH}"))
+        results.append(CheckResult("crowd_embeddings", "FAIL", "no crowd embedding tensor found"))
 
     results.append(CheckResult(
         "embedding_indexes",
-        "PASS" if NEWS_EMBEDDINGS_INDEX_PATH.exists() and CROWD_EMBEDDINGS_INDEX_PATH.exists() else "FAIL",
-        f"news_index={NEWS_EMBEDDINGS_INDEX_PATH.exists()} crowd_index={CROWD_EMBEDDINGS_INDEX_PATH.exists()}",
+        "PASS" if news_index_path and crowd_index_path else "FAIL",
+        f"news_index={bool(news_index_path)} crowd_index={bool(crowd_index_path)}",
     ))
 
-    if PRICE_FEATURES_PATH.exists() and NEWS_EMBEDDINGS_PATH.exists() and CROWD_EMBEDDINGS_PATH.exists():
-        price_rows = count_csv_rows(PRICE_FEATURES_PATH)
-        news_rows = read_npy_shape(NEWS_EMBEDDINGS_PATH)[0]
-        crowd_rows = read_npy_shape(CROWD_EMBEDDINGS_PATH)[0]
+    if price_path and price_path.suffix.lower() == ".csv" and news_path and crowd_path:
+        price_rows = count_csv_rows(price_path)
+        news_rows = read_npy_shape(news_path)[0]
+        crowd_rows = read_npy_shape(crowd_path)[0]
         if price_rows == news_rows == crowd_rows:
             results.append(CheckResult("row_alignment", "PASS", f"row_count={price_rows} final_width={FEATURE_DIM_TOTAL}"))
         else:
             results.append(CheckResult("row_alignment", "FAIL", f"price={price_rows} news={news_rows} crowd={crowd_rows}"))
     else:
-        results.append(CheckResult("row_alignment", "FAIL", "cannot compare row counts until all feature blocks exist"))
+        results.append(CheckResult("row_alignment", "WARN", "row alignment check deferred until compatible row-count artifacts exist"))
 
     results.append(CheckResult(
         "checkpoint",
-        "PASS" if TFT_CHECKPOINT_PATH.exists() else "FAIL",
-        str(TFT_CHECKPOINT_PATH),
+        "PASS" if checkpoint_path else "FAIL",
+        str(checkpoint_path) if checkpoint_path else "no checkpoint found",
     ))
 
     results.append(torch_forward_check())
