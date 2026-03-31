@@ -1,0 +1,705 @@
+from __future__ import annotations
+
+import json
+import hashlib
+import math
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Iterable
+
+import numpy as np
+import pandas as pd
+
+from config.project_config import CROWD_EVENTS_PATH, FEATURE_DIM_CROWD, FEATURE_DIM_NEWS, NEWS_EVENTS_PATH, PRICE_FEATURE_COLUMNS, SEQUENCE_LEN
+from src.mcts.cone import build_probability_cone
+from src.mcts.reverse_collapse import reverse_collapse
+from src.mcts.tree import dominant_persona_name, expand_binary_tree, iter_leaves
+from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vectors, reduce_text_embeddings
+from src.simulation.abm import persona_vote_breakdown, simulate_one_step
+from src.simulation.personas import default_personas
+
+USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
+
+SYMBOL_CONFIG: dict[str, dict[str, Any]] = {
+    "XAUUSD": {
+        "ticker": "GC=F",
+        "label": "Gold",
+        "news_query": "gold OR xauusd OR fed OR cpi OR dollar",
+        "discussion_query": "gold OR xauusd OR fed OR cpi",
+    },
+    "EURUSD": {
+        "ticker": "EURUSD=X",
+        "label": "EUR/USD",
+        "news_query": "eurusd OR euro dollar OR ecb OR fed",
+        "discussion_query": "eurusd OR euro OR dxy",
+    },
+    "BTCUSD": {
+        "ticker": "BTC-USD",
+        "label": "Bitcoin",
+        "news_query": "bitcoin OR btcusd OR crypto regulation OR etf",
+        "discussion_query": "bitcoin OR btc OR crypto",
+    },
+}
+
+MACRO_TICKERS: dict[str, str] = {
+    "dollar_proxy": "UUP",
+    "volatility": "^VIX",
+    "rates_10y": "^TNX",
+    "bonds": "TLT",
+}
+
+_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _fetch_url(url: str, timeout: int = 20) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def _fetch_json(url: str, timeout: int = 20) -> Any:
+    return json.loads(_fetch_url(url, timeout=timeout).decode("utf-8"))
+
+
+def _cached(key: str, ttl_seconds: int, factory):
+    now = time.time()
+    cached = _CACHE.get(key)
+    if cached is not None and now - cached[0] <= ttl_seconds:
+        return cached[1]
+    value = factory()
+    _CACHE[key] = (now, value)
+    return value
+
+
+def _symbol_settings(symbol: str) -> dict[str, Any]:
+    upper = symbol.strip().upper()
+    return SYMBOL_CONFIG.get(upper, SYMBOL_CONFIG["XAUUSD"]) | {"symbol": upper}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return default
+        return number
+    except Exception:
+        return default
+
+
+def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
+    delta = series.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.fillna(50.0)
+
+
+def _fetch_yahoo_chart(ticker: str, interval: str, range_: str) -> pd.DataFrame:
+    encoded = urllib.parse.quote(ticker, safe="")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval={interval}&range={range_}&includePrePost=false&events=div%2Csplits"
+    payload = _fetch_json(url)
+    result = payload["chart"]["result"][0]
+    timestamps = result.get("timestamp") or []
+    quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
+            "open": quote.get("open", []),
+            "high": quote.get("high", []),
+            "low": quote.get("low", []),
+            "close": quote.get("close", []),
+            "volume": quote.get("volume", []),
+        }
+    )
+    frame = frame.dropna(subset=["timestamp", "open", "high", "low", "close"]).copy()
+    if frame.empty:
+        raise ValueError(f"No chart data returned for {ticker}")
+    frame["timestamp"] = frame["timestamp"].dt.tz_convert("UTC")
+    frame = frame.set_index("timestamp").sort_index()
+    frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+    return frame
+
+
+def fetch_recent_market_candles(symbol: str, interval: str = "5m", range_: str = "5d") -> pd.DataFrame:
+    settings = _symbol_settings(symbol)
+    cache_key = f"candles:{settings['ticker']}:{interval}:{range_}"
+    return _cached(cache_key, 45, lambda: _fetch_yahoo_chart(settings["ticker"], interval=interval, range_=range_))
+
+
+def _score_news_text(text: str, market_label: str) -> float:
+    lower = text.lower()
+    bullish_terms = [
+        "dovish",
+        "rate cut",
+        "cuts",
+        "cooling inflation",
+        "weak dollar",
+        "dollar slips",
+        "safe haven",
+        "demand rises",
+        "accumulation",
+        "buying interest",
+        market_label.lower(),
+    ]
+    bearish_terms = [
+        "hawkish",
+        "rate hike",
+        "higher yields",
+        "strong dollar",
+        "dollar rises",
+        "profit-taking",
+        "sell-off",
+        "liquidation",
+        "risk-on",
+        "breakdown",
+    ]
+    score = 0.0
+    for term in bullish_terms:
+        if term in lower:
+            score += 1.0
+    for term in bearish_terms:
+        if term in lower:
+            score -= 1.0
+    return float(np.tanh(score / 3.0))
+
+
+def _read_rss_items(url: str, limit: int) -> list[dict[str, Any]]:
+    raw = _fetch_url(url)
+    root = ET.fromstring(raw)
+    items: list[dict[str, Any]] = []
+    for item in root.findall(".//item")[:limit]:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        published_raw = (item.findtext("pubDate") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        source = (item.findtext("source") or "").strip()
+        published_at: str | None = None
+        if published_raw:
+            try:
+                parsed = pd.to_datetime(published_raw, utc=True)
+                published_at = parsed.isoformat()
+            except Exception:
+                published_at = None
+        if title:
+            items.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "published_at": published_at,
+                    "description": description,
+                    "source": source or "rss",
+                }
+            )
+    return items
+
+
+def fetch_live_news(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
+    settings = _symbol_settings(symbol)
+    query = urllib.parse.quote(settings["news_query"])
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+    def _factory():
+        try:
+            items = _read_rss_items(url, limit=limit)
+        except Exception:
+            items = []
+        output = []
+        for item in items:
+            sentiment = _score_news_text(item["title"], settings["label"])
+            output.append(item | {"sentiment": round(sentiment, 4)})
+        if not output and NEWS_EVENTS_PATH.exists():
+            try:
+                frame = pd.read_parquet(NEWS_EVENTS_PATH).tail(limit)
+                for _, row in frame.iterrows():
+                    title = str(row.get("text", "")).strip()
+                    if not title:
+                        continue
+                    output.append(
+                        {
+                            "title": title,
+                            "link": str(row.get("url", "")),
+                            "published_at": pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce").isoformat() if row.get("timestamp") is not None else None,
+                            "description": "",
+                            "source": str(row.get("source", "local_news_store")),
+                            "sentiment": round(_score_news_text(title, settings["label"]), 4),
+                        }
+                    )
+            except Exception:
+                pass
+        return output
+
+    return _cached(f"news:{settings['symbol']}", 180, _factory)
+
+
+def _discussion_classification(score: float) -> str:
+    if score >= 0.55:
+        return "greed"
+    if score <= -0.55:
+        return "fear"
+    return "uncertain"
+
+
+def fetch_public_discussions(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
+    settings = _symbol_settings(symbol)
+    query = urllib.parse.quote(settings["discussion_query"])
+    url = f"https://www.reddit.com/search.rss?q={query}&sort=new&t=day"
+
+    def _factory():
+        try:
+            items = _read_rss_items(url, limit=limit)
+        except Exception:
+            items = []
+        output = []
+        for item in items:
+            text = " ".join(part for part in [item["title"], item.get("description", "")] if part)
+            sentiment = _score_news_text(text, settings["label"])
+            output.append(
+                {
+                    "title": item["title"],
+                    "link": item["link"],
+                    "published_at": item["published_at"],
+                    "source": "reddit_rss",
+                    "sentiment": round(sentiment, 4),
+                    "classification": _discussion_classification(sentiment),
+                }
+            )
+        if not output and CROWD_EVENTS_PATH.exists():
+            try:
+                frame = pd.read_parquet(CROWD_EVENTS_PATH).tail(limit)
+                for _, row in frame.iterrows():
+                    source = str(row.get("source", "local_crowd_store"))
+                    classification = str(row.get("classification", "uncertain"))
+                    value = _safe_float(row.get("value", 50.0), 50.0)
+                    sentiment = float(np.tanh((value - 50.0) / 18.0))
+                    output.append(
+                        {
+                            "title": f"{source} sentiment proxy",
+                            "link": "",
+                            "published_at": pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce").isoformat() if row.get("timestamp") is not None else None,
+                            "source": source,
+                            "sentiment": round(sentiment, 4),
+                            "classification": classification,
+                        }
+                    )
+            except Exception:
+                pass
+        return output
+
+    return _cached(f"discussions:{settings['symbol']}", 180, _factory)
+
+
+def _fallback_embed_texts(texts: Iterable[str], output_dim: int) -> np.ndarray:
+    text_list = list(texts)
+    rows = np.zeros((len(text_list), output_dim), dtype=np.float32)
+    for row_index, text in enumerate(text_list):
+        for token in text.lower().split():
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            bucket = int.from_bytes(digest[:4], byteorder="little", signed=False) % output_dim
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            rows[row_index, bucket] += sign
+        norm = float(np.linalg.norm(rows[row_index]))
+        if norm > 0:
+            rows[row_index] /= norm
+    return rows
+
+
+def _embed_texts(texts: list[str], output_dim: int) -> np.ndarray:
+    try:
+        return reduce_text_embeddings(texts, output_dim)
+    except Exception:
+        return _fallback_embed_texts(texts, output_dim)
+
+
+def fetch_fear_greed_snapshot() -> dict[str, Any]:
+    def _factory():
+        payload = _fetch_json("https://api.alternative.me/fng/?limit=5&format=json")
+        rows = payload.get("data", [])
+        if not rows:
+            return {"value": 50.0, "classification": "neutral", "history": []}
+        history = []
+        for row in rows:
+            value = _safe_float(row.get("value"), 50.0)
+            timestamp = pd.to_datetime(int(row.get("timestamp", 0)), unit="s", utc=True).isoformat()
+            history.append(
+                {
+                    "value": value,
+                    "classification": str(row.get("value_classification", "neutral")),
+                    "timestamp": timestamp,
+                }
+            )
+        latest = history[0]
+        return {"value": latest["value"], "classification": latest["classification"], "history": history}
+
+    return _cached("fear_greed", 300, _factory)
+
+
+def fetch_macro_context() -> dict[str, Any]:
+    def _factory():
+        series: dict[str, pd.DataFrame] = {}
+        for label, ticker in MACRO_TICKERS.items():
+            try:
+                series[label] = _fetch_yahoo_chart(ticker, interval="1d", range_="3mo")
+            except Exception:
+                continue
+        if not series:
+            return {"macro_bias": 0.0, "macro_shock": 0.0, "driver": "macro_neutral", "components": {}}
+
+        def latest_zscore(frame: pd.DataFrame) -> float:
+            closes = frame["close"].astype(float)
+            rolling_mean = closes.rolling(20, min_periods=5).mean()
+            rolling_std = closes.rolling(20, min_periods=5).std(ddof=0).replace(0.0, np.nan)
+            score = ((closes - rolling_mean) / rolling_std).fillna(0.0)
+            return _safe_float(score.iloc[-1], 0.0)
+
+        components = {name: latest_zscore(frame) for name, frame in series.items()}
+        bias = np.tanh(
+            (-0.60 * components.get("dollar_proxy", 0.0))
+            + (0.35 * components.get("volatility", 0.0))
+            + (-0.35 * components.get("rates_10y", 0.0))
+            + (0.20 * components.get("bonds", 0.0))
+        )
+        shock = np.clip(
+            abs(components.get("volatility", 0.0)) * 0.45
+            + abs(components.get("dollar_proxy", 0.0)) * 0.35
+            + abs(components.get("rates_10y", 0.0)) * 0.20,
+            0.0,
+            1.0,
+        )
+        driver_map = {
+            "dollar_proxy": "dollar_regime",
+            "volatility": "risk_regime",
+            "rates_10y": "rates_regime",
+            "bonds": "bond_regime",
+        }
+        dominant_component = max(components, key=lambda name: abs(components[name]))
+        return {
+            "macro_bias": round(float(bias), 4),
+            "macro_shock": round(float(shock), 4),
+            "driver": driver_map.get(dominant_component, "macro_neutral"),
+            "components": {name: round(float(value), 4) for name, value in components.items()},
+        }
+
+    return _cached("macro_context", 240, _factory)
+
+
+def engineer_price_features(candles: pd.DataFrame) -> pd.DataFrame:
+    frame = candles.copy().sort_index()
+    frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+    if frame["volume"].max() <= 0:
+        frame["volume"] = 1.0
+
+    close = frame["close"].astype(float)
+    high = frame["high"].astype(float)
+    low = frame["low"].astype(float)
+    open_ = frame["open"].astype(float)
+    volume = frame["volume"].astype(float)
+
+    returns = {period: close.pct_change(period).fillna(0.0) for period in (1, 3, 6, 12)}
+    ema_9 = close.ewm(span=9, adjust=False).mean()
+    ema_21 = close.ewm(span=21, adjust=False).mean()
+    ema_50 = close.ewm(span=50, adjust=False).mean()
+    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_sig = macd.ewm(span=9, adjust=False).mean()
+    macd_hist = macd - macd_sig
+    rsi_14 = _compute_rsi(close, 14)
+    rsi_7 = _compute_rsi(close, 7)
+    lowest_14 = low.rolling(14, min_periods=2).min()
+    highest_14 = high.rolling(14, min_periods=2).max()
+    stoch_k = ((close - lowest_14) / (highest_14 - lowest_14).replace(0.0, np.nan) * 100.0).fillna(50.0)
+    stoch_d = stoch_k.rolling(3, min_periods=1).mean().fillna(50.0)
+
+    prev_close = close.shift(1)
+    true_range = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr_14 = true_range.rolling(14, min_periods=2).mean().bfill().fillna((high - low).mean())
+    atr_pct = (atr_14 / close.replace(0.0, np.nan)).fillna(0.0)
+
+    rolling_mean = close.rolling(20, min_periods=5).mean()
+    rolling_std = close.rolling(20, min_periods=5).std(ddof=0).replace(0.0, np.nan)
+    bb_upper = rolling_mean + 2 * rolling_std
+    bb_lower = rolling_mean - 2 * rolling_std
+    bb_width = ((bb_upper - bb_lower) / rolling_mean.replace(0.0, np.nan)).fillna(0.0)
+    bb_pct = ((close - bb_lower) / (bb_upper - bb_lower).replace(0.0, np.nan)).clip(0.0, 1.0).fillna(0.5)
+
+    candle_range = (high - low).replace(0.0, np.nan)
+    body = (close - open_).abs()
+    body_pct = (body / candle_range).fillna(0.0)
+    upper_wick = ((high - pd.concat([open_, close], axis=1).max(axis=1)) / candle_range).fillna(0.0)
+    lower_wick = ((pd.concat([open_, close], axis=1).min(axis=1) - low) / candle_range).fillna(0.0)
+    displacement = (close - open_) / atr_14.replace(0.0, np.nan)
+
+    rolling_high = high.rolling(20, min_periods=2).max()
+    rolling_low = low.rolling(20, min_periods=2).min()
+    dist_to_high = ((rolling_high - close) / atr_14.replace(0.0, np.nan)).clip(lower=0.0).fillna(0.0)
+    dist_to_low = ((close - rolling_low) / atr_14.replace(0.0, np.nan)).clip(lower=0.0).fillna(0.0)
+    hh = (high >= rolling_high.shift(1).fillna(rolling_high)).astype(float)
+    ll = (low <= rolling_low.shift(1).fillna(rolling_low)).astype(float)
+    volume_ratio = (volume / volume.rolling(20, min_periods=2).mean().replace(0.0, np.nan)).fillna(1.0)
+
+    timestamps = frame.index.tz_convert("UTC") if frame.index.tz is not None else frame.index.tz_localize("UTC")
+    hour = timestamps.hour.astype(float)
+    dow = timestamps.dayofweek.astype(float)
+    session_asian = ((hour >= 0) & (hour < 7)).astype(float)
+    session_london = ((hour >= 7) & (hour < 13)).astype(float)
+    session_ny = ((hour >= 13) & (hour < 21)).astype(float)
+    session_overlap = ((hour >= 12) & (hour < 16)).astype(float)
+    hour_sin = np.sin(2 * np.pi * hour / 24.0)
+    hour_cos = np.cos(2 * np.pi * hour / 24.0)
+    dow_sin = np.sin(2 * np.pi * dow / 7.0)
+    dow_cos = np.cos(2 * np.pi * dow / 7.0)
+
+    enriched = frame.copy()
+    enriched["return_1"] = returns[1]
+    enriched["return_3"] = returns[3]
+    enriched["return_6"] = returns[6]
+    enriched["return_12"] = returns[12]
+    enriched["rsi_14"] = rsi_14
+    enriched["rsi_7"] = rsi_7
+    enriched["macd_hist"] = macd_hist
+    enriched["macd"] = macd
+    enriched["macd_sig"] = macd_sig
+    enriched["stoch_k"] = stoch_k
+    enriched["stoch_d"] = stoch_d
+    enriched["ema_9_ratio"] = ((close / ema_9.replace(0.0, np.nan)) - 1.0).fillna(0.0)
+    enriched["ema_21_ratio"] = ((close / ema_21.replace(0.0, np.nan)) - 1.0).fillna(0.0)
+    enriched["ema_50_ratio"] = ((close / ema_50.replace(0.0, np.nan)) - 1.0).fillna(0.0)
+    enriched["ema_cross"] = np.sign(ema_9 - ema_21).astype(float)
+    enriched["atr_pct"] = atr_pct
+    enriched["atr_14"] = atr_14
+    enriched["bb_width"] = bb_width
+    enriched["bb_pct"] = bb_pct
+    enriched["body_pct"] = body_pct
+    enriched["upper_wick"] = upper_wick
+    enriched["lower_wick"] = lower_wick
+    enriched["is_bullish"] = (close >= open_).astype(float)
+    enriched["displacement"] = displacement.fillna(0.0)
+    enriched["dist_to_high"] = dist_to_high
+    enriched["dist_to_low"] = dist_to_low
+    enriched["hh"] = hh
+    enriched["ll"] = ll
+    enriched["volume_ratio"] = volume_ratio
+    enriched["session_asian"] = session_asian
+    enriched["session_london"] = session_london
+    enriched["session_ny"] = session_ny
+    enriched["session_overlap"] = session_overlap
+    enriched["hour_sin"] = hour_sin
+    enriched["hour_cos"] = hour_cos
+    enriched["dow_sin"] = dow_sin
+    enriched["dow_cos"] = dow_cos
+    enriched["target_direction"] = np.where(close.shift(-1) > close, 1.0, 0.0)
+    enriched = enriched.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+    return enriched
+
+
+def _build_news_matrix(price_index: pd.Index, news_items: list[dict[str, Any]]) -> tuple[np.ndarray, float, float]:
+    if not news_items:
+        return np.zeros((len(price_index), FEATURE_DIM_NEWS), dtype=np.float32), 0.0, 0.0
+    timestamps = pd.to_datetime([item["published_at"] for item in news_items], utc=True, errors="coerce")
+    if getattr(timestamps, "tz", None) is not None:
+        timestamps = timestamps.tz_convert("UTC")
+    event_frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "text": [item["title"] for item in news_items],
+            "source": [item.get("source", "news") for item in news_items],
+        }
+    ).dropna(subset=["timestamp"])
+    if len(event_frame):
+        event_frame["timestamp"] = event_frame["timestamp"].dt.tz_localize(None)
+    vectors = _embed_texts(event_frame["text"].tolist(), FEATURE_DIM_NEWS)
+    feature_columns = [f"news_{index:02d}" for index in range(FEATURE_DIM_NEWS)]
+    if len(event_frame) == 0:
+        return np.zeros((len(price_index), FEATURE_DIM_NEWS), dtype=np.float32), 0.0, 0.0
+    embedding_frame = pd.concat([event_frame.reset_index(drop=True), pd.DataFrame(vectors, columns=feature_columns)], axis=1)
+    aligned, _ = align_event_matrix(price_index, embedding_frame, feature_columns, tolerance_minutes=240)
+    scores = np.asarray([_safe_float(item.get("sentiment"), 0.0) for item in news_items], dtype=np.float32)
+    return aligned, float(scores.mean() if len(scores) else 0.0), float(np.clip(np.abs(scores).mean() if len(scores) else 0.0, 0.0, 1.0))
+
+
+def _build_crowd_matrix(price_index: pd.Index, discussions: list[dict[str, Any]], fear_greed: dict[str, Any]) -> tuple[np.ndarray, float, float]:
+    rows: list[dict[str, Any]] = []
+    for item in discussions:
+        score = _safe_float(item.get("sentiment"), 0.0)
+        rows.append(
+            {
+                "timestamp": pd.to_datetime(item.get("published_at"), utc=True, errors="coerce"),
+                "value": 50.0 + score * 35.0,
+                "classification": item.get("classification", "uncertain"),
+                "source": item.get("source", "discussion"),
+            }
+        )
+    for item in fear_greed.get("history", []):
+        rows.append(
+            {
+                "timestamp": pd.to_datetime(item.get("timestamp"), utc=True, errors="coerce"),
+                "value": _safe_float(item.get("value"), 50.0),
+                "classification": item.get("classification", "neutral"),
+                "source": "alternative_me_fng",
+            }
+        )
+
+    if not rows:
+        return np.zeros((len(price_index), FEATURE_DIM_CROWD), dtype=np.float32), 0.0, 0.0
+    event_frame = pd.DataFrame(rows).dropna(subset=["timestamp"]).sort_values("timestamp")
+    if len(event_frame):
+        event_frame["timestamp"] = pd.to_datetime(event_frame["timestamp"], errors="coerce", utc=True).dt.tz_localize(None)
+    vectors = build_crowd_numeric_vectors(event_frame, output_dim=FEATURE_DIM_CROWD)
+    feature_columns = [f"crowd_{index:02d}" for index in range(FEATURE_DIM_CROWD)]
+    embedding_frame = pd.concat([event_frame.reset_index(drop=True), pd.DataFrame(vectors, columns=feature_columns)], axis=1)
+    aligned, _ = align_event_matrix(price_index, embedding_frame, feature_columns, tolerance_minutes=1440)
+    current_value = _safe_float(fear_greed.get("value"), 50.0)
+    crowd_bias = float(np.tanh((50.0 - current_value) / 18.0))
+    crowd_extreme = float(np.clip(abs(current_value - 50.0) / 50.0, 0.0, 1.0))
+    return aligned, crowd_bias, crowd_extreme
+
+
+def _build_persona_snapshot(decisions: dict[str, dict[str, float]]) -> dict[str, float]:
+    return {name: round(float(values.get("impact", 0.0)), 4) for name, values in decisions.items()}
+
+
+def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str) -> dict[str, Any]:
+    personas = default_personas()
+    seed_state = simulate_one_step(current_row=current_row, personas=personas, seed=42)
+    root = expand_binary_tree(current_row, personas, max_depth=5)
+    leaves = iter_leaves(root)
+    collapse = reverse_collapse(leaves)
+    horizon_steps = max(5, len(leaves[0].path_prices) if leaves and leaves[0].path_prices else 5)
+    cone = build_probability_cone(collapse, horizon_steps=horizon_steps)
+
+    last_timestamp = price_frame.index[-1]
+    last_price = float(price_frame.iloc[-1]["close"])
+    branches = []
+    for index, leaf in enumerate(sorted(leaves, key=lambda item: item.probability_weight, reverse=True), start=1):
+        prices = leaf.path_prices or [last_price]
+        timestamps = [(last_timestamp + pd.Timedelta(minutes=5 * step)).isoformat() for step in range(1, len(prices) + 1)]
+        branches.append(
+            {
+                "path_id": index,
+                "probability": round(float(leaf.probability_weight), 6),
+                "predicted_prices": [round(float(price), 5) for price in prices],
+                "timestamps": timestamps,
+                "dominant_persona": dominant_persona_name(leaf.state) if leaf.state is not None else "unknown",
+                "dominant_driver": leaf.dominant_driver,
+            }
+        )
+
+    cone_points = []
+    for point in cone.points:
+        center_price = last_price * (1.0 + ((point.center - 0.5) * 0.02 * point.horizon))
+        lower_price = max(0.0, last_price * (1.0 + ((point.lower - 0.5) * 0.02 * point.horizon)))
+        upper_price = max(center_price, last_price * (1.0 + ((point.upper - 0.5) * 0.02 * point.horizon)))
+        cone_points.append(
+            {
+                "horizon": point.horizon,
+                "timestamp": (last_timestamp + pd.Timedelta(minutes=5 * point.horizon)).isoformat(),
+                "center_probability": round(float(point.center), 6),
+                "lower_probability": round(float(point.lower), 6),
+                "upper_probability": round(float(point.upper), 6),
+                "center_price": round(float(center_price), 5),
+                "lower_price": round(float(lower_price), 5),
+                "upper_price": round(float(upper_price), 5),
+            }
+        )
+
+    direction_strength = abs(collapse.mean_probability - 0.5) * 2.0
+    overall_confidence = max(0.0, min(1.0, direction_strength * collapse.consensus_score * (1.0 - collapse.uncertainty_width * 0.35)))
+    price_change = last_price - float(price_frame.iloc[-2]["close"]) if len(price_frame) > 1 else 0.0
+    candles = [
+        {
+            "timestamp": index.isoformat(),
+            "open": round(float(row["open"]), 5),
+            "high": round(float(row["high"]), 5),
+            "low": round(float(row["low"]), 5),
+            "close": round(float(row["close"]), 5),
+            "volume": round(float(row["volume"]), 2),
+        }
+        for index, row in price_frame.tail(240).iterrows()
+    ]
+
+    return {
+        "symbol": symbol,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "simulator_mode": "market_simulator",
+        "market": {
+            "candles": candles,
+            "current_price": round(last_price, 5),
+            "price_change": round(float(price_change), 5),
+        },
+        "simulation": {
+            "mean_probability": collapse.mean_probability,
+            "uncertainty_width": collapse.uncertainty_width,
+            "consensus_score": collapse.consensus_score,
+            "overall_confidence": round(float(overall_confidence), 6),
+            "dominant_driver": collapse.dominant_driver,
+            "scenario_bias": "bullish" if collapse.mean_probability >= 0.5 else "bearish",
+        },
+        "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
+        "branches": branches,
+        "cone": cone_points,
+    }
+
+
+def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN) -> tuple[np.ndarray, dict[str, Any]]:
+    candles = fetch_recent_market_candles(symbol)
+    price_frame = engineer_price_features(candles)
+    news_items = fetch_live_news(symbol)
+    discussion_items = fetch_public_discussions(symbol)
+    fear_greed = fetch_fear_greed_snapshot()
+    if not discussion_items:
+        discussion_items = [
+            {
+                "title": f"Fear & Greed proxy: {row.get('classification', 'neutral')}",
+                "link": "",
+                "published_at": row.get("timestamp"),
+                "source": "alternative_me_fng_proxy",
+                "sentiment": round(float(np.tanh((50.0 - _safe_float(row.get('value'), 50.0)) / 18.0)), 4),
+                "classification": str(row.get("classification", "neutral")),
+            }
+            for row in fear_greed.get("history", [])[:3]
+        ]
+    macro = fetch_macro_context()
+
+    price_index = price_frame.index.tz_localize(None) if getattr(price_frame.index, "tz", None) is not None else price_frame.index
+    news_matrix, news_bias, news_intensity = _build_news_matrix(price_index, news_items)
+    crowd_matrix, crowd_bias, crowd_extreme = _build_crowd_matrix(price_index, discussion_items, fear_greed)
+
+    price_block = price_frame[PRICE_FEATURE_COLUMNS].to_numpy(dtype=np.float32, copy=True)
+    min_rows = min(len(price_block), len(news_matrix), len(crowd_matrix))
+    if min_rows < sequence_len:
+        raise ValueError(f"Not enough live rows to build a sequence of length {sequence_len}. Only found {min_rows}.")
+
+    fused = np.concatenate([price_block[:min_rows], news_matrix[:min_rows], crowd_matrix[:min_rows]], axis=1).astype(np.float32, copy=False)
+    live_frame = price_frame.iloc[:min_rows].copy()
+    latest = live_frame.iloc[-1].to_dict()
+    latest["macro_bias"] = macro["macro_bias"]
+    latest["macro_shock"] = macro["macro_shock"]
+    latest["macro_driver"] = macro["driver"]
+    latest["news_bias"] = round(float(news_bias), 4)
+    latest["news_intensity"] = round(float(news_intensity), 4)
+    latest["crowd_bias"] = round(float(crowd_bias), 4)
+    latest["crowd_extreme"] = round(float(crowd_extreme), 4)
+    latest["consensus_score"] = 0.0
+
+    payload = _branch_payload(live_frame, latest, symbol)
+    payload["feeds"] = {
+        "news": news_items,
+        "public_discussions": discussion_items,
+        "fear_greed": fear_greed,
+        "macro": macro,
+    }
+    payload["current_row"] = latest
+    return fused[-sequence_len:], payload
+
+
+def build_live_simulation(symbol: str, sequence_len: int = SEQUENCE_LEN) -> dict[str, Any]:
+    sequence, payload = build_live_sequence(symbol, sequence_len=sequence_len)
+    payload["sequence_shape"] = [int(sequence.shape[0]), int(sequence.shape[1])]
+    return payload | {"sequence": sequence.tolist()}

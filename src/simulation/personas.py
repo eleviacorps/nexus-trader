@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Mapping
 
+import numpy as np
+
 from src.simulation.strategies import StrategySignal, strategy_map
 
 
@@ -37,13 +39,53 @@ class Persona:
 
         weighted_signal /= total_weight
         weighted_confidence /= total_weight
-        final_signal = weighted_signal + rng.gauss(0.0, self.noise_level)
+        final_signal = weighted_signal + self._contextual_bias(row) + rng.gauss(0.0, self.noise_level)
+        weighted_confidence = min(0.99, weighted_confidence + self._contextual_confidence_boost(row))
 
         if final_signal > 0.15:
             return StrategySignal(direction=1, confidence=min(0.99, weighted_confidence))
         if final_signal < -0.15:
             return StrategySignal(direction=-1, confidence=min(0.99, weighted_confidence))
         return StrategySignal(direction=0, confidence=0.0)
+
+    def _contextual_bias(self, row: Mapping[str, float]) -> float:
+        macro_bias = float(row.get("macro_bias", 0.0))
+        news_bias = float(row.get("news_bias", 0.0))
+        crowd_bias = float(row.get("crowd_bias", 0.0))
+        crowd_extreme = float(row.get("crowd_extreme", 0.0))
+        displacement = float(row.get("displacement", 0.0))
+
+        if self.name == "retail":
+            return (0.15 * news_bias) + (0.34 * crowd_bias) + (0.18 * crowd_extreme * (1.0 if displacement >= 0 else -1.0))
+        if self.name == "institutional":
+            return (0.40 * macro_bias) + (0.12 * news_bias) - (0.10 * crowd_bias * crowd_extreme)
+        if self.name == "algo":
+            return (0.08 * macro_bias) + (0.05 * news_bias) + (0.06 * np.tanh(displacement))
+        if self.name == "whale":
+            return (0.30 * macro_bias) - (0.28 * crowd_bias * max(0.3, crowd_extreme)) + (0.10 * news_bias)
+        if self.name == "noise":
+            return (0.12 * news_bias) + (0.20 * crowd_bias) + rng_gauss_like(crowd_extreme)
+        return 0.0
+
+    def _contextual_confidence_boost(self, row: Mapping[str, float]) -> float:
+        macro_shock = abs(float(row.get("macro_shock", 0.0)))
+        news_intensity = abs(float(row.get("news_intensity", 0.0)))
+        crowd_extreme = abs(float(row.get("crowd_extreme", 0.0)))
+        if self.name == "institutional":
+            return 0.08 * macro_shock + 0.04 * news_intensity
+        if self.name == "whale":
+            return 0.06 * macro_shock + 0.06 * crowd_extreme
+        if self.name == "retail":
+            return 0.03 * news_intensity + 0.06 * crowd_extreme
+        if self.name == "algo":
+            return 0.03 * macro_shock
+        if self.name == "noise":
+            return 0.02 * crowd_extreme
+        return 0.0
+
+
+def rng_gauss_like(scale: float) -> float:
+    return random.uniform(-1.0, 1.0) * min(max(scale, 0.0), 1.0) * 0.08
 
 
 def default_personas() -> Dict[str, Persona]:

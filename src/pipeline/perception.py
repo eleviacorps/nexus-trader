@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -99,7 +100,17 @@ def reduce_text_embeddings(texts: Sequence[str], output_dim: int, hash_dim: int 
     if not texts:
         return np.zeros((0, output_dim), dtype=np.float32)
     if HashingVectorizer is None or TruncatedSVD is None:
-        raise ImportError("scikit-learn is required for text embedding reduction.")
+        matrix = np.zeros((len(texts), output_dim), dtype=np.float32)
+        for row_index, text in enumerate(texts):
+            for token in str(text).lower().split():
+                digest = hashlib.sha256(token.encode("utf-8")).digest()
+                bucket = int.from_bytes(digest[:4], byteorder="little", signed=False) % output_dim
+                sign = 1.0 if digest[4] % 2 == 0 else -1.0
+                matrix[row_index, bucket] += sign
+            norm = float(np.linalg.norm(matrix[row_index]))
+            if norm > 0.0:
+                matrix[row_index] /= norm
+        return matrix
 
     vectorizer = HashingVectorizer(
         n_features=max(hash_dim, output_dim),

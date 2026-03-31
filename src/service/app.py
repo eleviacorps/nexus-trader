@@ -19,6 +19,8 @@ from config.project_config import (
     TFT_CHECKPOINT_PATH,
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
+from src.service.live_data import build_live_simulation
+from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
 
 try:
@@ -123,6 +125,19 @@ class ModelServer:
             feature_dim=self.feature_dim,
         )
 
+    def predict_dict(self, sequence: list[list[float]]) -> dict[str, Any]:
+        response = self.predict(sequence)
+        if hasattr(response, "model_dump"):
+            return response.model_dump()  # type: ignore[no-any-return]
+        return {
+            "bullish_probability": float(response.bullish_probability),
+            "bearish_probability": float(response.bearish_probability),
+            "signal": str(response.signal),
+            "threshold": float(response.threshold),
+            "sequence_len": int(response.sequence_len),
+            "feature_dim": int(response.feature_dim),
+        }
+
 
 def create_app() -> Any:
     if FastAPI is None:
@@ -149,12 +164,22 @@ def create_app() -> Any:
     def latest_branches():
         return load_json_artifact(FUTURE_BRANCHES_PATH) if FUTURE_BRANCHES_PATH.exists() else []
 
+    @app.get('/api/simulate-live')
+    def simulate_live(symbol: str = 'XAUUSD'):
+        payload = build_live_simulation(symbol, sequence_len=server.sequence_len)
+        sequence = payload.pop('sequence', None)
+        if sequence:
+            try:
+                payload['model_prediction'] = server.predict_dict(sequence)
+            except Exception as exc:  # pragma: no cover
+                payload['model_prediction'] = {'error': str(exc)}
+        else:
+            payload['model_prediction'] = None
+        return payload
+
     @app.get('/ui', response_class=HTMLResponse)
     def ui():
-        for path in [FINAL_DASHBOARD_HTML_PATH, PROBABILITY_CONE_HTML_PATH, PERSONA_BREAKDOWN_HTML_PATH]:
-            if path.exists():
-                return path.read_text(encoding='utf-8')
-        return '<html><body><h1>Nexus Trader UI not generated yet.</h1></body></html>'
+        return render_web_app_html()
 
     @app.post('/predict', response_model=PredictResponse)
     def predict(request: PredictRequest):

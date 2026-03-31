@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from config.project_config import FINAL_DASHBOARD_HTML_PATH, FUTURE_BRANCHES_PATH, LATEST_MARKET_SNAPSHOT_PATH, MODEL_MANIFEST_PATH
+from src.service.live_data import build_live_simulation
 from src.service.app import ModelServer
 
 try:
@@ -38,6 +39,12 @@ if FastMCP is not None:
     def predict_direction(sequence: list[list[float]]) -> dict[str, Any]:
         server = ModelServer()
         return server.predict(sequence).model_dump()
+
+    @mcp.tool()
+    def simulate_live_market(symbol: str = "XAUUSD") -> dict[str, Any]:
+        payload = build_live_simulation(symbol)
+        payload.pop("sequence", None)
+        return payload
 
     @mcp.resource('nexus://dashboard')
     def dashboard_html() -> str:
