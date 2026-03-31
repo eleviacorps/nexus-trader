@@ -6,3 +6,5 @@ fastapi
 uvicorn[standard]
 pydantic
 torch
+plotly
+mcp

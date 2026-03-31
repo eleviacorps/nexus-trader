@@ -38,7 +38,10 @@ def simulate_one_step(
 ) -> SyntheticMarketState:
     rng = random.Random(seed)
     current_price = float(current_row.get("close", 0.0))
-    atr = float(current_row.get("atr_14", max(current_price * 0.001, 1e-6)))
+    atr = float(current_row.get("atr_14", 0.0))
+    if atr <= 0.0:
+        atr_pct = float(current_row.get("atr_pct", 0.0))
+        atr = max(abs(current_price) * max(atr_pct, 1e-6), max(current_price * 0.001, 1e-6))
 
     buy_pressure = 0.0
     sell_pressure = 0.0

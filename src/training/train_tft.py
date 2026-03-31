@@ -68,14 +68,20 @@ def build_optimizer(model: Any, old_layers_lr: float = 1e-4, new_layers_lr: floa
     return torch.optim.AdamW(model.parameters(), lr=old_layers_lr)
 
 
-def weighted_binary_loss(predictions, targets, sim_targets=None, sim_confidence=None):
+def weighted_binary_loss(predictions, targets, sim_targets=None, sim_confidence=None, sample_weights=None):
     if torch is None:
         raise ImportError("PyTorch is required for loss computation.")
-    real_loss = F.binary_cross_entropy(predictions, targets)
+    if sample_weights is None:
+        real_loss = F.binary_cross_entropy(predictions, targets)
+    else:
+        real_loss = F.binary_cross_entropy(predictions, targets, reduction="none")
+        real_loss = (real_loss * sample_weights).mean()
     if sim_targets is None or sim_confidence is None:
         return real_loss
     sim_weight = torch.clamp((sim_confidence - 0.3) / 0.7, 0.0, 1.0)
     sim_loss = F.binary_cross_entropy(predictions, sim_targets, reduction="none")
+    if sample_weights is not None:
+        sim_loss = sim_loss * sample_weights
     combined = (3.0 * real_loss + (sim_weight * sim_loss).mean()) / (3.0 + sim_weight.mean().clamp(min=1e-6))
     return combined
 
@@ -179,11 +185,17 @@ def evaluate_binary_model(model, dataloader, device, threshold: float = 0.5) -> 
     losses = []
     with torch.no_grad():
         for batch in dataloader:
+            sample_weights = None
             if len(batch) == 2:
                 features, targets = batch
                 sim_targets = sim_conf = None
-            else:
+            elif len(batch) == 3:
+                features, targets, sample_weights = batch
+                sim_targets = sim_conf = None
+            elif len(batch) == 4:
                 features, targets, sim_targets, sim_conf = batch
+            else:
+                features, targets, sim_targets, sim_conf, sample_weights = batch
             features = features.to(device)
             targets = targets.to(device)
             probs = model(features)
@@ -192,6 +204,7 @@ def evaluate_binary_model(model, dataloader, device, threshold: float = 0.5) -> 
                 targets,
                 sim_targets.to(device) if sim_targets is not None else None,
                 sim_conf.to(device) if sim_conf is not None else None,
+                sample_weights.to(device) if sample_weights is not None else None,
             )
             losses.append(float(loss.item()))
             all_targets.append(targets.detach().cpu().numpy())
@@ -211,6 +224,7 @@ def train_binary_model(
     optimizer,
     epochs: int,
     patience: int,
+    selection_metric: str = "accuracy",
 ):
     if torch is None:
         raise ImportError("PyTorch is required for training.")
@@ -225,19 +239,26 @@ def train_binary_model(
         model.train()
         epoch_losses = []
         for batch in train_loader:
+            sample_weights = None
             if len(batch) == 2:
                 features, targets = batch
                 sim_targets = sim_conf = None
-            else:
+            elif len(batch) == 3:
+                features, targets, sample_weights = batch
+                sim_targets = sim_conf = None
+            elif len(batch) == 4:
                 features, targets, sim_targets, sim_conf = batch
+            else:
+                features, targets, sim_targets, sim_conf, sample_weights = batch
             features = features.to(device)
             targets = targets.to(device)
             sim_targets = sim_targets.to(device) if sim_targets is not None else None
             sim_conf = sim_conf.to(device) if sim_conf is not None else None
+            sample_weights = sample_weights.to(device) if sample_weights is not None else None
 
             optimizer.zero_grad(set_to_none=True)
             probs = model(features)
-            loss = weighted_binary_loss(probs, targets, sim_targets, sim_conf)
+            loss = weighted_binary_loss(probs, targets, sim_targets, sim_conf, sample_weights)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -248,7 +269,7 @@ def train_binary_model(
         epoch_record = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
         history.append(epoch_record)
 
-        score = val_metrics.get("accuracy", 0.0)
+        score = val_metrics.get(selection_metric, 0.0)
         if score > best_score:
             best_score = score
             patience_left = patience

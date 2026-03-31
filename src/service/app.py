@@ -6,10 +6,15 @@ from typing import Any
 
 from config.project_config import (
     FEATURE_DIM_TOTAL,
+    FINAL_DASHBOARD_HTML_PATH,
+    FUTURE_BRANCHES_PATH,
     LEGACY_TFT_CHECKPOINT_PATH,
+    LATEST_MARKET_SNAPSHOT_PATH,
     MODEL_MANIFEST_PATH,
     MODEL_SERVICE_HOST,
     MODEL_SERVICE_PORT,
+    PERSONA_BREAKDOWN_HTML_PATH,
+    PROBABILITY_CONE_HTML_PATH,
     SEQUENCE_LEN,
     TFT_CHECKPOINT_PATH,
 )
@@ -23,17 +28,19 @@ except ImportError:  # pragma: no cover
 
 try:
     from fastapi import FastAPI  # type: ignore
+    from fastapi.responses import HTMLResponse  # type: ignore
     from pydantic import BaseModel, Field  # type: ignore
 except ImportError:  # pragma: no cover
     FastAPI = None
     BaseModel = object  # type: ignore
+    HTMLResponse = str  # type: ignore
 
     def Field(default: Any, **_: Any):  # type: ignore
         return default
 
 
 class PredictRequest(BaseModel):  # type: ignore[misc]
-    sequence: list[list[float]] = Field(..., description="Sequence of shape [sequence_len, feature_dim]")
+    sequence: list[list[float]] = Field(..., description='Sequence of shape [sequence_len, feature_dim]')
 
 
 class PredictResponse(BaseModel):  # type: ignore[misc]
@@ -47,24 +54,30 @@ class PredictResponse(BaseModel):  # type: ignore[misc]
 
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
     if len(sequence) != sequence_len:
-        raise ValueError(f"Expected sequence length {sequence_len}, got {len(sequence)}")
+        raise ValueError(f'Expected sequence length {sequence_len}, got {len(sequence)}')
     for row_index, row in enumerate(sequence):
         if len(row) != feature_dim:
-            raise ValueError(f"Expected feature width {feature_dim} at row {row_index}, got {len(row)}")
+            raise ValueError(f'Expected feature width {feature_dim} at row {row_index}, got {len(row)}')
 
 
 def classify_probability(probability: float, threshold: float) -> str:
-    return "bullish" if probability >= threshold else "bearish"
+    return 'bullish' if probability >= threshold else 'bearish'
 
 
 def load_model_manifest() -> dict[str, Any]:
     if not MODEL_MANIFEST_PATH.exists():
         return {
-            "sequence_len": SEQUENCE_LEN,
-            "feature_dim": FEATURE_DIM_TOTAL,
-            "classification_threshold": 0.5,
+            'sequence_len': SEQUENCE_LEN,
+            'feature_dim': FEATURE_DIM_TOTAL,
+            'classification_threshold': 0.5,
         }
-    return json.loads(MODEL_MANIFEST_PATH.read_text(encoding="utf-8"))
+    return json.loads(MODEL_MANIFEST_PATH.read_text(encoding='utf-8'))
+
+
+def load_json_artifact(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding='utf-8'))
 
 
 def _resolve_checkpoint() -> Path:
@@ -72,20 +85,27 @@ def _resolve_checkpoint() -> Path:
         return TFT_CHECKPOINT_PATH
     if LEGACY_TFT_CHECKPOINT_PATH.exists():
         return LEGACY_TFT_CHECKPOINT_PATH
-    raise FileNotFoundError("No trained checkpoint available for inference.")
+    raise FileNotFoundError('No trained checkpoint available for inference.')
 
 
 class ModelServer:
     def __init__(self) -> None:
         if torch is None:
-            raise ImportError("PyTorch is required for inference.")
+            raise ImportError('PyTorch is required for inference.')
         self.manifest = load_model_manifest()
-        self.sequence_len = int(self.manifest.get("sequence_len", SEQUENCE_LEN))
-        self.feature_dim = int(self.manifest.get("feature_dim", FEATURE_DIM_TOTAL))
-        self.threshold = float(self.manifest.get("classification_threshold", 0.5))
+        self.sequence_len = int(self.manifest.get('sequence_len', SEQUENCE_LEN))
+        self.feature_dim = int(self.manifest.get('feature_dim', FEATURE_DIM_TOTAL))
+        self.threshold = float(self.manifest.get('classification_threshold', 0.5))
         self.device = get_torch_device()
-        self.model = NexusTFT(NexusTFTConfig()).to(self.device)
-        load_checkpoint_with_expansion(self.model, _resolve_checkpoint())
+        config_payload = self.manifest.get('model_config', {})
+        config = NexusTFTConfig(
+            input_dim=int(config_payload.get('input_dim', self.feature_dim)),
+            hidden_dim=int(config_payload.get('hidden_dim', 128)),
+            lstm_layers=int(config_payload.get('lstm_layers', 2)),
+            dropout=float(config_payload.get('dropout', 0.1)),
+        )
+        self.model = NexusTFT(config).to(self.device)
+        load_checkpoint_with_expansion(self.model, _resolve_checkpoint(), new_input_dim=config.input_dim)
         self.model.eval()
 
     def predict(self, sequence: list[list[float]]) -> PredictResponse:
@@ -106,27 +126,44 @@ class ModelServer:
 
 def create_app() -> Any:
     if FastAPI is None:
-        raise ImportError("fastapi and pydantic are required to create the inference app.")
+        raise ImportError('fastapi and pydantic are required to create the inference app.')
 
     server = ModelServer()
-    app = FastAPI(title="Nexus Trader Inference API", version="0.1.0")
+    app = FastAPI(title='Nexus Trader Inference API', version='0.2.0')
 
-    @app.get("/health")
+    @app.get('/health')
     def health():
-        return {"status": "ok", "sequence_len": server.sequence_len, "feature_dim": server.feature_dim}
+        return {'status': 'ok', 'sequence_len': server.sequence_len, 'feature_dim': server.feature_dim}
 
-    @app.get("/metadata")
+    @app.get('/metadata')
     def metadata():
-        return server.manifest
+        payload = dict(server.manifest)
+        payload['latest_snapshot'] = load_json_artifact(LATEST_MARKET_SNAPSHOT_PATH)
+        return payload
 
-    @app.post("/predict", response_model=PredictResponse)
+    @app.get('/latest-cone')
+    def latest_cone():
+        return load_json_artifact(LATEST_MARKET_SNAPSHOT_PATH)
+
+    @app.get('/latest-branches')
+    def latest_branches():
+        return load_json_artifact(FUTURE_BRANCHES_PATH) if FUTURE_BRANCHES_PATH.exists() else []
+
+    @app.get('/ui', response_class=HTMLResponse)
+    def ui():
+        for path in [FINAL_DASHBOARD_HTML_PATH, PROBABILITY_CONE_HTML_PATH, PERSONA_BREAKDOWN_HTML_PATH]:
+            if path.exists():
+                return path.read_text(encoding='utf-8')
+        return '<html><body><h1>Nexus Trader UI not generated yet.</h1></body></html>'
+
+    @app.post('/predict', response_model=PredictResponse)
     def predict(request: PredictRequest):
         return server.predict(request.sequence)
 
     return app
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == '__main__':  # pragma: no cover
     import uvicorn
 
     uvicorn.run(create_app(), host=MODEL_SERVICE_HOST, port=MODEL_SERVICE_PORT)

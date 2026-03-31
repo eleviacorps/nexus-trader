@@ -35,6 +35,9 @@ Default endpoints:
 
 - `GET /health`
 - `GET /metadata`
+- `GET /latest-cone`
+- `GET /latest-branches`
+- `GET /ui`
 - `POST /predict`
 
 `/predict` expects a JSON body shaped like:
@@ -60,3 +63,5 @@ docker run --rm -p 8000:8000 \
 - The current API is suitable for serving a trained checkpoint, not for online training.
 - Training should stay on the ROCm host until a dedicated ROCm container base image is chosen.
 - Accuracy targets in live markets should be validated with walk-forward backtests and leakage checks before any trading use.
+- The final UI bundle can be generated with `python scripts/build_branching_ui.py`.
+- An MCP surface is available via `python -m src.mcp.server` once the `mcp` package is installed.

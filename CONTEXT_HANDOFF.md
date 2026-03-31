@@ -344,6 +344,28 @@ This project is Nexus Trader, a cloud-first persona-simulation + branching + rev
 The remote Jupyter ROCm server has already been accessed successfully, the repo has already been synced there, validation/tests have already passed remotely, and remote fused training smoke runs have already completed.
 Do not assume the full SVG-described system is already implemented.
 Treat the current system as partially implemented and currently only achieving about 51% to 52% sample-run accuracy remotely.
+
+## Latest Update
+
+Since this handoff was first written, the repo has been extended further with:
+
+- a real persona-output build step from macro/news/crowd context
+- simulation supervision artifacts for training
+- configurable training parameters and context window controls
+- sample-weighted training support
+- year-based split helpers
+- a branching/UI generation script for candlestick + cone output
+- an MCP server surface
+- new durable docs:
+  - `MODEL_QUALITY_EXECUTION_PLAN.md`
+  - `PROJECT_MASTER_SUMMARY.md`
+  - `MCP_READY.md`
+
+Important:
+
+- The codebase is now materially closer to the intended final product.
+- This still does not justify any claim of true `90%+` prediction accuracy.
+- The right next step remains honest model-quality work, walk-forward evaluation, and verified larger runs.
 Continue from the next highest-value implementation step rather than rebuilding context from scratch.
 ```
 
