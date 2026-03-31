@@ -17,6 +17,8 @@ except ImportError as exc:  # pragma: no cover
 from config.project_config import (  # noqa: E402
     FINAL_DASHBOARD_HTML_PATH,
     FUTURE_BRANCHES_PATH,
+    LEGACY_PRICE_FEATURES_CSV,
+    LEGACY_PRICE_FEATURES_PARQUET,
     LATEST_MARKET_SNAPSHOT_PATH,
     PERSONA_OUTPUTS_PATH,
     PERSONA_WEIGHT_HISTORY_PATH,
@@ -159,4 +161,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
