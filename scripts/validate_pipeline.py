@@ -66,6 +66,7 @@ def main() -> int:
         FEATURE_DIM_CROWD,
         FEATURE_DIM_NEWS,
         FEATURE_DIM_TOTAL,
+        CROWD_EVENTS_PATH,
         LEGACY_CROWD_EMBEDDINGS_INDEX_PATH,
         LEGACY_CROWD_EMBEDDINGS_NPY_PATH,
         LEGACY_NEWS_EMBEDDINGS_INDEX_PATH,
@@ -74,12 +75,18 @@ def main() -> int:
         LEGACY_PRICE_FEATURES_CSV,
         LEGACY_PRICE_FEATURES_PARQUET,
         LEGACY_TFT_CHECKPOINT_PATH,
+        MACRO_FEATURES_PATH,
+        NEWS_EVENTS_PATH,
         NEWS_EMBEDDINGS_INDEX_PATH,
         NEWS_EMBEDDINGS_NPY_PATH,
         NEWS_EMBEDDINGS_RAW_PATH,
+        PERSONA_OUTPUTS_PATH,
+        PERSONA_WEIGHT_HISTORY_PATH,
         PRICE_FEATURES_CSV_FALLBACK,
         PRICE_FEATURES_PATH,
         PRICE_FEATURE_COLUMNS,
+        SIM_CONFIDENCE_PATH,
+        SIM_TARGETS_PATH,
         TFT_CHECKPOINT_PATH,
     )
 
@@ -122,6 +129,37 @@ def main() -> int:
         "embedding_indexes",
         "PASS" if news_index_path and crowd_index_path else "FAIL",
         f"news_index={bool(news_index_path)} crowd_index={bool(crowd_index_path)}",
+    ))
+
+    results.append(CheckResult(
+        "macro_features",
+        "PASS" if MACRO_FEATURES_PATH.exists() else "WARN",
+        str(MACRO_FEATURES_PATH) if MACRO_FEATURES_PATH.exists() else "macro context not built yet",
+    ))
+    results.append(CheckResult(
+        "news_events",
+        "PASS" if NEWS_EVENTS_PATH.exists() else "WARN",
+        str(NEWS_EVENTS_PATH) if NEWS_EVENTS_PATH.exists() else "news events parquet not built yet",
+    ))
+    results.append(CheckResult(
+        "crowd_events",
+        "PASS" if CROWD_EVENTS_PATH.exists() else "WARN",
+        str(CROWD_EVENTS_PATH) if CROWD_EVENTS_PATH.exists() else "crowd events parquet not built yet",
+    ))
+    results.append(CheckResult(
+        "persona_outputs",
+        "PASS" if PERSONA_OUTPUTS_PATH.exists() else "WARN",
+        str(PERSONA_OUTPUTS_PATH) if PERSONA_OUTPUTS_PATH.exists() else "persona outputs parquet not built yet",
+    ))
+    results.append(CheckResult(
+        "persona_weight_history",
+        "PASS" if PERSONA_WEIGHT_HISTORY_PATH.exists() else "WARN",
+        str(PERSONA_WEIGHT_HISTORY_PATH) if PERSONA_WEIGHT_HISTORY_PATH.exists() else "persona weight history parquet not built yet",
+    ))
+    results.append(CheckResult(
+        "simulation_targets",
+        "PASS" if SIM_TARGETS_PATH.exists() and SIM_CONFIDENCE_PATH.exists() else "WARN",
+        f"sim_targets={SIM_TARGETS_PATH.exists()} sim_confidence={SIM_CONFIDENCE_PATH.exists()}",
     ))
 
     if price_path and price_path.suffix.lower() == ".csv" and news_path and crowd_path:

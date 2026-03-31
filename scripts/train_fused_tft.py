@@ -21,6 +21,8 @@ from config.project_config import (  # noqa: E402
     LOOKAHEAD,
     MODEL_MANIFEST_PATH,
     SEQUENCE_LEN,
+    SIM_CONFIDENCE_PATH,
+    SIM_TARGETS_PATH,
     TARGETS_PATH,
     TEST_SPLIT,
     TRAINING_SUMMARY_PATH,
@@ -55,12 +57,33 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit(f"PyTorch is required for training: {exc}")
 
 
-def build_loaders(feature_path: Path, target_path: Path, batch_size: int):
+def build_loaders(feature_path: Path, target_path: Path, batch_size: int, sim_target_path: Path | None = None, sim_confidence_path: Path | None = None):
     total_rows = len(np.load(target_path, mmap_mode="r"))
     train_slice, val_slice, test_slice = split_row_slices(total_rows, SEQUENCE_LEN, TRAIN_SPLIT, VAL_SPLIT)
-    train_ds = FusedSequenceDataset(feature_path, target_path, sequence_len=SEQUENCE_LEN, row_slice=train_slice)
-    val_ds = FusedSequenceDataset(feature_path, target_path, sequence_len=SEQUENCE_LEN, row_slice=val_slice)
-    test_ds = FusedSequenceDataset(feature_path, target_path, sequence_len=SEQUENCE_LEN, row_slice=test_slice)
+    train_ds = FusedSequenceDataset(
+        feature_path,
+        target_path,
+        sequence_len=SEQUENCE_LEN,
+        row_slice=train_slice,
+        sim_target_path=sim_target_path,
+        sim_confidence_path=sim_confidence_path,
+    )
+    val_ds = FusedSequenceDataset(
+        feature_path,
+        target_path,
+        sequence_len=SEQUENCE_LEN,
+        row_slice=val_slice,
+        sim_target_path=sim_target_path,
+        sim_confidence_path=sim_confidence_path,
+    )
+    test_ds = FusedSequenceDataset(
+        feature_path,
+        target_path,
+        sequence_len=SEQUENCE_LEN,
+        row_slice=test_slice,
+        sim_target_path=sim_target_path,
+        sim_confidence_path=sim_confidence_path,
+    )
     return (
         DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True),
         DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True),
@@ -82,6 +105,12 @@ def main() -> int:
     if not feature_path.exists() or not target_path.exists():
         raise FileNotFoundError("Missing fused artifacts. Run scripts/build_fused_artifacts.py first.")
 
+    sim_target_path = SIM_TARGETS_PATH if SIM_TARGETS_PATH.exists() else None
+    sim_confidence_path = SIM_CONFIDENCE_PATH if SIM_CONFIDENCE_PATH.exists() else None
+    if sim_target_path is None or sim_confidence_path is None:
+        sim_target_path = None
+        sim_confidence_path = None
+
     if args.sample_limit > 0:
         features = np.load(feature_path, mmap_mode="r")[: args.sample_limit]
         targets = np.load(target_path, mmap_mode="r")[: args.sample_limit]
@@ -89,8 +118,21 @@ def main() -> int:
         target_path = target_path.with_name("targets.sample.npy")
         np.save(feature_path, np.asarray(features, dtype=np.float32))
         np.save(target_path, np.asarray(targets, dtype=np.float32))
+        if sim_target_path is not None and sim_confidence_path is not None:
+            sim_targets = np.load(sim_target_path, mmap_mode="r")[: args.sample_limit]
+            sim_confidence = np.load(sim_confidence_path, mmap_mode="r")[: args.sample_limit]
+            sim_target_path = target_path.with_name("sim_targets.sample.npy")
+            sim_confidence_path = target_path.with_name("sim_confidence.sample.npy")
+            np.save(sim_target_path, np.asarray(sim_targets, dtype=np.float32))
+            np.save(sim_confidence_path, np.asarray(sim_confidence, dtype=np.float32))
 
-    train_loader, val_loader, test_loader = build_loaders(feature_path, target_path, args.batch_size)
+    train_loader, val_loader, test_loader = build_loaders(
+        feature_path,
+        target_path,
+        args.batch_size,
+        sim_target_path=sim_target_path,
+        sim_confidence_path=sim_confidence_path,
+    )
     device = get_torch_device()
 
     model = NexusTFT(NexusTFTConfig()).to(device)
@@ -151,6 +193,7 @@ def main() -> int:
         "sample_limit": args.sample_limit,
         "classification_threshold": threshold,
         "threshold_metric": args.metric,
+        "simulation_supervision": bool(sim_target_path and sim_confidence_path),
     }
     metrics_report = {
         "validation": calibrated_val_metrics,
@@ -164,6 +207,7 @@ def main() -> int:
         "feature_dim": model.config.input_dim,
         "lookahead": LOOKAHEAD,
         "classification_threshold": threshold,
+        "simulation_supervision": bool(sim_target_path and sim_confidence_path),
         "metrics_path": str(FINAL_TFT_METRICS_PATH),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -23,6 +23,9 @@ class FusionReport:
     source_price_path: str
     source_news_path: str
     source_crowd_path: str
+    sequence_rows: int = 0
+    sequence_len: int = 0
+    source_persona_path: str = ""
 
 
 def _require_pandas() -> Any:
@@ -70,6 +73,20 @@ def build_fused_feature_matrix(price_block: np.ndarray, news_block: np.ndarray, 
     if fused.shape[1] != FEATURE_DIM_TOTAL:
         raise ValueError(f"Expected fused width {FEATURE_DIM_TOTAL}, got {fused.shape[1]}")
     return fused.astype(np.float32, copy=False)
+
+
+def build_sequence_tensor(feature_matrix: np.ndarray, target_vector: np.ndarray, sequence_len: int) -> tuple[np.ndarray, np.ndarray]:
+    if sequence_len <= 0:
+        raise ValueError("sequence_len must be positive")
+    if len(feature_matrix) != len(target_vector):
+        raise ValueError("Feature matrix and target vector must have the same row count")
+    usable = len(feature_matrix) - sequence_len + 1
+    if usable <= 0:
+        raise ValueError("Not enough rows to build sequence tensor")
+
+    tensor = np.stack([feature_matrix[index : index + sequence_len] for index in range(usable)], axis=0).astype(np.float32, copy=False)
+    seq_targets = np.asarray(target_vector[sequence_len - 1 :], dtype=np.float32)
+    return tensor, seq_targets
 
 
 def save_numpy_artifact(path: Path, array: np.ndarray) -> None:

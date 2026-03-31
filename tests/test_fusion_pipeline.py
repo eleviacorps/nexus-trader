@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from src.pipeline.fusion import build_fused_feature_matrix, normalize_binary_targets
+from src.pipeline.fusion import build_fused_feature_matrix, build_sequence_tensor, normalize_binary_targets
 
 
 class FusionPipelineTests(unittest.TestCase):
@@ -17,6 +17,13 @@ class FusionPipelineTests(unittest.TestCase):
         targets = np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32)
         normalized = normalize_binary_targets(targets)
         np.testing.assert_array_equal(normalized, np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32))
+
+    def test_build_sequence_tensor_shape(self):
+        features = np.arange(5 * 100, dtype=np.float32).reshape(5, 100)
+        targets = np.array([0, 1, 0, 1, 1], dtype=np.float32)
+        tensor, seq_targets = build_sequence_tensor(features, targets, sequence_len=3)
+        self.assertEqual(tensor.shape, (3, 3, 100))
+        np.testing.assert_array_equal(seq_targets, np.array([0, 1, 1], dtype=np.float32))
 
 
 if __name__ == "__main__":

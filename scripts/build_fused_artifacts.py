@@ -14,6 +14,7 @@ from config.project_config import (  # noqa: E402
     CROWD_EMBEDDINGS_NPY_PATH,
     FUSION_REPORT_PATH,
     FUSED_FEATURE_MATRIX_PATH,
+    FUSED_TENSOR_PATH,
     FUSED_TIMESTAMPS_PATH,
     LEGACY_CROWD_EMBEDDINGS_NPY_PATH,
     LEGACY_NEWS_EMBEDDINGS_NPY_PATH,
@@ -22,12 +23,15 @@ from config.project_config import (  # noqa: E402
     LEGACY_PRICE_FEATURES_PARQUET,
     NEWS_EMBEDDINGS_NPY_PATH,
     NEWS_EMBEDDINGS_RAW_PATH,
+    PERSONA_OUTPUTS_PATH,
     PRICE_FEATURES_CSV_FALLBACK,
     PRICE_FEATURES_PATH,
+    SEQUENCE_LEN,
     TARGETS_PATH,
 )
 from src.pipeline.fusion import (  # noqa: E402
     FusionReport,
+    build_sequence_tensor,
     build_fused_feature_matrix,
     extract_price_block,
     extract_target_vector,
@@ -49,6 +53,8 @@ def resolve_first_existing(paths: list[Path]) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build fused feature artifacts from price, news, and crowd blocks.")
     parser.add_argument("--limit-rows", type=int, default=0, help="Optional cap for smoke runs.")
+    parser.add_argument("--materialize-sequences", action="store_true", help="Write fused_tensor.npy for notebook/debug use.")
+    parser.add_argument("--sequence-limit", type=int, default=0, help="Optional cap on sequence windows when materializing.")
     args = parser.parse_args()
 
     price_path = resolve_first_existing([PRICE_FEATURES_PATH, PRICE_FEATURES_CSV_FALLBACK, LEGACY_PRICE_FEATURES_PARQUET, LEGACY_PRICE_FEATURES_CSV])
@@ -77,6 +83,16 @@ def main() -> int:
     timestamps = np.asarray(price_frame.index[:row_count].astype(str), dtype="<U32")
     save_numpy_artifact(FUSED_TIMESTAMPS_PATH, timestamps)
 
+    sequence_rows = 0
+    if args.materialize_sequences:
+        sequence_tensor, sequence_targets = build_sequence_tensor(fused, targets, sequence_len=SEQUENCE_LEN)
+        if args.sequence_limit > 0:
+            sequence_tensor = sequence_tensor[: args.sequence_limit]
+            sequence_targets = sequence_targets[: args.sequence_limit]
+        save_numpy_artifact(FUSED_TENSOR_PATH, sequence_tensor)
+        save_numpy_artifact(TARGETS_PATH.with_name("targets_sequence.npy"), sequence_targets)
+        sequence_rows = int(len(sequence_tensor))
+
     report = FusionReport(
         rows=int(row_count),
         feature_dim=int(fused.shape[1]),
@@ -84,6 +100,9 @@ def main() -> int:
         source_price_path=str(price_path),
         source_news_path=str(news_path),
         source_crowd_path=str(crowd_path),
+        sequence_rows=sequence_rows,
+        sequence_len=SEQUENCE_LEN if args.materialize_sequences else 0,
+        source_persona_path=str(PERSONA_OUTPUTS_PATH) if PERSONA_OUTPUTS_PATH.exists() else "",
     )
     save_fusion_report(FUSION_REPORT_PATH, report)
     print(report)

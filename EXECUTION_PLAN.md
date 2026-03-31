@@ -37,5 +37,7 @@
 ## Notes
 
 - The repo stays aligned with the cloud-first structure while still supporting local fallback artifacts.
-- The environment setup intentionally keeps `ta` and the offline crowd-data workflow instead of reintroducing deprecated scraping assumptions.
+- The target architecture remains `World -> Perception -> Simulation -> Brain -> Future Branching -> Reverse Collapse -> Probability Cone UI`.
+- The environment setup should install fast download tooling so cloud GPU time is spent on compute, not waiting on slow transfers.
+- `scripts/download_core_datasets.py` is the first manifest-driven download entrypoint for macro, news, and crowd context collection.
 - `scripts/validate_pipeline.py` now resolves canonical paths first and falls back to the current local artifacts when needed.

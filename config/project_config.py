@@ -143,6 +143,11 @@ LEGACY_CROWD_EMBEDDINGS_INDEX_PATH = LEGACY_EMBEDDINGS_DIR / "crowd_emb_index.pa
 
 PERSONA_OUTPUTS_PATH = PROCESSED_DATA_DIR / "persona_outputs.parquet"
 PERSONA_WEIGHT_HISTORY_PATH = PROCESSED_DATA_DIR / "persona_weight_history.parquet"
+MACRO_FEATURES_PATH = PROCESSED_DATA_DIR / "macro_features.parquet"
+NEWS_EVENTS_PATH = PROCESSED_DATA_DIR / "news_events.parquet"
+CROWD_EVENTS_PATH = PROCESSED_DATA_DIR / "crowd_events.parquet"
+SIM_TARGETS_PATH = FEATURES_DIR / "sim_targets.npy"
+SIM_CONFIDENCE_PATH = FEATURES_DIR / "sim_confidence.npy"
 FUSED_TENSOR_PATH = FEATURES_DIR / "fused_tensor.npy"
 TARGETS_PATH = FEATURES_DIR / "targets.npy"
 FUSED_FEATURE_MATRIX_PATH = FEATURES_DIR / "fused_features.npy"
@@ -154,6 +159,9 @@ TRAINING_SUMMARY_PATH = OUTPUTS_EVAL_DIR / "training_summary.json"
 FUTURE_BRANCHES_PATH = BRANCHES_DIR / "future_branches.json"
 FINAL_TFT_METRICS_PATH = OUTPUTS_EVAL_DIR / "tft_metrics.json"
 MODEL_MANIFEST_PATH = TFT_MODEL_DIR / "model_manifest.json"
+MACRO_REPORT_PATH = OUTPUTS_EVAL_DIR / "macro_report.json"
+NEWS_REPORT_PATH = OUTPUTS_EVAL_DIR / "news_report.json"
+CROWD_REPORT_PATH = OUTPUTS_EVAL_DIR / "crowd_report.json"
 PROBABILITY_CONE_HTML_PATH = OUTPUTS_CHARTS_DIR / "probability_cone.html"
 PERSONA_BREAKDOWN_HTML_PATH = OUTPUTS_CHARTS_DIR / "persona_breakdown.html"
 MODEL_SERVICE_HOST = os.getenv("NEXUS_MODEL_HOST", "0.0.0.0")
@@ -161,6 +169,8 @@ MODEL_SERVICE_PORT = int(os.getenv("NEXUS_MODEL_PORT", "8000"))
 
 NORM_STATS_PATH = PROJECT_ROOT / "config" / "norm_stats_1m.json"
 PERSONA_CONFIG_PATH = PROJECT_ROOT / "config" / "persona_config.json"
+DATASET_MANIFEST_PATH = PROJECT_ROOT / "config" / "dataset_manifest.json"
+DOWNLOAD_REPORT_PATH = OUTPUTS_LOGS_DIR / "download_report.json"
 
 
 def get_data_path(*parts: str) -> Path:
