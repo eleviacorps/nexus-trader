@@ -53,6 +53,7 @@ class PredictResponse(BaseModel):  # type: ignore[misc]
     threshold: float
     sequence_len: int
     feature_dim: int
+    horizon_probabilities: dict[str, float] | None = None
 
 
 def llm_numeric_prior(payload: dict[str, Any]) -> float:
@@ -73,34 +74,39 @@ def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[st
     branch_probability = float(payload.get('simulation', {}).get('mean_probability', 0.5) or 0.5)
     branch_consensus = float(payload.get('simulation', {}).get('consensus_score', 0.0) or 0.0)
     branch_confidence = float(payload.get('simulation', {}).get('overall_confidence', 0.0) or 0.0)
+    analog_probability = 0.5 + 0.5 * float(payload.get('simulation', {}).get('analog_bias', 0.0) or 0.0)
+    analog_confidence = float(payload.get('simulation', {}).get('analog_confidence', 0.0) or 0.0)
     model_probability = float((model_prediction or {}).get('bullish_probability', 0.5) or 0.5)
     bot_probability = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('bullish_probability', 0.5) or 0.5)
     bot_confidence = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('confidence', 0.0) or 0.0)
     llm_probability = llm_numeric_prior(payload)
 
-    branch_weight = 0.34 + 0.16 * max(branch_consensus, branch_confidence)
+    branch_weight = 0.31 + 0.14 * max(branch_consensus, branch_confidence)
+    analog_weight = 0.10 + 0.08 * analog_confidence
     model_weight = 0.20 + 0.07 * (1.0 - abs(model_probability - 0.5))
     bot_weight = 0.22 + 0.10 * bot_confidence
-    llm_weight = max(0.06, 1.0 - branch_weight - model_weight - bot_weight)
-    weight_sum = branch_weight + model_weight + bot_weight + llm_weight
+    llm_weight = max(0.06, 1.0 - branch_weight - analog_weight - model_weight - bot_weight)
+    weight_sum = branch_weight + analog_weight + model_weight + bot_weight + llm_weight
     weights = {
         'branch': round(branch_weight / weight_sum, 6),
+        'analog': round(analog_weight / weight_sum, 6),
         'model': round(model_weight / weight_sum, 6),
         'bot_swarm': round(bot_weight / weight_sum, 6),
         'llm': round(llm_weight / weight_sum, 6),
     }
     ensemble_probability = (
         (weights['branch'] * branch_probability)
+        + (weights['analog'] * analog_probability)
         + (weights['model'] * model_probability)
         + (weights['bot_swarm'] * bot_probability)
         + (weights['llm'] * llm_probability)
     )
-    disagreement = max(branch_probability, model_probability, bot_probability, llm_probability) - min(branch_probability, model_probability, bot_probability, llm_probability)
+    disagreement = max(branch_probability, analog_probability, model_probability, bot_probability, llm_probability) - min(branch_probability, analog_probability, model_probability, bot_probability, llm_probability)
     ensemble_confidence = max(
         0.0,
         min(
             1.0,
-            ((0.45 * branch_consensus) + (0.25 * branch_confidence) + (0.30 * bot_confidence)) * (1.0 - disagreement),
+            ((0.36 * branch_consensus) + (0.20 * branch_confidence) + (0.22 * bot_confidence) + (0.22 * analog_confidence)) * (1.0 - disagreement),
         ),
     )
     signal = 'bullish' if ensemble_probability >= 0.5 else 'bearish'
@@ -112,6 +118,7 @@ def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[st
         'confidence': round(float(ensemble_confidence), 6),
         'components': {
             'branch_probability': round(branch_probability, 6),
+            'analog_probability': round(analog_probability, 6),
             'model_probability': round(model_probability, 6),
             'bot_probability': round(bot_probability, 6),
             'llm_probability': round(llm_probability, 6),
@@ -167,11 +174,13 @@ class ModelServer:
         self.threshold = float(self.manifest.get('classification_threshold', 0.5))
         self.device = get_torch_device()
         config_payload = self.manifest.get('model_config', {})
+        self.horizon_labels = list(self.manifest.get('horizon_labels', ['5m']))
         config = NexusTFTConfig(
             input_dim=int(config_payload.get('input_dim', self.feature_dim)),
             hidden_dim=int(config_payload.get('hidden_dim', 128)),
             lstm_layers=int(config_payload.get('lstm_layers', 2)),
             dropout=float(config_payload.get('dropout', 0.1)),
+            output_dim=int(config_payload.get('output_dim', len(self.horizon_labels))),
         )
         self.model = NexusTFT(config).to(self.device)
         load_checkpoint_with_expansion(self.model, _resolve_checkpoint(), new_input_dim=config.input_dim)
@@ -181,8 +190,16 @@ class ModelServer:
         validate_sequence_shape(sequence, self.sequence_len, self.feature_dim)
         with torch.no_grad():
             tensor = torch.tensor([sequence], dtype=torch.float32, device=self.device)
-            probability = self.model(tensor).detach().cpu().item()
-        bullish_probability = float(probability)
+            raw_output = self.model(tensor).detach().cpu().numpy()
+        if raw_output.ndim == 1:
+            horizon_values = raw_output.astype(float).tolist()
+        else:
+            horizon_values = raw_output[0].astype(float).tolist()
+        bullish_probability = float(horizon_values[0])
+        horizon_probabilities = {
+            label: float(value)
+            for label, value in zip(self.horizon_labels, horizon_values)
+        }
         return PredictResponse(
             bullish_probability=bullish_probability,
             bearish_probability=float(1.0 - bullish_probability),
@@ -190,6 +207,7 @@ class ModelServer:
             threshold=self.threshold,
             sequence_len=self.sequence_len,
             feature_dim=self.feature_dim,
+            horizon_probabilities=horizon_probabilities,
         )
 
     def predict_dict(self, sequence: list[list[float]]) -> dict[str, Any]:
@@ -203,6 +221,7 @@ class ModelServer:
             "threshold": float(response.threshold),
             "sequence_len": int(response.sequence_len),
             "feature_dim": int(response.feature_dim),
+            "horizon_probabilities": dict(response.horizon_probabilities or {}),
         }
 
 

@@ -26,12 +26,25 @@ def reverse_collapse(leaves: Sequence[SimulationNode]) -> CollapseResult:
         raise ValueError("reverse_collapse requires at least one leaf")
 
     probabilities = [leaf_probability(leaf) for leaf in leaves]
-    weights = [max(leaf.probability_weight, 1e-9) for leaf in leaves]
+    weights = [
+        max(
+            leaf.probability_weight
+            * (0.58 + (0.24 * float(leaf.branch_fitness)) + (0.12 * float(leaf.analog_confidence)) + (0.06 * float(leaf.minority_guardrail))),
+            1e-9,
+        )
+        for leaf in leaves
+    ]
     weight_sum = sum(weights)
     normalized = [weight / weight_sum for weight in weights]
     weighted_mean = sum(prob * weight for prob, weight in zip(probabilities, normalized))
+    directional_biases = [float((probability - 0.5) * 2.0) for probability in probabilities]
     dispersion = pstdev(probabilities) if len(probabilities) > 1 else 0.0
-    consensus = max(0.0, min(1.0, 1.0 - min(1.0, dispersion / 0.25)))
+    weighted_analog = sum(float(leaf.analog_confidence) * weight for leaf, weight in zip(leaves, normalized))
+    directional_consensus = abs(sum(bias * weight for bias, weight in zip(directional_biases, normalized)))
+    consensus = max(
+        0.0,
+        min(1.0, (0.54 * (1.0 - min(1.0, dispersion / 0.25))) + (0.28 * directional_consensus) + (0.18 * weighted_analog)),
+    )
 
     dominant_counts = {}
     for leaf in leaves:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Mapping
 
+from src.mcts.analog import AnalogScore, HistoricalAnalogScorer
 from src.simulation.abm import SyntheticMarketState, simulate_one_step
 from src.simulation.personas import Persona
 
@@ -19,6 +20,9 @@ class SimulationNode:
     branch_fitness: float = 0.0
     branch_label: str = "balanced"
     minority_guardrail: float = 0.0
+    analog_bias: float = 0.0
+    analog_confidence: float = 0.0
+    analog_support: int = 0
     row_snapshot: dict[str, float] = field(default_factory=dict)
 
 
@@ -131,18 +135,23 @@ def score_state(state: SyntheticMarketState, current_row: Mapping[str, float]) -
     crowd_fade_bonus = 1.0 - min(1.0, abs((crowd_bias * crowd_extreme) + float(state.directional_bias)) / 2.0)
     consensus = float(current_row.get('consensus_score', 0.0))
     consensus_score = 0.5 + 0.5 * min(1.0, abs(consensus))
+    analog_bias = float(current_row.get("analog_bias", 0.0) or 0.0)
+    analog_confidence = float(current_row.get("analog_confidence", 0.0) or 0.0)
+    analog_alignment = 1.0 - min(1.0, abs(analog_bias - float(state.directional_bias)) / 2.0)
     return max(
         0.0,
         min(
             1.0,
-            0.24 * vol_score
-            + 0.18 * body_score
-            + 0.12 * wick_balance
+            0.21 * vol_score
+            + 0.16 * body_score
+            + 0.10 * wick_balance
             + 0.16 * directional_alignment
-            + 0.11 * macro_alignment
-            + 0.11 * narrative_alignment
-            + 0.08 * crowd_fade_bonus
-            + 0.06 * consensus_score,
+            + 0.10 * macro_alignment
+            + 0.10 * narrative_alignment
+            + 0.07 * crowd_fade_bonus
+            + 0.05 * consensus_score
+            + 0.14 * analog_alignment
+            + 0.11 * analog_confidence,
         ),
     )
 
@@ -165,6 +174,8 @@ def expand_binary_tree(
     personas: Mapping[str, Persona],
     max_depth: int = 5,
     root_seed: int = 42,
+    analog_scorer: HistoricalAnalogScorer | None = None,
+    history_rows: list[dict[str, float]] | None = None,
 ) -> SimulationNode:
     root = SimulationNode(
         seed=root_seed,
@@ -174,33 +185,49 @@ def expand_binary_tree(
         row_snapshot={key: float(value) for key, value in current_row.items() if isinstance(value, (int, float))},
     )
 
-    def _expand(node: SimulationNode, row_context: Mapping[str, float]) -> None:
+    root_history = list(history_rows or [])
+
+    def _expand(node: SimulationNode, row_context: Mapping[str, float], history_context: list[dict[str, float]]) -> None:
         if node.depth >= max_depth:
             return
         for branch in range(2):
             seed = node.seed * 10 + branch + 1
             state = simulate_one_step(current_row=row_context, personas=personas, seed=seed)
-            score = score_state(state, row_context)
             next_row = _roll_forward_row(row_context, state)
+            next_history = [*history_context, next_row]
+            if analog_scorer is not None:
+                next_history = next_history[-analog_scorer.window_size :]
+            analog_result: AnalogScore | None = analog_scorer.score_window(next_history) if analog_scorer is not None else None
+            if analog_result is not None:
+                next_row["analog_bias"] = float(analog_result.directional_bias)
+                next_row["analog_confidence"] = float(analog_result.confidence)
+                next_row["analog_support"] = float(analog_result.support)
+            score = score_state(state, next_row)
             minority_guardrail = abs(float(next_row.get("crowd_bias", 0.0) or 0.0)) * (
                 1.0 if float(state.directional_bias) * float(next_row.get("crowd_bias", 0.0) or 0.0) < 0.0 else 0.35
             )
+            analog_confidence = float(analog_result.confidence) if analog_result is not None else 0.0
             child = SimulationNode(
                 seed=seed,
                 depth=node.depth + 1,
-                probability_weight=node.probability_weight * 0.5 * (0.45 + score / 1.8 + minority_guardrail * 0.08),
+                probability_weight=node.probability_weight
+                * 0.5
+                * (0.42 + score / 1.75 + minority_guardrail * 0.08 + analog_confidence * 0.10),
                 dominant_driver=_dominant_driver(state),
                 state=state,
                 path_prices=[*node.path_prices, state.close],
                 branch_fitness=score,
                 branch_label=_branch_label(float(state.directional_bias), row_context),
                 minority_guardrail=_clamp(minority_guardrail, 0.0, 1.0),
+                analog_bias=float(analog_result.directional_bias) if analog_result is not None else 0.0,
+                analog_confidence=analog_confidence,
+                analog_support=int(analog_result.support) if analog_result is not None else 0,
                 row_snapshot=next_row,
             )
             node.children.append(child)
-            _expand(child, next_row)
+            _expand(child, next_row, next_history)
 
-    _expand(root, current_row)
+    _expand(root, current_row, root_history)
     return root
 
 

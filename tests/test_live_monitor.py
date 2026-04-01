@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import shutil
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -42,8 +42,12 @@ class LiveMonitorTests(unittest.TestCase):
         self.assertEqual(entry["scenario_bias"], "bullish")
 
     def test_build_simulation_comparison_returns_hit_rate_for_recorded_entry(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            history_path = Path(temp_dir) / "live_sim_history.json"
+        root = Path("tests/.tmp/live_monitor")
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            history_path = root / "live_sim_history.json"
             history_entry = {
                 "symbol": "XAUUSD",
                 "generated_at": "2026-03-31T07:00:00+00:00",
@@ -93,6 +97,8 @@ class LiveMonitorTests(unittest.TestCase):
             self.assertIn("active_prediction", comparison)
             self.assertEqual(comparison["active_prediction"]["matched_points"], 2)
             self.assertGreaterEqual(comparison["active_prediction"]["hit_rate"], 0.5)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

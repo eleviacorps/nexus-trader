@@ -80,6 +80,7 @@ def main() -> int:
         NEWS_EMBEDDINGS_INDEX_PATH,
         NEWS_EMBEDDINGS_NPY_PATH,
         NEWS_EMBEDDINGS_RAW_PATH,
+        FUSED_FEATURE_MATRIX_PATH,
         PERSONA_OUTPUTS_PATH,
         PERSONA_WEIGHT_HISTORY_PATH,
         PRICE_FEATURES_CSV_FALLBACK,
@@ -87,6 +88,7 @@ def main() -> int:
         PRICE_FEATURE_COLUMNS,
         SIM_CONFIDENCE_PATH,
         SIM_TARGETS_PATH,
+        TARGETS_MULTIHORIZON_PATH,
         TFT_CHECKPOINT_PATH,
     )
 
@@ -161,8 +163,17 @@ def main() -> int:
         "PASS" if SIM_TARGETS_PATH.exists() and SIM_CONFIDENCE_PATH.exists() else "WARN",
         f"sim_targets={SIM_TARGETS_PATH.exists()} sim_confidence={SIM_CONFIDENCE_PATH.exists()}",
     ))
+    results.append(CheckResult(
+        "multihorizon_targets",
+        "PASS" if TARGETS_MULTIHORIZON_PATH.exists() else "WARN",
+        str(TARGETS_MULTIHORIZON_PATH) if TARGETS_MULTIHORIZON_PATH.exists() else "multi-horizon target bundle not built yet",
+    ))
 
-    if price_path and price_path.suffix.lower() == ".csv" and news_path and crowd_path:
+    fused_path = FUSED_FEATURE_MATRIX_PATH if FUSED_FEATURE_MATRIX_PATH.exists() else None
+    if fused_path is not None:
+        fused_rows, fused_width = read_npy_shape(fused_path)
+        results.append(CheckResult("row_alignment", "PASS", f"fused_rows={fused_rows} final_width={fused_width}"))
+    elif price_path and price_path.suffix.lower() == ".csv" and news_path and crowd_path:
         price_rows = count_csv_rows(price_path)
         news_rows = read_npy_shape(news_path)[0]
         crowd_rows = read_npy_shape(crowd_path)[0]

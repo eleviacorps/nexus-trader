@@ -25,6 +25,7 @@ from config.project_config import (
 )
 from src.service.llm_sidecar import request_market_context, request_swarm_judgment
 from src.service.specialist_bots import run_specialist_bots
+from src.mcts.analog import get_historical_analog_scorer
 from src.mcts.reverse_collapse import reverse_collapse
 from src.mcts.tree import dominant_persona_name, expand_binary_tree, iter_leaves
 from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vectors, reduce_text_embeddings
@@ -1207,7 +1208,18 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
 
 def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str, personas: dict[str, Any], llm_content: Mapping[str, Any]) -> dict[str, Any]:
     seed_state = simulate_one_step(current_row=current_row, personas=personas, seed=42)
-    root = expand_binary_tree(current_row, personas, max_depth=6)
+    analog_scorer = get_historical_analog_scorer()
+    analog_history = (
+        price_frame[PRICE_FEATURE_COLUMNS]
+        .tail(analog_scorer.window_size)
+        .astype(float)
+        .to_dict(orient="records")
+    )
+    analog_snapshot = analog_scorer.score_window(analog_history)
+    current_row["analog_bias"] = float(analog_snapshot.directional_bias)
+    current_row["analog_confidence"] = float(analog_snapshot.confidence)
+    current_row["analog_support"] = int(analog_snapshot.support)
+    root = expand_binary_tree(current_row, personas, max_depth=6, analog_scorer=analog_scorer, history_rows=analog_history)
     leaves = iter_leaves(root)
     collapse = reverse_collapse(leaves)
 
@@ -1216,7 +1228,10 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
     atr = max(float(current_row.get("atr_14", 0.0) or 0.0), max(last_price * 0.0015, 0.5))
     ranked_leaves = sorted(
         leaves,
-        key=lambda item: (float(item.probability_weight) * 0.70) + (float(item.branch_fitness) * 0.20) + (float(item.minority_guardrail) * 0.10),
+        key=lambda item: (float(item.probability_weight) * 0.62)
+        + (float(item.branch_fitness) * 0.18)
+        + (float(item.analog_confidence) * 0.12)
+        + (float(item.minority_guardrail) * 0.08),
         reverse=True,
     )
     branches = []
@@ -1229,6 +1244,9 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
                 "probability": round(float(leaf.probability_weight), 6),
                 "branch_fitness": round(float(leaf.branch_fitness), 6),
                 "minority_guardrail": round(float(leaf.minority_guardrail), 6),
+                "analog_bias": round(float(leaf.analog_bias), 6),
+                "analog_confidence": round(float(leaf.analog_confidence), 6),
+                "analog_support": int(leaf.analog_support),
                 "branch_label": str(leaf.branch_label),
                 "predicted_prices": [round(float(price), 5) for price in prices],
                 "timestamps": timestamps,
@@ -1246,7 +1264,21 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             directional_votes.append(1.0 if leaf.path_prices[-1] >= last_price else -1.0)
     directional_agreement = abs(float(np.mean(directional_votes))) if directional_votes else 0.0
     move_strength = min(1.0, mean_move / max(atr * 2.5, 1e-6))
-    overall_confidence = max(0.0, min(0.92, directional_agreement * (0.35 + 0.65 * move_strength) * collapse.consensus_score))
+    weighted_analog_confidence = float(
+        np.average(
+            np.asarray([float(leaf.analog_confidence) for leaf in leaves], dtype=np.float32),
+            weights=np.asarray([max(float(leaf.probability_weight), 1e-6) for leaf in leaves], dtype=np.float32),
+        )
+    ) if leaves else 0.0
+    overall_confidence = max(
+        0.0,
+        min(
+            0.94,
+            directional_agreement
+            * (0.30 + 0.55 * move_strength + 0.15 * weighted_analog_confidence)
+            * collapse.consensus_score,
+        ),
+    )
     price_change = last_price - float(price_frame.iloc[-2]["close"]) if len(price_frame) > 1 else 0.0
     branch_conversation = _build_branch_conversation(branches, llm_content, {"scenario_bias": "bullish" if predicted_center >= last_price else "bearish"})
     return {
@@ -1267,6 +1299,9 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "dominant_driver": collapse.dominant_driver,
             "scenario_bias": "bullish" if predicted_center >= last_price else "bearish",
             "llm_numeric_prior": round(_llm_numeric_prior(llm_content), 6),
+            "analog_bias": round(float(analog_snapshot.directional_bias), 6),
+            "analog_confidence": round(float(analog_snapshot.confidence), 6),
+            "analog_support": int(analog_snapshot.support),
             "branch_count": len(branches),
         },
         "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
@@ -1322,6 +1357,17 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     latest["crowd_bias"] = round(float(crowd_bias), 4)
     latest["crowd_extreme"] = round(float(crowd_extreme), 4)
     latest["consensus_score"] = 0.0
+    analog_scorer = get_historical_analog_scorer()
+    analog_history = (
+        live_frame[PRICE_FEATURE_COLUMNS]
+        .tail(analog_scorer.window_size)
+        .astype(float)
+        .to_dict(orient="records")
+    )
+    analog_snapshot = analog_scorer.score_window(analog_history)
+    latest["analog_bias"] = round(float(analog_snapshot.directional_bias), 4)
+    latest["analog_confidence"] = round(float(analog_snapshot.confidence), 4)
+    latest["analog_support"] = int(analog_snapshot.support)
     llm_context_input = {
         "symbol": symbol,
         "market": {
@@ -1356,6 +1402,8 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
             "news_intensity": latest.get("news_intensity"),
             "crowd_bias": latest.get("crowd_bias"),
             "crowd_extreme": latest.get("crowd_extreme"),
+            "analog_bias": latest.get("analog_bias"),
+            "analog_confidence": latest.get("analog_confidence"),
             "close": latest.get("close"),
             "atr_14": latest.get("atr_14"),
         },
@@ -1393,6 +1441,7 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     payload["llm_context"] = llm_context
     payload["current_row"] = latest
     payload["technical_analysis"] = technical_analysis
+    payload["analog_context"] = analog_snapshot.to_dict()
     payload["branch_graph"] = _build_branch_graph(
         payload.get("branches", []),
         payload.get("highlighted_branches", {}),
@@ -1431,3 +1480,5 @@ def build_live_monitor(symbol: str) -> dict[str, Any]:
     candles = fetch_recent_market_candles(symbol)
     price_frame = engineer_price_features(candles)
     return build_simulation_comparison(symbol, price_frame)
+
+

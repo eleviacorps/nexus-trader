@@ -110,6 +110,8 @@ Important truth:
 - the live UI exists
 - the model can run locally
 - branching and reverse-collapse primitives exist
+- short-window historical analog scoring now exists for branches
+- walk-forward evaluation and directional backtesting now exist as first-class tools
 - GPT-OSS is now integrated as a local sidecar
 - manual technical-analysis panels now exist
 - but the full MiroFish-like simulation logic is still not complete
@@ -118,6 +120,7 @@ Also important:
 
 - current predictive quality is still early
 - previous remote sample runs were only around low-50% classifier performance
+- first local walk-forward smoke evaluation still lands around ~50.8% calibrated directional accuracy on a capped 2024-2025 sample
 - no honest claim of `90%+` predictive accuracy exists right now
 
 ## What Was Fixed Recently
@@ -170,6 +173,7 @@ Recent branching improvements:
 - branch ranking includes:
   - probability weight
   - branch fitness
+  - historical analog confidence
   - minority guardrail score
 - the UI now shows:
   - strongest surviving branch
@@ -214,6 +218,60 @@ They feed into:
 - persona reactions
 - GPT swarm judgment
 - UI graph views
+
+### Analog Scoring, Walk-Forward Evaluation, And Backtesting
+
+The repo now has a first real evaluation layer instead of only live UI inspection.
+
+New pieces:
+
+- `src/mcts/analog.py`
+- `src/evaluation/walkforward.py`
+- `scripts/run_walkforward_evaluation.py`
+
+What analog scoring does now:
+
+- samples a historical memory bank from fused features
+- compares the live / simulated state against short windows of similar past price-structure regimes
+- uses both:
+  - the latest row state
+  - the recent multi-bar regime path
+- returns:
+  - bullish probability
+  - directional bias
+  - analog confidence
+  - support count
+- injects that into branch ranking, reverse-collapse weighting, and live branch expansion
+
+What walk-forward evaluation does:
+
+- loads the current trained TFT checkpoint
+- evaluates by year using timestamped fused artifacts
+- applies bucket calibration from validation years
+- reports raw metrics, calibrated metrics, calibration curves, and a simple directional backtest
+
+Important honesty:
+
+- the current backtest is a directional unit-PnL backtest, not a broker-grade execution backtest
+- it is meant to measure selective correctness and confidence behavior first
+- it is not yet a slippage/commission/execution simulator
+
+Latest local smoke run:
+
+- years: `2024, 2025`
+- capped sample: `500` windows per year
+- calibration years: `2021, 2022, 2023`
+- overall calibrated directional accuracy: about `50.8%`
+- current edge is still weak
+
+That is not a failure of this phase.
+It is the baseline we need before deeper branch logic, regime routing, and higher-quality targets can be judged honestly.
+
+What changed after that smoke run:
+
+- analog matching was upgraded from single-row similarity to short-window regime analogs
+- live branching now passes recent price-feature history into the analog scorer
+- branch analog fitness is now based on evolving regime context, not only a point snapshot
 
 ### GPT Judge Layer
 
@@ -634,13 +692,14 @@ Best architecture choice:
 
 If continuing seriously, the best next build order is:
 
-1. Add historical analog branch scoring.
-2. Add regime classification.
+1. Add an explicit regime classifier and route branch scoring by regime.
+2. Retrain on the cloud with the richer analog/regime signal folded into scoring and supervision.
 3. Improve reverse collapse and minority scenario logic further.
 4. Improve confidence calibration from actual branch reliability.
-5. Improve technical structure scoring.
+5. Add a precision gate / no-trade gate on top of the numeric stack.
 6. Keep GPT-OSS as a structured sidecar.
-7. Only then consider more advanced training loops.
+7. Use uncapped walk-forward reports and stricter filtered backtests after every major scoring change.
+8. Only then consider more advanced training loops.
 
 ## Suggested LLM Role In This Project
 
@@ -671,6 +730,186 @@ Return strict JSON fields like:
 - no direct buy/sell decision
 - no direct numeric price target
 - only structured interpretation of text and regime context
+
+### Fine-Tuning Recommendation
+
+Do not fine-tune GPT-OSS first for short-horizon price prediction.
+
+Why:
+
+- the current weakness is still mostly in labels, regime handling, branch realism, and confidence calibration
+- a fine-tuned LLM will not fix weak numeric supervision or noisy short-term market labels
+- it is very easy to build an expensive narrative model that sounds smarter while the actual walk-forward win rate barely moves
+
+If fine-tuning is used at all, the best order is:
+
+1. fine-tune or train a small regime / event classifier first
+2. fine-tune a smaller text model for:
+   - macro regime labeling
+   - event severity
+   - crowd narrative polarity
+   - branch explanation
+3. only after the numeric simulator improves should any LLM fine-tuning be considered for structured sidecar tasks
+
+Best practical recommendation right now:
+
+- keep GPT-OSS as a sidecar judge and structured text interpreter
+- improve the numeric simulator first
+- if a model is trained next, prioritize:
+  - regime classifier
+  - meta-label precision gate
+  - small text/event classifier
+  - cloud retraining of the numeric model with richer regime analog features
+
+## Latest Cloud Run
+
+A fresh remote ROCm run was completed again on the Jupyter server after reconnecting to `129.212.178.105`.
+
+What was done remotely:
+
+- verified GPU/runtime and artifact availability
+- rebuilt `news_embeddings.npy` and `crowd_embeddings.npy` from raw cloud datasets
+- confirmed those aligned tensors are sparse in the early history but non-zero in the recent tail
+- rebuilt `data/features/fused_features.npy` from the refreshed embeddings
+- ran full year-split TFT retraining on the cloud GPU
+- ran walk-forward evaluation for `2024, 2025, 2026`
+- pulled the updated checkpoint and evaluation reports back to local
+
+Important remote findings:
+
+- the aligned recent-tail embeddings are real and non-zero
+- the full-history aligned embeddings are still sparse because the no-auth news/crowd sources are mostly recent
+- this means cross-modal signal exists, but it is not uniformly strong across the full 2009 -> 2026 training span
+
+Latest remote training result:
+
+- validation ROC-AUC: about `0.5114`
+- test ROC-AUC: about `0.5101`
+- the learned threshold optimized for F1 collapsed to `0.05`, which is a warning sign that separation is still weak
+
+Latest remote walk-forward result:
+
+- overall raw accuracy: about `50.76%`
+- overall ROC-AUC: about `0.5101`
+- filtered backtest participation: about `20.67%`
+- filtered backtest win rate: about `50.32%`
+- 2026 fold win rate: about `51.77%`
+
+Interpretation:
+
+- the system remains weak but slightly positive in the best filtered recent slice
+- this is still not remotely close to a trustworthy `90%+` engine
+- the next gains are still much more likely to come from target redesign, alignment fixes, regime routing, and stronger filtering than from bigger models alone
+
+## Latest Strategic Update
+
+The analog layer has now been upgraded from single-row similarity toward short-window regime analogs.
+
+What changed:
+
+- branch scoring can now carry a rolling short-window analog history
+- live sequence construction now computes analog context from a recent feature window instead of a single latest row
+- the analog report now describes regime mode and window size
+- the fused-target pipeline no longer relies on legacy `target_direction` as the main supervision source
+- targets are now rebuilt from forward returns over `5m / 10m / 15m / 30m`
+- the primary training label stays directional for compatibility with the current binary model, but low-signal hold windows are now explicitly down-weighted instead of being treated as equally important
+- sample weights now reward:
+  - ATR-aware move significance
+  - multi-horizon agreement
+  - stronger forward moves
+- new local artifacts now include:
+  - `data/features/target_hold_mask.npy`
+  - `data/features/targets_multihorizon.npz`
+- the current local target distribution after the redesign is much healthier than the first draft:
+  - primary 5m hold rate around `24.4%`
+  - sample-weight mean around `2.14`
+  - multi-horizon agreement around `0.77`
+
+What is still blocked:
+
+- cloud retraining has not been run in this chat because the current environment does not have live access to the remote Jupyter box
+- uncapped walk-forward evaluation after retraining is therefore still pending
+
+## Highest-Impact Win Rate Blockers
+
+A focused codebase review surfaced the main reasons win rate is still weak. These matter more than model size right now.
+
+1. The training target is still too close to noisy next-bar direction instead of the true multi-horizon simulator objective.
+2. News and crowd modalities still need to be treated as suspect until we fully confirm they are non-zero and timestamp-aligned in the training artifacts.
+3. Fusion still needs stricter timestamp alignment guarantees instead of relying on row-count compatibility.
+4. Evaluation is improving, but true rolling retrain walk-forward is still not the default path.
+5. The current TFT surface is still closer to a binary sequence classifier than a full multi-horizon market simulator head.
+
+Important update:
+
+- blocker `#1` has now been partially reduced by the new target redesign
+- the repo still needs cloud retraining and new evaluation before we can claim the redesign improved real win rate
+- blocker `#5` remains real, because the model output head is still binary even though the supervision artifacts are now multi-horizon-aware
+
+## LLM Fine-Tuning Recommendation
+
+Current recommendation: do not LoRA-fine-tune GPT-OSS yet for numeric price prediction.
+
+Why:
+
+- the biggest bottlenecks are target definition, modality quality, and alignment
+- a larger or fine-tuned LLM will not fix noisy labels or dead features
+- LLMs are still better here as structured perception and labeling sidecars than as direct short-horizon forecasters
+
+If we fine-tune anything next, the better order is:
+
+1. fine-tune or train a smaller regime/event classifier
+2. use GPT-OSS to generate structured labels for macro regime, event severity, crowd narrative, and branch explanations
+3. only consider LoRA on GPT-OSS after the numeric stack has cleaner targets and aligned modalities
+
+What LoRA on GPT-OSS is actually good for here:
+
+- regime classification
+- event severity labels
+- crowd-mood labeling
+- branch explanation and debate quality
+- structured abstain / caution tags
+
+What it is still not the best tool for:
+
+- direct next-5-minute numeric prediction
+- replacing the TFT / numeric simulator
+- fixing low edge caused by weak price labels
+
+## Best Next Execution Order
+
+1. Rebuild and verify news/crowd embeddings so they are genuinely informative and timestamp-aligned.
+2. Cloud retrain the numeric model against the redesigned multi-horizon, hold-aware targets.
+3. Fold the regime analog output into retraining through sample weights, auxiliary targets, or a meta-label precision gate.
+4. Run uncapped walk-forward evaluation and stricter filtered backtests after retraining.
+5. Add a recent-regime-only training run so sparse old news/crowd history does not dilute the modern multimodal signal.
+6. Train a separate regime / precision-gate model so the simulator can abstain more often instead of forcing weak predictions.
+7. Only then revisit whether LLM fine-tuning is worth the cost.
+
+## Concrete Ways To Break The Low-50% Ceiling
+
+These are the most realistic paths to beat the current roughly `51%` regime.
+
+1. Stop optimizing for every bar.
+   Train for selective precision on meaningful moves and let the system hold / abstain much more often.
+
+2. Split the problem by regime.
+   A single model for calm chop, macro shock, and strong trend is too blunt. Add a regime classifier and route scoring by regime.
+
+3. Train recent-regime and full-history models separately.
+   The recent years have much better news/crowd coverage. A modern multimodal model and a long-history price-only model should probably not be forced into one identical training pool.
+
+4. Use a meta-label precision gate.
+   Let one model predict direction and another decide whether the setup is worth trusting at all.
+
+5. Promote the supervision head to multi-horizon.
+   The artifacts are now ready for `5m / 10m / 15m / 30m`; the next architectural gain is making the model output those horizons directly.
+
+6. Make backtesting harsher, not softer.
+   Add slippage, spread assumptions, and stronger confidence floors so weak apparent edge disappears early instead of fooling us.
+
+7. Use GPT-OSS for labels, not for raw price forecasting.
+   LoRA can still help if it improves regime labels, event severity, discussion polarity, and abstain logic. That can materially help the numeric stack without pretending the LLM is a market oracle.
 
 ## Codebase Areas To Audit Next
 
@@ -735,15 +974,18 @@ Current important truths:
 - GPT judgment now reads raw news, public discussion, technical structure, branches, and bot outputs together.
 - The UI includes a TradingView desk panel for external chart confirmation.
 - The compare chart is moving toward a multi-horizon final forecast path rather than a 5-minute-only raw simulator line.
+- The branch layer now uses short-window regime analog context instead of only single-row analog similarity.
 - The project still needs deeper MiroFish-like branching, branch fitness scoring, reverse-confidence collapse, and better confidence calibration.
 
 Highest-value next work:
-1. Add historical analog scoring for branches.
-2. Improve reverse collapse and minority scenario logic.
-3. Deepen persona logic and regime handling.
-4. Connect specialist bots more directly into branch scoring and multi-horizon consistency checks.
-5. Improve technical market-structure logic.
-6. Improve evaluation with walk-forward tests and cone hit-rate analysis.
+1. Rebuild and verify news/crowd embeddings plus timestamp alignment in the fused artifacts.
+2. Add an explicit regime classifier and fold it into branch weighting and persona behavior.
+3. Retrain on the cloud with short-window analog regime features and multi-horizon hold-aware targets.
+4. Improve reverse collapse and minority scenario logic.
+5. Build a meta-label precision gate so the system can abstain when edge is weak.
+6. Connect specialist bots more directly into branch scoring and multi-horizon consistency checks.
+7. Expand walk-forward tests and stricter filtered backtests beyond capped smoke runs.
+8. Add cone hit-rate and branch-tracking evaluation into the reporting loop.
 
 When working, inspect the existing codebase first and explain what is already implemented before changing architecture.
 ```

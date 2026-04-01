@@ -1,4 +1,4 @@
-import tempfile
+import shutil
 import unittest
 from pathlib import Path
 
@@ -34,15 +34,21 @@ class PerceptionPipelineTests(unittest.TestCase):
         self.assertTrue(np.allclose(aligned[1], [1.0, 0.5]))
 
     def test_load_news_events_reads_simple_csv(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "sample.csv"
+        root = Path("tests/.tmp/perception_pipeline")
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            path = root / "sample.csv"
             path.write_text(
                 "title,seendate,domain,url\nGold rises,20260330093000,example.com,https://example.com/a\n",
                 encoding="utf-8",
             )
-            frame = load_news_events(Path(tmpdir))
+            frame = load_news_events(root)
             self.assertEqual(len(frame), 1)
             self.assertEqual(frame.iloc[0]["source"], "example.com")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_build_crowd_numeric_vectors_width(self):
         frame = pd.DataFrame(

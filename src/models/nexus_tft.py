@@ -21,6 +21,7 @@ class NexusTFTConfig:
     hidden_dim: int = 128
     lstm_layers: int = 2
     dropout: float = 0.1
+    output_dim: int = 1
 
 
 def expand_feature_vector(values: Sequence[float], new_dim: int, fill_value: float = 0.0) -> List[float]:
@@ -81,7 +82,7 @@ if nn is not None:
                 nn.Linear(self.config.hidden_dim, 64),
                 nn.GELU(),
                 nn.Dropout(self.config.dropout),
-                nn.Linear(64, 1),
+                nn.Linear(64, self.config.output_dim),
                 nn.Sigmoid(),
             )
 
@@ -90,7 +91,9 @@ if nn is not None:
             outputs, _ = self.encoder(encoded)
             weights = torch.softmax(self.attention(outputs), dim=1)
             context = (outputs * weights).sum(dim=1)
-            prediction = self.head(context).squeeze(-1)
+            prediction = self.head(context)
+            if self.config.output_dim == 1:
+                prediction = prediction.squeeze(-1)
             if return_feature_importance:
                 return prediction, importance.mean(dim=1)
             return prediction
