@@ -1489,3 +1489,4 @@ def build_live_monitor(symbol: str) -> dict[str, Any]:
     return build_simulation_comparison(symbol, price_frame)
 
 
+

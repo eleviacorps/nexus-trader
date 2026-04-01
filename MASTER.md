@@ -208,7 +208,7 @@ These quant features are now folded into:
 Current local quant build on the synced slice:
 
 - rows: `7611`
-- feature columns: `11`
+- feature columns: `14`
 - average transition risk: about `0.0559`
 - average volatility realism: about `0.8284`
 - average regime strength: `1.0`
@@ -216,7 +216,7 @@ Current local quant build on the synced slice:
 Current cloud quant rebuild on the full dataset:
 
 - rows: `6,024,602`
-- feature columns: `11`
+- feature columns: `14`
 - average transition risk: about `0.1271`
 - average volatility realism: about `0.8096`
 - average regime strength: about `0.8721`
@@ -1439,7 +1439,179 @@ Current local raw-data footprint after the latest pull:
 
 ## Current V3 Run
 
-A new cloud `v3` run is now in progress with the quant-hybrid layer and the refreshed macro / news / positioning inputs.
+## Latest Local V4 Preparation
+
+The next local upgrade after `v3` is now in place and is aimed at making abstention more meaningful instead of simply making the gate tighter.
+
+What was implemented in this pass:
+
+- quant context was expanded with:
+  - `quant_regime_persistence`
+  - `quant_state_entropy`
+  - `quant_tail_risk`
+- fusion now writes a dedicated gate-context matrix:
+  - `data/features/gate_context.npy`
+- gate context currently includes:
+  - ATR / BB-width / volume state
+  - session overlap
+  - regime strength
+  - regime persistence
+  - transition risk
+  - state entropy
+  - tail risk
+  - volatility realism
+  - fair-value dislocation
+  - trend score
+  - state imbalance
+  - chop risk
+- target construction now uses the new quant context directly when deciding:
+  - hold rows
+  - sample weights
+  - strategic tradeability
+- precision-gate training now accepts aligned context features instead of learning only from horizon agreement
+- walk-forward evaluation now accepts aligned gate-context rows and applies them to:
+  - calibration-time gate scoring
+  - per-fold gate scoring
+  - full backtest scoring
+- old saved precision gates remain backward-compatible:
+  - if a gate was trained before context features existed, the evaluator now falls back gracefully to the base gate feature set instead of erroring
+- compounding capital backtests were hardened:
+  - log-equity math is now used internally
+  - absurd long-run overflow now reports as `overflowed: true`
+  - fixed-risk capital mode remains the safest human-readable mode
+
+Latest local rebuild after that pass:
+
+- quant rebuild completed on the local synced slice:
+  - rows: `7611`
+  - state count: `4`
+  - feature columns: `14`
+- fused rebuild completed and now writes:
+  - `sample_weights.npy`
+  - `target_hold_mask.npy`
+  - `targets_multihorizon.npz`
+  - `gate_context.npy`
+
+Validation from this pass:
+
+- targeted compile checks passed
+- full local test suite passed:
+  - `51/51`
+- smoke multi-horizon training with the new gate-context path completed successfully:
+  - run tag: `gate_ctx_smoke`
+  - output dim: `12`
+  - gate artifact written successfully
+  - gate context sample artifact written successfully
+- local walk-forward smoke against the existing `mh12_full_v3` checkpoint also ran successfully with the backward-compatible gate logic
+
+Important local smoke result using the updated evaluator and the existing `mh12_full_v3` checkpoint:
+
+- year: `2026`
+- capped windows: `250`
+- decision threshold: `0.53`
+- confidence floor: `0.06`
+- optimized gate threshold: about `0.1878`
+- trades: `11`
+- participation: `4.4%`
+- win rate: `45.45%`
+
+Interpretation:
+
+- the new gate-context path is functioning
+- older saved checkpoints and gates can now be evaluated under the new walk-forward stack
+- the local synced slice is still too small and too recent to treat this as a meaningful edge estimate
+- the main value of this pass is infrastructure correctness for the next cloud run, not the tiny local PnL
+
+## Quant Ideas Worth Trying Next
+
+These are the strongest quantitative-model additions still worth trying around the simulator.
+
+Highest-priority next additions:
+
+1. Hidden-regime router
+
+- use HMM / Markov-switching / semi-Markov logic
+- route:
+  - branch expansion
+  - branch pruning
+  - gate aggressiveness
+  - persona weights
+
+2. Volatility realism model
+
+- use GARCH / EGARCH or simpler realized-volatility forecasting
+- penalize branches that project impossible `15m / 30m` moves
+- feed the realism score into:
+  - branch fitness
+  - final cone width
+  - abstention
+
+3. Kalman / state-space fair-value model
+
+- estimate a latent gold fair value from:
+  - DXY
+  - yields
+  - VIX
+  - crude / inflation proxies
+- use dislocation from fair value as:
+  - institutional / whale bias input
+  - branch realism penalty
+  - reversal probability helper
+
+4. Meta-label gradient-boosted gate
+
+- add LightGBM / XGBoost on top of:
+  - simulator outputs
+  - TFT outputs
+  - analog scores
+  - quant context
+  - bot disagreement
+- predict:
+  - tradeable / not tradeable
+  - expected precision bucket
+
+5. Quantile / conformal cone calibration
+
+- make the cone match empirical error bands instead of only branch dispersion
+- this is one of the best ways to make the simulator honest even before raw ROC-AUC improves
+
+6. Change-point detection
+
+- use offline or online change-point logic to detect:
+  - post-news regime breaks
+  - transition from trend to chop
+  - transition from calm to panic
+- feed that into abstention and branch pruning
+
+7. Positioning factor model
+
+- build cleaner CFTC-based crowding / squeeze features
+- especially useful for `15m / 30m` when macro and positioning line up
+
+8. Dependency / spread models
+
+- dynamic spreads:
+  - gold vs DXY
+  - gold vs real yields
+  - gold vs VIX
+  - gold vs silver ratio
+- use these as institutional sanity checks rather than standalone signals
+
+Recommended order:
+
+1. quant-aware gate on the cloud
+2. meta-label boosted gate
+3. volatility realism model
+4. hidden-regime router
+5. fair-value Kalman layer
+6. conformal cone calibration
+
+Why this order:
+
+- the gate and realism layers are most likely to improve filtered win quality fastest
+- they also preserve the identity of Nexus Trader as a simulator rather than turning it into a generic black-box predictor
+
+The cloud `v3` cycle is now in its late stage with the quant-hybrid layer and the refreshed macro / news / positioning inputs.
 
 Primary goals of `v3`:
 
@@ -1470,8 +1642,10 @@ Latest confirmed `v3` runtime facts:
 - remote persona rebuild completed successfully
 - remote fusion rebuild completed successfully
 - remote tests passed
-- `mh12_full_v3` is actively training on the MI300X
-- latest confirmed runtime in this chat: about `2h+` into `mh12_full_v3`
+- `mh12_full_v3` training completed successfully
+- `mh12_full_v3` walk-forward and backtest completed successfully
+- `mh12_recent_v3` training completed successfully
+- the active remote stage is now `walkforward_mh12_recent_v3`
 - current remote fused rows: `6,024,602`
 - current primary horizon: `15m`
 - current fused hold rate: about `0.5078`
@@ -1480,6 +1654,52 @@ Latest confirmed `v3` runtime facts:
 - current quant volatility realism: about `0.8096`
 - GPU memory usage during training has been around `91%`
 - latest observed GPU package power during training has ranged roughly `267W - 299W`
+
+Latest confirmed `mh12_full_v3` training metrics:
+
+- strategic test ROC-AUC: about `0.5090`
+- strategic test accuracy: about `0.5140`
+- `15m` test ROC-AUC: about `0.5096`
+- `30m` test ROC-AUC: about `0.5088`
+- `15m` hold ROC-AUC: about `0.6797`
+- `30m` hold ROC-AUC: about `0.6830`
+
+Latest confirmed `mh12_full_v3` walk-forward / backtest metrics:
+
+- years: `2024, 2025, 2026`
+- calibration source years: `2021, 2022, 2023`
+- optimized gate threshold: about `0.1643`
+- overall calibrated strategic ROC-AUC: about `0.5077`
+- `15m` calibrated ROC-AUC remains roughly in the low `0.51` range by fold
+- `30m` calibrated ROC-AUC remains roughly in the low `0.51` range by fold
+- trades: `146,756`
+- participation: about `18.59%`
+- win rate: about `63.95%`
+- fixed-risk `$10` final capital: about `8196.40`
+- fixed-risk `$1000` final capital: about `819640.0`
+- fixed-risk max drawdown: about `30.34%`
+
+Important backtest caveat:
+
+- the compounding capital mode is numerically exploding to `NaN` / absurd magnitudes on long runs
+- the fixed-risk `R`-multiple mode is the only remotely interpretable capital view right now
+- these are still simulation-style backtests, not broker-grade execution backtests with spread/slippage
+
+Latest confirmed `mh12_recent_v3` training metrics:
+
+- strategic test ROC-AUC: about `0.4985`
+- `15m` test ROC-AUC: about `0.5017`
+- `30m` test ROC-AUC: about `0.5019`
+- recent-regime directional training did not improve beyond the full-history `v3` pass
+- the recent-regime walk-forward / backtest stage is still running, so final trade counts for that branch are not available yet
+
+Interpretation so far:
+
+- the quant-hybrid pass is still helping the hold / abstention side more than the directional side
+- `15m / 30m` remain the right horizons to optimize around
+- the full-history `v3` backtest is now materially active rather than dead-zero, which is progress
+- the recent-regime `v3` training did not beat the full-history `v3` training on raw directional metrics
+- the next remaining unknown is whether `mh12_recent_v3` walk-forward/backtest produces better filtered participation or capital behavior than `mh12_full_v3`
 
 Important operational note:
 

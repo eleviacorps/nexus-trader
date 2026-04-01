@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 import numpy as np
+from src.pipeline.fusion import GATE_CONTEXT_COLUMNS
 
 try:
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score  # type: ignore
@@ -314,7 +315,11 @@ def collect_multihorizon_metrics(
     }
 
 
-def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+def horizon_agreement_features(
+    probabilities: np.ndarray,
+    threshold: float = 0.5,
+    context_features: np.ndarray | None = None,
+) -> np.ndarray:
     probabilities = np.asarray(probabilities, dtype=np.float32)
     horizon_count = probabilities.shape[1] if probabilities.shape[1] <= 8 else probabilities.shape[1] // 3
     direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, horizon_count)
@@ -331,7 +336,7 @@ def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5
         else np.zeros((len(direction_probabilities), 1), dtype=np.float32)
     )
     strategic_tradeability = strategic_confidence * (1.0 - strategic_hold)
-    return np.concatenate(
+    output = np.concatenate(
         [
             direction_probabilities[:, :1],
             direction_probabilities.mean(axis=1, keepdims=True),
@@ -351,6 +356,12 @@ def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5
         ],
         axis=1,
     ).astype(np.float32)
+    if context_features is not None:
+        context = np.asarray(context_features, dtype=np.float32)
+        if context.ndim != 2 or context.shape[0] != output.shape[0]:
+            raise ValueError("context_features must be a 2D array aligned to the probability rows.")
+        output = np.concatenate([output, context], axis=1).astype(np.float32)
+    return output
 
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:
@@ -361,12 +372,15 @@ def train_precision_gate(
     probabilities: np.ndarray,
     targets: np.ndarray,
     *,
+    context_features: np.ndarray | None = None,
     threshold: float = 0.5,
     epochs: int = 300,
     lr: float = 0.05,
     l2: float = 1e-3,
 ) -> Dict[str, Any]:
-    features = horizon_agreement_features(probabilities, threshold=threshold)
+    features = horizon_agreement_features(probabilities, threshold=threshold, context_features=context_features)
+    context_feature_names = list(GATE_CONTEXT_COLUMNS) if context_features is not None else []
+    feature_names = list(GATE_FEATURE_NAMES) + context_feature_names
     horizon_count = probabilities.shape[1] if probabilities.shape[1] <= 8 else probabilities.shape[1] // 3
     direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, horizon_count)
     direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, horizon_count)
@@ -392,16 +406,30 @@ def train_precision_gate(
         & (target_direction_agreement >= 0.5)
         & (minority_risk_target < 0.5)
     ).astype(np.float32)
+    if context_features is not None and len(context_feature_names) == np.asarray(context_features).shape[1]:
+        context = np.asarray(context_features, dtype=np.float32)
+        idx = {name: position for position, name in enumerate(context_feature_names)}
+        stable_context = (
+            (context[:, idx["gate_ctx_transition_risk"]] < 0.62)
+            & (context[:, idx["gate_ctx_tail_risk"]] < 0.70)
+            & (context[:, idx["gate_ctx_vol_realism"]] > 0.20)
+            & (context[:, idx["gate_ctx_fair_value_abs"]] < 0.92)
+            & (context[:, idx["gate_ctx_regime_strength"]] > 0.25)
+            & (context[:, idx["gate_ctx_regime_persistence"]] > 0.18)
+            & (context[:, idx["gate_ctx_chop_risk"]] < 0.92)
+        ).astype(np.float32)
+        tradeable_target = (tradeable_target * stable_context).astype(np.float32)
     labels = (tradeable_target * (strategic_dir_pred == strategic_dir_target).astype(np.float32)).astype(np.float32)
     if len(np.unique(labels)) < 2:
         return {
-            "feature_names": GATE_FEATURE_NAMES,
+            "feature_names": feature_names,
             "weights": [0.0] * features.shape[1],
             "bias": float(np.log(np.clip(labels.mean() / max(1e-6, 1.0 - labels.mean()), 1e-6, 1e6))) if labels.size else 0.0,
             "train_accuracy": float(labels.mean()) if labels.size else 0.0,
             "threshold": 0.5,
             "positive_rate": float(labels.mean()) if labels.size else 0.0,
             "tradeable_rate": float(tradeable_target.mean()) if labels.size else 0.0,
+            "context_feature_names": context_feature_names,
         }
     weights = np.zeros(features.shape[1], dtype=np.float32)
     bias = 0.0
@@ -432,7 +460,7 @@ def train_precision_gate(
     if final_probs.size and np.mean(final_probs >= best_threshold) < 0.005:
         best_threshold = float(np.quantile(final_probs, max(0.60, 1.0 - target_participation)))
     return {
-        "feature_names": GATE_FEATURE_NAMES,
+        "feature_names": feature_names,
         "weights": [float(value) for value in weights],
         "bias": float(bias),
         "train_accuracy": float((((final_probs >= 0.5).astype(np.float32)) == labels).mean()),
@@ -441,15 +469,24 @@ def train_precision_gate(
         "train_precision": float(labels[final_probs >= best_threshold].mean()) if np.any(final_probs >= best_threshold) else 0.0,
         "positive_rate": float(labels.mean()) if labels.size else 0.0,
         "tradeable_rate": float(tradeable_target.mean()) if labels.size else 0.0,
+        "context_feature_names": context_feature_names,
     }
 
 
-def apply_precision_gate(probabilities: np.ndarray, gate: Mapping[str, Any]) -> np.ndarray:
-    features = horizon_agreement_features(probabilities)
+def apply_precision_gate(
+    probabilities: np.ndarray,
+    gate: Mapping[str, Any],
+    context_features: np.ndarray | None = None,
+) -> np.ndarray:
     weights = np.asarray(gate.get("weights", []), dtype=np.float32)
     bias = float(gate.get("bias", 0.0))
+    features = horizon_agreement_features(probabilities, context_features=context_features)
     if weights.size != features.shape[1]:
-        raise ValueError("Precision gate weight dimension does not match expected feature count.")
+        base_features = horizon_agreement_features(probabilities, context_features=None)
+        if context_features is not None and weights.size == base_features.shape[1]:
+            features = base_features
+        else:
+            raise ValueError("Precision gate weight dimension does not match expected feature count.")
     return _sigmoid(features @ weights + bias).astype(np.float32)
 
 

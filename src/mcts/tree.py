@@ -273,3 +273,4 @@ def assert_leaf_count(node: SimulationNode, expected: int = 32) -> None:
     leaves = iter_leaves(node)
     if len(leaves) != expected:
         raise AssertionError(f'Expected {expected} leaves, found {len(leaves)}')
+

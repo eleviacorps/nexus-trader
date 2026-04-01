@@ -18,6 +18,7 @@ from config.project_config import (  # noqa: E402
     FINAL_TFT_METRICS_PATH,
     FUSED_FEATURE_MATRIX_PATH,
     FUSED_TIMESTAMPS_PATH,
+    GATE_CONTEXT_PATH,
     LEGACY_TFT_CHECKPOINT_PATH,
     LOOKAHEAD,
     MODEL_MANIFEST_PATH,
@@ -62,6 +63,12 @@ from src.training.train_tft import (  # noqa: E402
     save_training_config,
     train_binary_model,
 )
+from src.training.meta_gate import (  # noqa: E402
+    apply_meta_gate,
+    combine_gate_scores,
+    save_meta_gate,
+    train_meta_gate,
+)
 from src.utils.device import get_torch_device  # noqa: E402
 from src.utils.training_splits import split_by_years  # noqa: E402
 
@@ -87,6 +94,15 @@ def tagged_path(path: Path, run_tag: str) -> Path:
     if not run_tag:
         return path
     return path.with_name(f"{path.stem}_{run_tag}{path.suffix}")
+
+
+def slice_gate_context(path: Path, row_slice, sequence_len: int) -> np.ndarray | None:
+    if not path.exists():
+        return None
+    context = np.load(path, mmap_mode='r')
+    start = row_slice.start + sequence_len - 1
+    stop = row_slice.stop + sequence_len - 1
+    return np.asarray(context[start:stop], dtype=np.float32)
 
 
 def build_loaders(
@@ -266,6 +282,12 @@ def main() -> int:
         if sample_weight_path is not None:
             sample_weights = np.load(sample_weight_path, mmap_mode='r')[: args.sample_limit]
             sample_weight_path = save_sample_artifact(target_path.with_name('sample_weights.sample.npy'), sample_weights)
+        gate_context_path = GATE_CONTEXT_PATH
+        if gate_context_path.exists():
+            gate_context = np.load(gate_context_path, mmap_mode='r')[: args.sample_limit]
+            gate_context_path = save_sample_artifact(target_path.with_name('gate_context.sample.npy'), gate_context)
+        else:
+            gate_context_path = GATE_CONTEXT_PATH
         if use_multihorizon and multi_target_path is not None:
             bundle = np.load(multi_target_path, mmap_mode='r')
             sample_bundle_path = target_path.with_name('targets_multihorizon.sample.npz')
@@ -274,6 +296,8 @@ def main() -> int:
                 **{key: np.asarray(bundle[key][: args.sample_limit], dtype=np.float32) for key in bundle.files},
             )
             multi_target_path = sample_bundle_path
+    else:
+        gate_context_path = GATE_CONTEXT_PATH
 
     total_rows = len(np.load(target_path, mmap_mode='r'))
     train_slice, val_slice, test_slice, split_report = resolve_slices(total_rows, args.sequence_len, args.split_mode, train_years, val_years, test_years)
@@ -331,6 +355,8 @@ def main() -> int:
         new_layers_lr=args.new_lr,
     )
     if use_multihorizon:
+        gate_context_val = slice_gate_context(gate_context_path, val_slice, args.sequence_len)
+        gate_context_test = slice_gate_context(gate_context_path, test_slice, args.sequence_len)
         model, history, best_val_metrics = train_multihorizon_model(
             model=model,
             train_loader=train_loader,
@@ -347,10 +373,25 @@ def main() -> int:
         threshold = float(threshold_selection['threshold'])
         horizon_thresholds = [0.5, 0.5, threshold, threshold]
         calibrated_val_metrics = collect_multihorizon_metrics(val_targets, val_probabilities, thresholds=horizon_thresholds, horizon_labels=horizon_labels)
-        gate = train_precision_gate(val_probabilities, val_targets, threshold=threshold)
-        gate_probabilities_val = apply_precision_gate(val_probabilities, gate)
+        gate = train_precision_gate(
+            val_probabilities,
+            val_targets,
+            context_features=gate_context_val,
+            threshold=threshold,
+        )
+        gate_probabilities_val = apply_precision_gate(val_probabilities, gate, context_features=gate_context_val)
         test_metrics, test_targets, test_probabilities = evaluate_multihorizon_model(model, test_loader, device, thresholds=horizon_thresholds, horizon_labels=horizon_labels)
-        gate_probabilities_test = apply_precision_gate(test_probabilities, gate)
+        gate_probabilities_test = apply_precision_gate(test_probabilities, gate, context_features=gate_context_test)
+        meta_gate = train_meta_gate(
+            val_probabilities,
+            val_targets,
+            context_features=gate_context_val,
+            threshold=threshold,
+        )
+        meta_gate_probabilities_val = apply_meta_gate(val_probabilities, meta_gate, context_features=gate_context_val)
+        meta_gate_probabilities_test = apply_meta_gate(test_probabilities, meta_gate, context_features=gate_context_test)
+        combined_gate_probabilities_val = combine_gate_scores(gate_probabilities_val, meta_gate_probabilities_val)
+        combined_gate_probabilities_test = combine_gate_scores(gate_probabilities_test, meta_gate_probabilities_test)
         calibration_report = {
             'selection': threshold_selection,
             'validation_curve': build_calibration_report(val_targets[:, 2], val_probabilities[:, 2]),
@@ -363,6 +404,27 @@ def main() -> int:
                 'test_curve': build_calibration_report(
                     ((test_probabilities[:, 2] >= threshold).astype(np.float32) == test_targets[:, 2].astype(np.float32)).astype(np.float32),
                     gate_probabilities_test,
+                ),
+            },
+            'meta_gate': {
+                'provider': meta_gate.get('provider', 'none'),
+                'validation_curve': build_calibration_report(
+                    ((val_probabilities[:, 2] >= threshold).astype(np.float32) == val_targets[:, 2].astype(np.float32)).astype(np.float32),
+                    meta_gate_probabilities_val if meta_gate_probabilities_val is not None else gate_probabilities_val,
+                ),
+                'test_curve': build_calibration_report(
+                    ((test_probabilities[:, 2] >= threshold).astype(np.float32) == test_targets[:, 2].astype(np.float32)).astype(np.float32),
+                    meta_gate_probabilities_test if meta_gate_probabilities_test is not None else gate_probabilities_test,
+                ),
+            },
+            'combined_gate': {
+                'validation_curve': build_calibration_report(
+                    ((val_probabilities[:, 2] >= threshold).astype(np.float32) == val_targets[:, 2].astype(np.float32)).astype(np.float32),
+                    combined_gate_probabilities_val if combined_gate_probabilities_val is not None else gate_probabilities_val,
+                ),
+                'test_curve': build_calibration_report(
+                    ((test_probabilities[:, 2] >= threshold).astype(np.float32) == test_targets[:, 2].astype(np.float32)).astype(np.float32),
+                    combined_gate_probabilities_test if combined_gate_probabilities_test is not None else gate_probabilities_test,
                 ),
             },
         }
@@ -397,6 +459,7 @@ def main() -> int:
     importance_path = tagged_path(FEATURE_IMPORTANCE_REPORT_PATH, args.run_tag)
     manifest_path = tagged_path(MODEL_MANIFEST_PATH, args.run_tag)
     precision_gate_path = tagged_path(PRECISION_GATE_PATH, args.run_tag)
+    meta_gate_path = tagged_path(META_GATE_PATH, args.run_tag)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_payload = {
         'model_state_dict': model.state_dict(),
@@ -447,6 +510,9 @@ def main() -> int:
         'horizon_labels': horizon_labels if use_multihorizon else ['5m'],
         'output_labels': horizon_keys if use_multihorizon else ['target_5m'],
         'precision_gate_path': str(precision_gate_path) if gate is not None else '',
+        'meta_gate_path': str(meta_gate_path) if meta_gate is not None and meta_gate.get('available', False) else '',
+        'meta_gate_provider': meta_gate.get('provider', '') if meta_gate is not None else '',
+        'gate_context_path': str(gate_context_path) if gate is not None and gate_context_path.exists() else '',
     }
     metrics_report = {
         'validation': calibrated_val_metrics,
@@ -473,6 +539,9 @@ def main() -> int:
         'primary_horizon': '15m' if use_multihorizon else '5m',
         'multi_horizon': bool(use_multihorizon),
         'precision_gate_path': str(precision_gate_path) if gate is not None else '',
+        'meta_gate_path': str(meta_gate_path) if meta_gate is not None and meta_gate.get('available', False) else '',
+        'meta_gate_provider': meta_gate.get('provider', '') if meta_gate is not None else '',
+        'gate_context_path': str(gate_context_path) if gate is not None and gate_context_path.exists() else '',
         'run_tag': args.run_tag,
         'generated_at': datetime.now(timezone.utc).isoformat(),
     }
@@ -488,3 +557,13 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+

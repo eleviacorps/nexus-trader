@@ -21,6 +21,7 @@ from config.project_config import (  # noqa: E402
     FUSED_FEATURE_MATRIX_PATH,
     FUSED_TENSOR_PATH,
     FUSED_TIMESTAMPS_PATH,
+    GATE_CONTEXT_PATH,
     LEGACY_CROWD_EMBEDDINGS_NPY_PATH,
     LEGACY_NEWS_EMBEDDINGS_NPY_PATH,
     LEGACY_NEWS_EMBEDDINGS_RAW_PATH,
@@ -44,6 +45,7 @@ from src.quant.hybrid import merge_quant_features  # noqa: E402
 from src.pipeline.fusion import (  # noqa: E402
     FusionReport,
     build_trade_target_artifacts,
+    build_gate_context_matrix,
     build_sequence_tensor,
     build_fused_feature_matrix,
     extract_price_block,
@@ -117,12 +119,14 @@ def main() -> int:
     crowd_block = np.asarray(crowd_block[:row_count], dtype=np.float32)
     sample_weights = np.asarray(target_artifacts.sample_weights[:row_count], dtype=np.float32)
     hold_mask = np.asarray(target_artifacts.primary_hold_mask[:row_count], dtype=np.float32)
+    gate_context = np.asarray(build_gate_context_matrix(price_frame)[:row_count], dtype=np.float32)
 
     fused = build_fused_feature_matrix(price_block, news_block, crowd_block)
     save_numpy_artifact(FUSED_FEATURE_MATRIX_PATH, fused)
     save_numpy_artifact(TARGETS_PATH, targets)
     save_numpy_artifact(SAMPLE_WEIGHTS_PATH, sample_weights)
     save_numpy_artifact(TARGET_HOLD_MASK_PATH, hold_mask)
+    save_numpy_artifact(GATE_CONTEXT_PATH, gate_context)
     TARGETS_MULTIHORIZON_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         TARGETS_MULTIHORIZON_PATH,
@@ -180,6 +184,7 @@ def main() -> int:
         {
             'sample_weight_path': str(SAMPLE_WEIGHTS_PATH),
             'target_hold_mask_path': str(TARGET_HOLD_MASK_PATH),
+            'gate_context_path': str(GATE_CONTEXT_PATH),
             'targets_multihorizon_path': str(TARGETS_MULTIHORIZON_PATH),
             'sample_weight_mean': float(sample_weights.mean()) if len(sample_weights) else 0.0,
             'hold_rate': float(hold_mask.mean()) if len(hold_mask) else 0.0,

@@ -76,10 +76,12 @@ class MctsTests(unittest.TestCase):
         disagree = reverse_collapse(bullish + bearish)
         self.assertGreater(agree.consensus_score, disagree.consensus_score)
         self.assertLess(agree.uncertainty_width, disagree.uncertainty_width)
+        self.assertLessEqual(agree.quantile_lower, agree.mean_probability)
+        self.assertGreaterEqual(agree.quantile_upper, agree.mean_probability)
 
     def test_probability_cone_widens_with_uncertainty(self):
-        narrow = build_probability_cone(type("Collapse", (), {"mean_probability": 0.6, "uncertainty_width": 0.1, "consensus_score": 0.8})())
-        wide = build_probability_cone(type("Collapse", (), {"mean_probability": 0.6, "uncertainty_width": 0.4, "consensus_score": 0.3})())
+        narrow = build_probability_cone(type("Collapse", (), {"mean_probability": 0.6, "uncertainty_width": 0.1, "consensus_score": 0.8, "quantile_lower": 0.56, "quantile_upper": 0.64, "tail_risk_score": 0.1})())
+        wide = build_probability_cone(type("Collapse", (), {"mean_probability": 0.6, "uncertainty_width": 0.4, "consensus_score": 0.3, "quantile_lower": 0.42, "quantile_upper": 0.78, "tail_risk_score": 0.7})())
         self.assertLess(narrow.points[-1].upper - narrow.points[-1].lower, wide.points[-1].upper - wide.points[-1].lower)
 
 

@@ -35,6 +35,12 @@ class QuantHybridTests(unittest.TestCase):
         self.assertEqual(len(quant), len(frame))
         self.assertTrue(np.all(np.isfinite(quant.to_numpy(dtype=np.float32))))
         self.assertTrue(np.all((quant["quant_transition_risk"] >= 0.0) & (quant["quant_transition_risk"] <= 1.0)))
+        self.assertTrue(np.all((quant["quant_regime_persistence"] >= 0.0) & (quant["quant_regime_persistence"] <= 1.0)))
+        self.assertTrue(np.all((quant["quant_state_entropy"] >= 0.0) & (quant["quant_state_entropy"] <= 1.0)))
+        self.assertTrue(np.all((quant["quant_tail_risk"] >= 0.0) & (quant["quant_tail_risk"] <= 1.0)))
+        self.assertTrue(np.all((quant["quant_route_confidence"] >= 0.0) & (quant["quant_route_confidence"] <= 1.0)))
+        self.assertTrue(np.all(np.isfinite(quant["quant_kalman_fair_value"].to_numpy(dtype=np.float32))))
+        self.assertTrue(np.all(np.isfinite(quant["quant_kalman_dislocation"].to_numpy(dtype=np.float32))))
 
     def test_merge_quant_features_preserves_price_rows(self):
         frame = self._sample_price_frame()
