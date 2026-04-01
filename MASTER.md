@@ -1714,6 +1714,109 @@ Important operational note:
   - `outputs/evaluation/v3_summary.json`
   - `outputs/evaluation/v3_summary.md`
 
+## Current V4 Prep State
+
+A new local `v4` preparation pass has now been implemented and validated before the next cloud cycle.
+
+What changed locally in this pass:
+
+- the evaluator was recovered and upgraded so it understands:
+  - `gate_context.npy`
+  - the saved precision gate
+  - the new boosted meta gate
+  - combined gate scores during walk-forward and backtesting
+- the gate is now quant-aware at a deeper level, not only agreement-aware:
+  - routed regime confidence now flows into the gate context
+  - Kalman fair-value dislocation now flows into the gate context
+  - state entropy / tail-risk / persistence remain part of the abstention stack
+- the branch layer was upgraded so routed-regime and Kalman signals affect synthetic forward rows and branch realism scoring
+- the cone layer now uses weighted quantile bands rather than only mean-plus-width expansion
+- the compounding capital backtest now reports overflow cleanly instead of collapsing into meaningless `NaN`
+- a boosted meta gate was added through `src/training/meta_gate.py`
+  - preferred backends: XGBoost, LightGBM
+  - fallback backend: sklearn HistGradientBoosting
+- the trainer now saves both:
+  - linear precision gate
+  - boosted meta gate
+- older saved gates remain backward-compatible in the evaluator
+
+Files materially updated in this pass:
+
+- `src/quant/hybrid.py`
+- `src/pipeline/fusion.py`
+- `src/mcts/tree.py`
+- `src/mcts/reverse_collapse.py`
+- `src/mcts/cone.py`
+- `src/evaluation/walkforward.py`
+- `src/training/meta_gate.py`
+- `scripts/train_fused_tft.py`
+- `tests/test_quant_hybrid.py`
+- `tests/test_mcts.py`
+- `tests/test_walkforward.py`
+
+Local validation status after the recovery/upgrade:
+
+- full unit test suite: `51/51` passing again
+- repaired evaluator compiles successfully
+- repaired trainer compiles successfully
+- quant/router/Kalman/cone modules compile successfully
+
+Important interpretation:
+
+- this pass was mainly about making the next cloud run smarter and safer
+- it does not yet prove a better remote edge by itself
+- the next meaningful proof step is a true `v4` remote run on the Jupyter ROCm box
+
+Jupyter connectivity note:
+
+- during this chat, direct Jupyter API reachability from the local restricted path was inconsistent
+- after escalation, the server endpoint responded successfully again
+- so the cloud `v4` pass should be launched from this repaired local code state, not from the older `v3` state
+
+Planned `v4` cloud objective:
+
+1. sync the repaired local `v4` code to the cloud repo/workspace
+2. rebuild quant context and fused artifacts on the full remote dataset
+3. run remote tests
+4. train `mh12_full_v4`
+5. run remote walk-forward + backtest for `2024, 2025, 2026`
+6. optionally run `mh12_recent_v4`
+7. compare:
+   - strategic ROC-AUC
+   - `15m` ROC-AUC
+   - `30m` ROC-AUC
+   - hold quality
+   - participation
+   - trade count
+   - fixed-risk capital results
+
+Current remote `v4` execution status in this chat:
+
+- validated local `v4` files were synced to the Jupyter workspace root `nexus/`
+- a detached remote process was launched successfully
+- current remote pid file points to: `outputs/logs/remote_v4_pipeline.pid`
+- current remote main log is: `outputs/logs/remote_v4_pipeline.log`
+- a local monitor process is polling the remote run tags:
+  - `mh12_full_v4`
+  - `mh12_recent_v4`
+- the local monitor will auto-sync finished artifacts back into:
+  - `outputs/evaluation/`
+  - `models/tft/`
+  - `outputs/logs/`
+- a local waiting summarizer is also running for:
+  - `outputs/evaluation/v4_summary.json`
+  - `outputs/evaluation/v4_summary.md`
+
+GPT-OSS role remains unchanged:
+
+- GPT-OSS should still be added after these numeric/quant builds as a sidecar
+- valid GPT-OSS jobs here are:
+  - macro/news/crowd interpretation
+  - structured labels
+  - branch explanations
+  - swarm judgment
+- GPT-OSS should not replace the numeric forecaster or the quant gate
+
 ## Codebase Areas To Audit Next
 
 High-priority files to audit in future chats:

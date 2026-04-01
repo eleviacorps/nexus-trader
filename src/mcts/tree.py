@@ -80,6 +80,10 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
     prior_strength = float(current_row.get("quant_regime_strength", 0.0) or 0.0)
     prior_vol = float(current_row.get("quant_vol_forecast", max(abs(return_1), 1e-6)) or max(abs(return_1), 1e-6))
     prior_fair_value = float(current_row.get("quant_fair_value_z", 0.0) or 0.0)
+    prior_kalman_dislocation = float(current_row.get("quant_kalman_dislocation", 0.0) or 0.0)
+    prior_route_up = float(current_row.get("quant_route_prob_up", 0.25) or 0.25)
+    prior_route_down = float(current_row.get("quant_route_prob_down", 0.25) or 0.25)
+    prior_route_confidence = float(current_row.get("quant_route_confidence", 0.5) or 0.5)
     current_trend_score = float(current_row.get("quant_trend_score", 0.0) or 0.0)
     next_trend_score = _clamp(0.72 * current_trend_score + 1.10 * displacement, -1.0, 1.0)
     next_vol_forecast = max(1e-6, 0.75 * prior_vol + 0.25 * abs(return_1))
@@ -87,6 +91,13 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
     transition_risk = _clamp(0.55 * prior_transition + 0.20 * (1.0 - vol_realism) + 0.25 * abs(next_trend_score - current_trend_score), 0.0, 1.0)
     regime_strength = _clamp(0.60 * prior_strength + 0.40 * abs(next_trend_score), 0.0, 1.0)
     fair_value_z = _clamp(0.72 * prior_fair_value + displacement * 0.85, -4.0, 4.0)
+    kalman_dislocation = _clamp(0.68 * prior_kalman_dislocation + (return_1 * 6.0) - (0.22 * prior_fair_value), -0.08, 0.08)
+    route_up = _clamp(0.62 * prior_route_up + 0.38 * max(0.0, next_trend_score), 0.0, 1.0)
+    route_down = _clamp(0.62 * prior_route_down + 0.38 * max(0.0, -next_trend_score), 0.0, 1.0)
+    route_balance = max(1e-6, route_up + route_down)
+    route_up = route_up / route_balance if route_balance > 0.0 else 0.5
+    route_down = route_down / route_balance if route_balance > 0.0 else 0.5
+    route_confidence = _clamp(0.55 * prior_route_confidence + 0.45 * abs(route_up - route_down), 0.0, 1.0)
 
     next_row.update(
         {
@@ -122,7 +133,11 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
             "quant_vol_forecast": next_vol_forecast,
             "quant_vol_realism": vol_realism,
             "quant_fair_value_z": fair_value_z,
+            "quant_kalman_dislocation": kalman_dislocation,
             "quant_trend_score": next_trend_score,
+            "quant_route_prob_up": route_up,
+            "quant_route_prob_down": route_down,
+            "quant_route_confidence": route_confidence,
         }
     )
     return next_row
@@ -161,7 +176,12 @@ def score_state(state: SyntheticMarketState, current_row: Mapping[str, float]) -
     quant_transition_risk = float(current_row.get("quant_transition_risk", 0.0) or 0.0)
     quant_vol_realism = float(current_row.get("quant_vol_realism", 0.5) or 0.5)
     quant_trend_score = float(current_row.get("quant_trend_score", 0.0) or 0.0)
+    quant_kalman_dislocation = abs(float(current_row.get("quant_kalman_dislocation", 0.0) or 0.0))
+    quant_route_confidence = float(current_row.get("quant_route_confidence", 0.0) or 0.0)
+    quant_route_bias = float((current_row.get("quant_route_prob_up", 0.0) or 0.0) - (current_row.get("quant_route_prob_down", 0.0) or 0.0))
     quant_alignment = 1.0 - min(1.0, abs(quant_trend_score - float(state.directional_bias)) / 2.0)
+    route_alignment = 1.0 - min(1.0, abs(quant_route_bias - float(state.directional_bias)) / 2.0)
+    fair_value_penalty = min(1.0, quant_kalman_dislocation * 45.0)
     transition_bonus = 1.0 - min(1.0, quant_transition_risk)
     return max(
         0.0,
@@ -177,10 +197,13 @@ def score_state(state: SyntheticMarketState, current_row: Mapping[str, float]) -
             + 0.05 * consensus_score
             + 0.11 * analog_alignment
             + 0.09 * analog_confidence
-            + 0.10 * quant_alignment
-            + 0.07 * quant_regime_strength
-            + 0.08 * quant_vol_realism
-            + 0.07 * transition_bonus,
+            + 0.08 * quant_alignment
+            + 0.07 * route_alignment
+            + 0.05 * quant_route_confidence
+            + 0.06 * quant_regime_strength
+            + 0.07 * quant_vol_realism
+            + 0.06 * transition_bonus
+            - 0.05 * fair_value_penalty,
         ),
     )
 
