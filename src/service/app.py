@@ -20,7 +20,7 @@ from config.project_config import (
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
 from src.service.llm_sidecar import request_market_context, sidecar_health
-from src.service.live_data import build_live_monitor, build_live_simulation, record_simulation_history
+from src.service.live_data import build_live_monitor, build_live_simulation, record_simulation_history, _build_final_forecast
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
 
@@ -53,6 +53,72 @@ class PredictResponse(BaseModel):  # type: ignore[misc]
     threshold: float
     sequence_len: int
     feature_dim: int
+
+
+def llm_numeric_prior(payload: dict[str, Any]) -> float:
+    llm_context = payload.get('llm_context', {})
+    if not isinstance(llm_context, dict):
+        return 0.5
+    content = llm_context.get('content', {})
+    if not isinstance(content, dict):
+        return 0.5
+    institutional = float(content.get('institutional_bias', 0.0) or 0.0)
+    whale = float(content.get('whale_bias', 0.0) or 0.0)
+    retail = float(content.get('retail_bias', 0.0) or 0.0)
+    weighted = (0.40 * institutional) + (0.35 * whale) + (0.25 * retail)
+    return max(0.0, min(1.0, 0.5 + 0.5 * weighted))
+
+
+def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
+    branch_probability = float(payload.get('simulation', {}).get('mean_probability', 0.5) or 0.5)
+    branch_consensus = float(payload.get('simulation', {}).get('consensus_score', 0.0) or 0.0)
+    branch_confidence = float(payload.get('simulation', {}).get('overall_confidence', 0.0) or 0.0)
+    model_probability = float((model_prediction or {}).get('bullish_probability', 0.5) or 0.5)
+    bot_probability = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('bullish_probability', 0.5) or 0.5)
+    bot_confidence = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('confidence', 0.0) or 0.0)
+    llm_probability = llm_numeric_prior(payload)
+
+    branch_weight = 0.34 + 0.16 * max(branch_consensus, branch_confidence)
+    model_weight = 0.20 + 0.07 * (1.0 - abs(model_probability - 0.5))
+    bot_weight = 0.22 + 0.10 * bot_confidence
+    llm_weight = max(0.06, 1.0 - branch_weight - model_weight - bot_weight)
+    weight_sum = branch_weight + model_weight + bot_weight + llm_weight
+    weights = {
+        'branch': round(branch_weight / weight_sum, 6),
+        'model': round(model_weight / weight_sum, 6),
+        'bot_swarm': round(bot_weight / weight_sum, 6),
+        'llm': round(llm_weight / weight_sum, 6),
+    }
+    ensemble_probability = (
+        (weights['branch'] * branch_probability)
+        + (weights['model'] * model_probability)
+        + (weights['bot_swarm'] * bot_probability)
+        + (weights['llm'] * llm_probability)
+    )
+    disagreement = max(branch_probability, model_probability, bot_probability, llm_probability) - min(branch_probability, model_probability, bot_probability, llm_probability)
+    ensemble_confidence = max(
+        0.0,
+        min(
+            1.0,
+            ((0.45 * branch_consensus) + (0.25 * branch_confidence) + (0.30 * bot_confidence)) * (1.0 - disagreement),
+        ),
+    )
+    signal = 'bullish' if ensemble_probability >= 0.5 else 'bearish'
+    horizon_predictions = payload.get('bot_swarm', {}).get('aggregate', {}).get('horizon_predictions', [])
+    return {
+        'bullish_probability': round(float(ensemble_probability), 6),
+        'bearish_probability': round(float(1.0 - ensemble_probability), 6),
+        'signal': signal,
+        'confidence': round(float(ensemble_confidence), 6),
+        'components': {
+            'branch_probability': round(branch_probability, 6),
+            'model_probability': round(model_probability, 6),
+            'bot_probability': round(bot_probability, 6),
+            'llm_probability': round(llm_probability, 6),
+        },
+        'weights': weights,
+        'horizon_predictions': horizon_predictions,
+    }
 
 
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
@@ -166,8 +232,8 @@ def create_app() -> Any:
         return load_json_artifact(FUTURE_BRANCHES_PATH) if FUTURE_BRANCHES_PATH.exists() else []
 
     @app.get('/api/simulate-live')
-    def simulate_live(symbol: str = 'XAUUSD'):
-        payload = build_live_simulation(symbol, sequence_len=server.sequence_len)
+    def simulate_live(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio'):
+        payload = build_live_simulation(symbol, sequence_len=server.sequence_len, llm_provider=llm_provider)
         sequence = payload.pop('sequence', None)
         if sequence:
             try:
@@ -176,6 +242,13 @@ def create_app() -> Any:
                 payload['model_prediction'] = {'error': str(exc)}
         else:
             payload['model_prediction'] = None
+        payload['final_forecast'] = _build_final_forecast(
+            payload,
+            payload.get('bot_swarm', {}),
+            ((payload.get('llm_context') or {}).get('content') or {}),
+            payload.get('model_prediction'),
+        )
+        payload['ensemble_prediction'] = build_ensemble_prediction(payload, payload.get('model_prediction'))
         payload['history_entry'] = record_simulation_history(payload, payload.get('model_prediction'))
         return payload
 
@@ -184,12 +257,12 @@ def create_app() -> Any:
         return build_live_monitor(symbol)
 
     @app.get('/api/llm/health')
-    def llm_health():
-        return sidecar_health()
+    def llm_health(provider: str = 'lm_studio'):
+        return sidecar_health(provider=provider)
 
     @app.get('/api/llm/context')
-    def llm_context(symbol: str = 'XAUUSD'):
-        payload = build_live_simulation(symbol, sequence_len=server.sequence_len)
+    def llm_context(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio'):
+        payload = build_live_simulation(symbol, sequence_len=server.sequence_len, llm_provider=llm_provider)
         context = {
             'symbol': symbol,
             'market': payload.get('market', {}),
@@ -198,7 +271,7 @@ def create_app() -> Any:
             'news_headlines': [item.get('title', '') for item in payload.get('feeds', {}).get('news', [])[:5]],
             'crowd_items': [item.get('title', '') for item in payload.get('feeds', {}).get('public_discussions', [])[:5]],
         }
-        return request_market_context(symbol, context)
+        return request_market_context(symbol, context, provider=llm_provider)
 
     @app.get('/ui', response_class=HTMLResponse)
     def ui():

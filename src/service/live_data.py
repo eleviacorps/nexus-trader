@@ -9,7 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,8 @@ from config.project_config import (
     PRICE_FEATURE_COLUMNS,
     SEQUENCE_LEN,
 )
-from src.service.llm_sidecar import request_market_context
+from src.service.llm_sidecar import request_market_context, request_swarm_judgment
+from src.service.specialist_bots import run_specialist_bots
 from src.mcts.reverse_collapse import reverse_collapse
 from src.mcts.tree import dominant_persona_name, expand_binary_tree, iter_leaves
 from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vectors, reduce_text_embeddings
@@ -237,18 +238,40 @@ def _read_rss_items(url: str, limit: int) -> list[dict[str, Any]]:
 
 def fetch_live_news(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
     settings = _symbol_settings(symbol)
-    query = urllib.parse.quote(settings["news_query"])
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    base_queries = [
+        settings["news_query"],
+        "geopolitical risk OR war OR sanctions OR central bank OR treasury yields",
+        "finance markets OR stocks OR bonds OR inflation OR recession OR fed",
+    ]
 
     def _factory():
-        try:
-            items = _read_rss_items(url, limit=limit)
-        except Exception:
-            items = []
+        items: list[dict[str, Any]] = []
+        for raw_query in base_queries:
+            query = urllib.parse.quote(raw_query)
+            url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+            try:
+                items.extend(_read_rss_items(url, limit=limit))
+            except Exception:
+                continue
         output = []
-        for item in items:
+        seen: set[tuple[str, str]] = set()
+        for item in sorted(items, key=lambda entry: entry.get("published_at") or "", reverse=True):
+            signature = (str(item.get("title", "")).strip().lower(), str(item.get("source", "")).strip().lower())
+            if not signature[0] or signature in seen:
+                continue
+            seen.add(signature)
             sentiment = _score_news_text(item["title"], settings["label"])
-            output.append(item | {"sentiment": round(sentiment, 4)})
+            title_lower = str(item["title"]).lower()
+            category = "general_finance"
+            if any(term in title_lower for term in ["war", "missile", "sanction", "conflict", "geopolitical"]):
+                category = "geopolitical"
+            elif any(term in title_lower for term in ["fed", "rates", "inflation", "cpi", "treasury", "yield"]):
+                category = "macro"
+            elif any(term in title_lower for term in ["gold", "xau", "bullion"]):
+                category = "gold"
+            output.append(item | {"sentiment": round(sentiment, 4), "category": category})
+            if len(output) >= limit:
+                break
         if not output and NEWS_EVENTS_PATH.exists():
             try:
                 frame = pd.read_parquet(NEWS_EVENTS_PATH).tail(limit)
@@ -305,6 +328,21 @@ def fetch_public_discussions(symbol: str, limit: int = 8) -> list[dict[str, Any]
                     "classification": _discussion_classification(sentiment),
                 }
             )
+        if output:
+            greed_proxy = [item for item in output if item["classification"] == "greed"]
+            fear_proxy = [item for item in output if item["classification"] == "fear"]
+            if greed_proxy and fear_proxy:
+                output.insert(
+                    0,
+                    {
+                        "title": f"Crowd split: {len(greed_proxy)} greed vs {len(fear_proxy)} fear items",
+                        "link": "",
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "nexus_discussion_synth",
+                        "sentiment": round(float(np.mean([item["sentiment"] for item in output])), 4),
+                        "classification": "mixed",
+                    },
+                )
         if not output and CROWD_EVENTS_PATH.exists():
             try:
                 frame = pd.read_parquet(CROWD_EVENTS_PATH).tail(limit)
@@ -532,6 +570,159 @@ def engineer_price_features(candles: pd.DataFrame) -> pd.DataFrame:
     return enriched
 
 
+def _session_name(timestamp: pd.Timestamp) -> str:
+    hour = int(timestamp.tz_convert("UTC").hour if timestamp.tzinfo is not None else timestamp.hour)
+    if 0 <= hour < 7:
+        return "Asian"
+    if 7 <= hour < 13:
+        return "London"
+    if 13 <= hour < 21:
+        return "New York"
+    return "After Hours"
+
+
+def _swing_levels(price_frame: pd.DataFrame, lookback: int = 80) -> dict[str, list[dict[str, Any]]]:
+    frame = price_frame.tail(lookback).copy()
+    highs: list[dict[str, Any]] = []
+    lows: list[dict[str, Any]] = []
+    for index in range(2, len(frame) - 2):
+        window_high = frame["high"].iloc[index - 2 : index + 3]
+        window_low = frame["low"].iloc[index - 2 : index + 3]
+        row = frame.iloc[index]
+        ts = frame.index[index].isoformat()
+        if float(row["high"]) >= float(window_high.max()):
+            highs.append({"timestamp": ts, "price": round(float(row["high"]), 5)})
+        if float(row["low"]) <= float(window_low.min()):
+            lows.append({"timestamp": ts, "price": round(float(row["low"]), 5)})
+    return {"resistance": highs[-4:], "support": lows[-4:]}
+
+
+def _detect_order_blocks(price_frame: pd.DataFrame, atr: float, lookback: int = 80) -> list[dict[str, Any]]:
+    frame = price_frame.tail(lookback).copy()
+    if len(frame) < 4:
+        return []
+    zones: list[dict[str, Any]] = []
+    threshold = max(atr * 0.35, 0.25)
+    for index in range(1, len(frame) - 1):
+        current = frame.iloc[index]
+        nxt = frame.iloc[index + 1]
+        prev = frame.iloc[index - 1]
+        body = float(current["close"] - current["open"])
+        next_body = float(nxt["close"] - nxt["open"])
+        next_extension = abs(float(nxt["close"]) - float(current["close"]))
+
+        if body < 0 and next_body > 0 and float(nxt["close"]) > float(current["high"]) and next_extension >= threshold:
+            zones.append(
+                {
+                    "type": "bullish_order_block",
+                    "timestamp": frame.index[index].isoformat(),
+                    "low": round(float(current["low"]), 5),
+                    "high": round(float(max(current["open"], current["close"])), 5),
+                    "strength": round(min(1.0, next_extension / max(atr, 1e-6)), 4),
+                    "note": "Last down candle before impulsive upside displacement",
+                }
+            )
+        if body > 0 and next_body < 0 and float(nxt["close"]) < float(current["low"]) and next_extension >= threshold:
+            zones.append(
+                {
+                    "type": "bearish_order_block",
+                    "timestamp": frame.index[index].isoformat(),
+                    "low": round(float(min(current["open"], current["close"])), 5),
+                    "high": round(float(current["high"]), 5),
+                    "strength": round(min(1.0, next_extension / max(atr, 1e-6)), 4),
+                    "note": "Last up candle before impulsive downside displacement",
+                }
+            )
+        if abs(float(prev["close"]) - float(current["close"])) < threshold * 0.15:
+            continue
+    return zones[-4:]
+
+
+def _detect_fair_value_gaps(price_frame: pd.DataFrame, atr: float, lookback: int = 80) -> list[dict[str, Any]]:
+    frame = price_frame.tail(lookback).copy()
+    gaps: list[dict[str, Any]] = []
+    min_gap = max(atr * 0.12, 0.08)
+    for index in range(2, len(frame)):
+        first = frame.iloc[index - 2]
+        third = frame.iloc[index]
+        if float(third["low"]) - float(first["high"]) >= min_gap:
+            gaps.append(
+                {
+                    "type": "bullish_fvg",
+                    "timestamp": frame.index[index - 1].isoformat(),
+                    "low": round(float(first["high"]), 5),
+                    "high": round(float(third["low"]), 5),
+                    "size": round(float(third["low"] - first["high"]), 5),
+                }
+            )
+        if float(first["low"]) - float(third["high"]) >= min_gap:
+            gaps.append(
+                {
+                    "type": "bearish_fvg",
+                    "timestamp": frame.index[index - 1].isoformat(),
+                    "low": round(float(third["high"]), 5),
+                    "high": round(float(first["low"]), 5),
+                    "size": round(float(first["low"] - third["high"]), 5),
+                }
+            )
+    return gaps[-4:]
+
+
+def build_technical_analysis(price_frame: pd.DataFrame) -> dict[str, Any]:
+    latest = price_frame.iloc[-1]
+    current_price = float(latest["close"])
+    atr = max(float(latest.get("atr_14", 0.0) or 0.0), current_price * 0.001)
+    rsi = float(latest.get("rsi_14", 50.0) or 50.0)
+    ema_cross = float(latest.get("ema_cross", 0.0) or 0.0)
+    session = _session_name(price_frame.index[-1])
+    structure = "bullish" if ema_cross > 0.1 and rsi >= 52 else "bearish" if ema_cross < -0.1 and rsi <= 48 else "balanced"
+    levels = _swing_levels(price_frame)
+    order_blocks = _detect_order_blocks(price_frame, atr=atr)
+    fair_value_gaps = _detect_fair_value_gaps(price_frame, atr=atr)
+
+    def _nearest(levels_list: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not levels_list:
+            return None
+        return min(levels_list, key=lambda item: abs(float(item["price"]) - current_price))
+
+    nearest_support = _nearest(levels["support"])
+    nearest_resistance = _nearest(levels["resistance"])
+    dealing_range_high = float(price_frame["high"].tail(40).max())
+    dealing_range_low = float(price_frame["low"].tail(40).min())
+    equilibrium = (dealing_range_high + dealing_range_low) / 2.0
+    location = "premium" if current_price > equilibrium else "discount"
+    return {
+        "session": session,
+        "structure": structure,
+        "rsi_14": round(rsi, 2),
+        "atr_14": round(atr, 5),
+        "equilibrium": round(equilibrium, 5),
+        "dealing_range_high": round(dealing_range_high, 5),
+        "dealing_range_low": round(dealing_range_low, 5),
+        "location": location,
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
+        "swing_levels": levels,
+        "order_blocks": order_blocks,
+        "fair_value_gaps": fair_value_gaps,
+    }
+
+
+def build_chart_snapshot(price_frame: pd.DataFrame, bars: int = 120) -> dict[str, Any]:
+    frame = price_frame.tail(bars).copy()
+    if frame.empty:
+        return {"bars": 0}
+    return {
+        "bars": int(len(frame)),
+        "close_series": [round(float(value), 5) for value in frame["close"].tolist()],
+        "high_series": [round(float(value), 5) for value in frame["high"].tolist()],
+        "low_series": [round(float(value), 5) for value in frame["low"].tolist()],
+        "return_1_series": [round(float(value), 6) for value in frame["return_1"].tolist()],
+        "rsi_14_series": [round(float(value), 4) for value in frame["rsi_14"].tolist()],
+        "ema_cross_series": [round(float(value), 4) for value in frame["ema_cross"].tolist()],
+    }
+
+
 def _build_news_matrix(price_index: pd.Index, news_items: list[dict[str, Any]]) -> tuple[np.ndarray, float, float]:
     if not news_items:
         return np.zeros((len(price_index), FEATURE_DIM_NEWS), dtype=np.float32), 0.0, 0.0
@@ -596,6 +787,212 @@ def _build_crowd_matrix(price_index: pd.Index, discussions: list[dict[str, Any]]
 
 def _build_persona_snapshot(decisions: dict[str, dict[str, float]]) -> dict[str, float]:
     return {name: round(float(values.get("impact", 0.0)), 4) for name, values in decisions.items()}
+
+
+def _llm_content(llm_context: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not llm_context:
+        return {}
+    content = llm_context.get("content", {}) if isinstance(llm_context, Mapping) else {}
+    return content if isinstance(content, dict) else {}
+
+
+def _llm_numeric_prior(llm_content: Mapping[str, Any]) -> float:
+    if not llm_content:
+        return 0.5
+    institutional = _safe_float(llm_content.get("institutional_bias"), 0.0)
+    whale = _safe_float(llm_content.get("whale_bias"), 0.0)
+    retail = _safe_float(llm_content.get("retail_bias"), 0.0)
+    market_bias = (0.40 * institutional) + (0.35 * whale) + (0.25 * retail)
+    return float(np.clip(0.5 + 0.5 * market_bias, 0.0, 1.0))
+
+
+def _apply_llm_persona_tilts(personas: dict[str, Any], llm_content: Mapping[str, Any]) -> dict[str, float]:
+    bias_map = {
+        "institutional": _safe_float(llm_content.get("institutional_bias"), 0.0),
+        "whale": _safe_float(llm_content.get("whale_bias"), 0.0),
+        "retail": _safe_float(llm_content.get("retail_bias"), 0.0),
+        "algo": 0.35 * _safe_float(llm_content.get("institutional_bias"), 0.0) + 0.15 * _safe_float(llm_content.get("whale_bias"), 0.0),
+        "noise": 0.15 * _safe_float(llm_content.get("retail_bias"), 0.0),
+    }
+    raw_weights = {}
+    for name, persona in personas.items():
+        tilt = bias_map.get(name, 0.0)
+        persona.capital_weight = max(0.01, float(persona.capital_weight) * (1.0 + 0.30 * tilt))
+        raw_weights[name] = float(persona.capital_weight)
+    total = sum(raw_weights.values()) or 1.0
+    normalized = {name: weight / total for name, weight in raw_weights.items()}
+    for name, persona in personas.items():
+        persona.capital_weight = normalized[name]
+    return {f"{name}_weight": round(value, 4) for name, value in normalized.items()}
+
+
+def _build_branch_conversation(branches: list[dict[str, Any]], llm_content: Mapping[str, Any], simulation: Mapping[str, Any]) -> dict[str, Any]:
+    if not branches:
+        return {
+            "summary": "No branches available.",
+            "top_branch": "No branch summary available.",
+            "minority_branch": "No minority scenario available.",
+            "debate_lines": [],
+        }
+    ranked = sorted(
+        branches,
+        key=lambda branch: (
+            _safe_float(branch.get("probability"), 0.0) * 0.65
+            + _safe_float(branch.get("branch_fitness"), 0.0) * 0.25
+            + _safe_float(branch.get("minority_guardrail"), 0.0) * 0.10
+        ),
+        reverse=True,
+    )
+    top_branch = ranked[0]
+    bullish = [branch for branch in branches if branch.get("predicted_prices", [0])[-1] >= branch.get("predicted_prices", [0])[0]]
+    bearish = [branch for branch in branches if branch.get("predicted_prices", [0])[-1] < branch.get("predicted_prices", [0])[0]]
+    consensus_bias = str(simulation.get("scenario_bias", "neutral"))
+    minority_pool = bearish if consensus_bias == "bullish" else bullish
+    minority_ranked = sorted(
+        minority_pool,
+        key=lambda branch: (
+            _safe_float(branch.get("minority_guardrail"), 0.0) * 0.55
+            + _safe_float(branch.get("probability"), 0.0) * 0.30
+            + _safe_float(branch.get("branch_fitness"), 0.0) * 0.15
+        ),
+        reverse=True,
+    )
+    minority_branch = minority_ranked[0] if minority_ranked else branches[min(len(branches) - 1, 1)]
+    if minority_branch.get("path_id") == top_branch.get("path_id") and len(ranked) > 1:
+        minority_branch = ranked[-1]
+    narrative = str(llm_content.get("dominant_narrative", "mixed narrative")).strip() or "mixed narrative"
+    explanation = str(llm_content.get("explanation", "Branch disagreement remains interpretable.")).strip()
+    macro = str(llm_content.get("macro_thesis", "macro view unavailable")).strip()
+    supporting = ranked[1:4]
+    debate_lines = [
+        f"Institutional: {macro}. Branch {top_branch.get('path_id')} is strongest because it fits the current regime best.",
+        f"Retail: {narrative}. I chase branch {top_branch.get('path_id')} because the crowd reads it as continuation.",
+        f"Whale: Branch {minority_branch.get('path_id')} is the trap scenario I preserve in case the crowd gets too one-sided.",
+        f"Algo: Branch {top_branch.get('path_id')} has the cleanest structure, while branch {minority_branch.get('path_id')} is the main invalidation path.",
+    ]
+    return {
+        "summary": explanation,
+        "top_branch": f"Branch {top_branch.get('path_id')} | driver={top_branch.get('dominant_driver')} | persona={top_branch.get('dominant_persona')} | label={top_branch.get('branch_label')}",
+        "minority_branch": f"Branch {minority_branch.get('path_id')} | driver={minority_branch.get('dominant_driver')} | persona={minority_branch.get('dominant_persona')} | label={minority_branch.get('branch_label')}",
+        "supporting_branches": [
+            f"Branch {branch.get('path_id')} | prob={_safe_float(branch.get('probability'), 0.0):.3f} | label={branch.get('branch_label')}"
+            for branch in supporting
+        ],
+        "top_branch_id": top_branch.get("path_id"),
+        "minority_branch_id": minority_branch.get("path_id"),
+        "debate_lines": debate_lines,
+    }
+
+
+def _fallback_swarm_judge(bot_swarm: Mapping[str, Any], simulation: Mapping[str, Any], technical_analysis: Mapping[str, Any]) -> dict[str, Any]:
+    bots = list(bot_swarm.get("bots", []) or [])
+    aggregate = bot_swarm.get("aggregate", {}) if isinstance(bot_swarm, Mapping) else {}
+    top_bot = max(bots, key=lambda item: _safe_float(item.get("confidence"), 0.0), default={})
+    weakest_bot = min(bots, key=lambda item: _safe_float(item.get("confidence"), 0.0), default={})
+    bias = str(aggregate.get("signal", simulation.get("scenario_bias", "neutral")))
+    location = str(technical_analysis.get("location", "balanced")).lower()
+    master_confidence = _safe_float(aggregate.get("confidence"), _safe_float(simulation.get("overall_confidence"), 0.0))
+    return {
+        "available": False,
+        "content": {
+            "master_bias": bias,
+            "master_confidence": round(master_confidence, 6),
+            "manual_stance": "buy" if bias == "bullish" and master_confidence >= 0.58 else "sell" if bias == "bearish" and master_confidence >= 0.58 else "hold",
+            "manual_action_reason": f"Use the simulator bias as a manual stance only while structure remains in {location}.",
+            "crowd_emotion": "compressed conviction" if master_confidence > 0.55 else "mixed emotion",
+            "crowd_lean": f"crowd leans {bias}",
+            "discussion_takeaway": "Public reaction is still mixed and should be treated as a sentiment helper, not a decisive signal.",
+            "top_bot": str(top_bot.get("name", "unknown")),
+            "weakest_bot": str(weakest_bot.get("name", "unknown")),
+            "judge_summary": f"The bot swarm and simulator lean {bias}, with market structure currently in {location}.",
+            "debate_lines": [
+                f"Judge: strongest specialist right now is {top_bot.get('name', 'unknown')}.",
+                f"Judge: weakest conviction comes from {weakest_bot.get('name', 'unknown')}.",
+                f"Judge: simulator bias is {simulation.get('scenario_bias', 'neutral')}.",
+                f"Judge: structural location is {location}.",
+            ],
+            "public_reaction_lines": [
+                "Retail chat would likely chase the visible move if price keeps extending.",
+                "Institutional-style readers would wait for structure confirmation around the active zone.",
+                "Contrarian participants would watch the minority scenario for a trap or squeeze failure.",
+            ],
+            "minority_case": "Minority case survives through the weaker branches and skeptical bot layer.",
+            "actionable_structure": f"Order-block and equilibrium context point to a {location} location test.",
+        },
+    }
+
+
+def _build_branch_graph(branches: list[dict[str, Any]], highlighted_branches: Mapping[str, Any], anchor_price: float) -> dict[str, Any]:
+    top_branch_id = highlighted_branches.get("top_branch_id")
+    minority_branch_id = highlighted_branches.get("minority_branch_id")
+    traces = []
+    for branch in branches[:12]:
+        branch_id = branch.get("path_id")
+        prices = [anchor_price] + list(branch.get("predicted_prices", []))
+        timestamps = [None] + list(branch.get("timestamps", []))
+        traces.append(
+            {
+                "path_id": branch_id,
+                "timestamps": timestamps,
+                "prices": prices,
+                "probability": branch.get("probability"),
+                "branch_fitness": branch.get("branch_fitness"),
+                "branch_label": branch.get("branch_label"),
+                "highlight": "top" if branch_id == top_branch_id else "minority" if branch_id == minority_branch_id else "support",
+            }
+        )
+    return {"traces": traces}
+
+
+def _llm_price_tilt(current_price: float, atr: float, llm_content: Mapping[str, Any], minutes: int) -> float:
+    llm_bias = (_llm_numeric_prior(llm_content) - 0.5) * 2.0
+    horizon_scale = {5: 0.35, 10: 0.55, 15: 0.75, 20: 0.90, 25: 1.05, 30: 1.25}.get(minutes, 0.55)
+    return float(current_price + (atr * horizon_scale * llm_bias))
+
+
+def _build_final_forecast(
+    payload: Mapping[str, Any],
+    bot_swarm: Mapping[str, Any],
+    llm_content: Mapping[str, Any],
+    model_prediction: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, Mapping) else {}
+    current_price = _safe_float(market.get("current_price"), 0.0)
+    atr = max(_safe_float(payload.get("current_row", {}).get("atr_14"), current_price * 0.0015), 0.25)
+    cone = list(payload.get("cone", []) if isinstance(payload, Mapping) else [])
+    bot_horizons = {int(item.get("minutes")): item for item in (bot_swarm.get("aggregate", {}).get("horizon_predictions", []) if isinstance(bot_swarm, Mapping) else [])}
+    model_probability = _safe_float((model_prediction or {}).get("bullish_probability"), 0.5)
+    model_bias = (model_probability - 0.5) * 2.0
+    points = []
+    for point in cone:
+        minutes = int(_safe_float(point.get("horizon"), 1.0) * 5)
+        branch_center = _safe_float(point.get("center_price"), current_price)
+        bot_target = _safe_float(bot_horizons.get(minutes, {}).get("target_price"), branch_center)
+        llm_target = _llm_price_tilt(current_price, atr, llm_content, minutes)
+        model_target = current_price + (atr * {5: 0.22, 10: 0.36, 15: 0.52, 20: 0.68, 25: 0.84, 30: 1.00}.get(minutes, 0.36) * model_bias)
+        final_price = (0.52 * branch_center) + (0.23 * bot_target) + (0.15 * llm_target) + (0.10 * model_target)
+        points.append(
+            {
+                "minutes": minutes,
+                "timestamp": point.get("timestamp"),
+                "branch_center": round(branch_center, 5),
+                "bot_target": round(bot_target, 5),
+                "llm_target": round(llm_target, 5),
+                "final_price": round(float(final_price), 5),
+            }
+        )
+    horizon_table = [
+        {
+            "minutes": item["minutes"],
+            "final_price": item["final_price"],
+            "branch_center": item["branch_center"],
+            "bot_target": item["bot_target"],
+            "llm_target": item["llm_target"],
+        }
+        for item in points
+        if item["minutes"] in {5, 10, 15, 30}
+    ]
+    return {"points": points, "horizon_table": horizon_table}
 
 
 def _normalized_weights_from_leaves(leaves) -> np.ndarray:
@@ -808,24 +1205,31 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
     }
 
 
-def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str) -> dict[str, Any]:
-    personas = default_personas()
+def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str, personas: dict[str, Any], llm_content: Mapping[str, Any]) -> dict[str, Any]:
     seed_state = simulate_one_step(current_row=current_row, personas=personas, seed=42)
-    root = expand_binary_tree(current_row, personas, max_depth=5)
+    root = expand_binary_tree(current_row, personas, max_depth=6)
     leaves = iter_leaves(root)
     collapse = reverse_collapse(leaves)
 
     last_timestamp = price_frame.index[-1]
     last_price = float(price_frame.iloc[-1]["close"])
     atr = max(float(current_row.get("atr_14", 0.0) or 0.0), max(last_price * 0.0015, 0.5))
+    ranked_leaves = sorted(
+        leaves,
+        key=lambda item: (float(item.probability_weight) * 0.70) + (float(item.branch_fitness) * 0.20) + (float(item.minority_guardrail) * 0.10),
+        reverse=True,
+    )
     branches = []
-    for index, leaf in enumerate(sorted(leaves, key=lambda item: item.probability_weight, reverse=True), start=1):
+    for index, leaf in enumerate(ranked_leaves, start=1):
         prices = leaf.path_prices or [last_price]
         timestamps = [(last_timestamp + pd.Timedelta(minutes=5 * step)).isoformat() for step in range(1, len(prices) + 1)]
         branches.append(
             {
                 "path_id": index,
                 "probability": round(float(leaf.probability_weight), 6),
+                "branch_fitness": round(float(leaf.branch_fitness), 6),
+                "minority_guardrail": round(float(leaf.minority_guardrail), 6),
+                "branch_label": str(leaf.branch_label),
                 "predicted_prices": [round(float(price), 5) for price in prices],
                 "timestamps": timestamps,
                 "dominant_persona": dominant_persona_name(leaf.state) if leaf.state is not None else "unknown",
@@ -844,6 +1248,7 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
     move_strength = min(1.0, mean_move / max(atr * 2.5, 1e-6))
     overall_confidence = max(0.0, min(0.92, directional_agreement * (0.35 + 0.65 * move_strength) * collapse.consensus_score))
     price_change = last_price - float(price_frame.iloc[-2]["close"]) if len(price_frame) > 1 else 0.0
+    branch_conversation = _build_branch_conversation(branches, llm_content, {"scenario_bias": "bullish" if predicted_center >= last_price else "bearish"})
     return {
         "symbol": symbol,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -861,16 +1266,25 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "overall_confidence": round(float(overall_confidence), 6),
             "dominant_driver": collapse.dominant_driver,
             "scenario_bias": "bullish" if predicted_center >= last_price else "bearish",
+            "llm_numeric_prior": round(_llm_numeric_prior(llm_content), 6),
+            "branch_count": len(branches),
         },
         "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
         "branches": branches,
         "cone": cone_points,
+        "branch_conversation": branch_conversation,
+        "highlighted_branches": {
+            "top_branch_id": branch_conversation.get("top_branch_id"),
+            "minority_branch_id": branch_conversation.get("minority_branch_id"),
+        },
     }
 
 
-def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN) -> tuple[np.ndarray, dict[str, Any]]:
+def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provider: str | None = None) -> tuple[np.ndarray, dict[str, Any]]:
     candles = fetch_recent_market_candles(symbol)
     price_frame = engineer_price_features(candles)
+    technical_analysis = build_technical_analysis(price_frame)
+    chart_snapshot = build_chart_snapshot(price_frame, bars=120)
     news_items = fetch_live_news(symbol)
     discussion_items = fetch_public_discussions(symbol)
     fear_greed = fetch_fear_greed_snapshot()
@@ -908,18 +1322,30 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN) -> tuple[
     latest["crowd_bias"] = round(float(crowd_bias), 4)
     latest["crowd_extreme"] = round(float(crowd_extreme), 4)
     latest["consensus_score"] = 0.0
-
-    payload = _branch_payload(live_frame, latest, symbol)
-    payload["feeds"] = {
-        "news": news_items,
-        "public_discussions": discussion_items,
-        "fear_greed": fear_greed,
-        "macro": macro,
-    }
     llm_context_input = {
         "symbol": symbol,
-        "market": payload["market"],
-        "simulation": payload["simulation"],
+        "market": {
+            "current_price": round(float(latest.get("close", 0.0)), 5),
+            "atr_14": round(float(latest.get("atr_14", 0.0)), 5),
+            "recent_closes": [round(float(value), 5) for value in live_frame["close"].tail(6).tolist()],
+        },
+        "simulation": {
+            "macro_bias": latest["macro_bias"],
+            "news_bias": latest["news_bias"],
+            "crowd_bias": latest["crowd_bias"],
+            "crowd_extreme": latest["crowd_extreme"],
+        },
+        "technical_analysis": {
+            "structure": technical_analysis.get("structure"),
+            "session": technical_analysis.get("session"),
+            "location": technical_analysis.get("location"),
+            "equilibrium": technical_analysis.get("equilibrium"),
+            "nearest_support": technical_analysis.get("nearest_support"),
+            "nearest_resistance": technical_analysis.get("nearest_resistance"),
+            "order_blocks": technical_analysis.get("order_blocks", [])[:3],
+            "fair_value_gaps": technical_analysis.get("fair_value_gaps", [])[:3],
+        },
+        "chart_snapshot_120": chart_snapshot,
         "macro": macro,
         "news_headlines": [item.get("title", "") for item in news_items[:5]],
         "crowd_items": [item.get("title", "") for item in discussion_items[:5]],
@@ -934,13 +1360,69 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN) -> tuple[
             "atr_14": latest.get("atr_14"),
         },
     }
-    payload["llm_context"] = request_market_context(symbol, llm_context_input)
+
+    llm_context = request_market_context(symbol, llm_context_input, provider=llm_provider)
+    llm_content = _llm_content(llm_context)
+    latest["llm_market_bias"] = round((_llm_numeric_prior(llm_content) - 0.5) * 2.0, 4)
+    latest["llm_institutional_bias"] = round(_safe_float(llm_content.get("institutional_bias"), 0.0), 4)
+    latest["llm_whale_bias"] = round(_safe_float(llm_content.get("whale_bias"), 0.0), 4)
+    latest["llm_retail_bias"] = round(_safe_float(llm_content.get("retail_bias"), 0.0), 4)
+    latest["llm_algo_bias"] = round(0.35 * latest["llm_institutional_bias"] + 0.15 * latest["llm_whale_bias"], 4)
+    latest["llm_noise_bias"] = round(0.15 * latest["llm_retail_bias"], 4)
+
+    personas = default_personas()
+    persona_weight_tilts = _apply_llm_persona_tilts(personas, llm_content)
+    feeds = {
+        "news": news_items,
+        "public_discussions": discussion_items,
+        "fear_greed": fear_greed,
+        "macro": macro,
+    }
+    bot_swarm = run_specialist_bots(
+        symbol=symbol,
+        current_row=latest,
+        technical_analysis=technical_analysis,
+        feeds=feeds,
+        llm_content=llm_content,
+    )
+    latest["bot_swarm_bias"] = round((_safe_float(bot_swarm.get("aggregate", {}).get("bullish_probability"), 0.5) - 0.5) * 2.0, 4)
+    payload = _branch_payload(live_frame, latest, symbol, personas=personas, llm_content=llm_content)
+    payload["persona_weight_tilts"] = persona_weight_tilts
+    payload["feeds"] = feeds
+    payload["bot_swarm"] = bot_swarm
+    payload["llm_context"] = llm_context
     payload["current_row"] = latest
+    payload["technical_analysis"] = technical_analysis
+    payload["branch_graph"] = _build_branch_graph(
+        payload.get("branches", []),
+        payload.get("highlighted_branches", {}),
+        anchor_price=_safe_float(payload.get("market", {}).get("current_price"), 0.0),
+    )
+    judge_input = {
+        "symbol": symbol,
+        "simulation": payload.get("simulation", {}),
+        "branches": payload.get("branches", [])[:6],
+        "bot_swarm": {
+            "aggregate": bot_swarm.get("aggregate", {}),
+            "bots": bot_swarm.get("bots", []),
+            "persona_reactions": bot_swarm.get("persona_reactions", {}),
+        },
+        "technical_analysis": technical_analysis,
+        "news_feed": news_items[:8],
+        "public_discussions": discussion_items[:8],
+        "market_context": llm_content,
+    }
+    swarm_judge = request_swarm_judgment(symbol, judge_input, provider=llm_provider)
+    if not swarm_judge.get("available", False):
+        swarm_judge = _fallback_swarm_judge(bot_swarm, payload.get("simulation", {}), technical_analysis)
+    payload["swarm_judge"] = swarm_judge
+    payload["chart_snapshot_120"] = chart_snapshot
+    payload["llm_provider"] = llm_provider or "lm_studio"
     return fused[-sequence_len:], payload
 
 
-def build_live_simulation(symbol: str, sequence_len: int = SEQUENCE_LEN) -> dict[str, Any]:
-    sequence, payload = build_live_sequence(symbol, sequence_len=sequence_len)
+def build_live_simulation(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provider: str | None = None) -> dict[str, Any]:
+    sequence, payload = build_live_sequence(symbol, sequence_len=sequence_len, llm_provider=llm_provider)
     payload["sequence_shape"] = [int(sequence.shape[0]), int(sequence.shape[1])]
     return payload | {"sequence": sequence.tolist()}
 

@@ -22,6 +22,7 @@ The final output is supposed to be:
 - a reverse-collapsed consensus
 - a confidence / disagreement measure
 - a live comparison between predicted future and actual market behavior
+- a human-readable technical context layer for manual analysis
 
 The key design idea is that uncertainty should be visible, not hidden.
 
@@ -35,6 +36,7 @@ The user wants a system much closer to the MiroFish-style idea:
 - a probability cone that reflects disagreement
 - a live UI showing real candles beside predicted future candles
 - manual observation first, not automatic execution
+- technical-analysis helpers such as order blocks, structure, and key levels
 
 The user also wants the project to be durable across chats and cloud resets.
 
@@ -54,6 +56,7 @@ Important implemented areas:
 - `src/training/*`
 - `src/service/*`
 - `src/mcp/*`
+- `src/ui/*`
 - `scripts/*`
 - `tests/*`
 
@@ -81,6 +84,8 @@ Usual local URLs:
 - `http://127.0.0.1:8000/ui`
 - `http://127.0.0.1:8000/api/simulate-live?symbol=XAUUSD`
 - `http://127.0.0.1:8000/api/live-monitor?symbol=XAUUSD`
+- `http://127.0.0.1:8000/api/llm/health`
+- `http://127.0.0.1:8000/api/llm/context?symbol=XAUUSD`
 
 ### Local Artifacts Already Present
 
@@ -105,7 +110,9 @@ Important truth:
 - the live UI exists
 - the model can run locally
 - branching and reverse-collapse primitives exist
-- but the full MiroFish-like simulation logic is not yet realized
+- GPT-OSS is now integrated as a local sidecar
+- manual technical-analysis panels now exist
+- but the full MiroFish-like simulation logic is still not complete
 
 Also important:
 
@@ -137,6 +144,9 @@ The live UI was upgraded to:
 - auto-refresh
 - history list
 - cone hit-rate view
+- top branch and minority branch overlays
+- branch conversation panel
+- manual technical-analysis panels
 
 ### Simulation Scaling Bug
 
@@ -152,6 +162,153 @@ Current cone logic now:
 - bounds confidence more realistically
 - versions simulation history so stale broken runs are excluded
 
+### Branching And Sidecar Integration
+
+Recent branching improvements:
+
+- each branch now rolls forward its own synthetic row state
+- branch ranking includes:
+  - probability weight
+  - branch fitness
+  - minority guardrail score
+- the UI now shows:
+  - strongest surviving branch
+  - minority invalidation branch
+  - supporting branches
+- GPT-OSS now acts as a bounded sidecar:
+  - it tilts personas
+  - it contributes a small numeric prior
+  - it does not replace the simulator
+
+### Specialist Bot Swarm
+
+The live simulator now also includes a visible specialist bot layer.
+
+Current design:
+
+- 10 deterministic strategy bots
+- each bot emits:
+  - direction
+  - confidence
+  - key level
+  - invalidation
+  - 5m / 10m / 15m projected levels
+  - short rationale
+- current bot set includes:
+  - trend bot
+  - breakout bot
+  - mean reversion bot
+  - order block bot
+  - liquidity sweep bot
+  - fair value gap bot
+  - macro regime bot
+  - news shock bot
+  - crowd extremes bot
+  - risk skeptic bot
+
+These bots are not the master predictor by themselves.
+
+They feed into:
+
+- the numeric ensemble
+- persona reactions
+- GPT swarm judgment
+- UI graph views
+
+### GPT Judge Layer
+
+GPT-OSS now has a second structured role beyond market context:
+
+- judge the 10-bot swarm
+- compare the bot swarm to the simulator and branch outputs
+- read raw headline feed and public-discussion feed during judgment
+- read technical context including order blocks and fair value gaps
+- read a 120-bar chart snapshot summary
+- summarize the debate
+- identify strongest and weakest specialist
+- describe the minority case
+- produce a final manual stance:
+  - buy
+  - sell
+  - hold
+- keep the result as structured JSON
+
+This is still a sidecar layer, not a replacement for the simulator.
+
+### Manual Technical Analysis Layer
+
+The live UI now includes a manual-analysis layer with:
+
+- structure / session read
+- RSI and ATR context
+- equilibrium and premium-discount context
+- nearest support / resistance
+- order block detection
+- fair value gap detection
+- order-block overlays on the live chart
+
+This matters because the simulator should help a human read the market, not only emit a cone.
+
+Important note on external order-block APIs:
+
+- no trustworthy free public order-block API has been adopted
+- order blocks are still computed locally from price structure
+- this is currently preferred over adding a fragile external dependency
+
+### UI Terminal Refresh
+
+The UI is now being reshaped toward a cleaner financial-terminal layout instead of a long sidebar stack.
+
+Current terminal direction:
+
+- clean live tape chart
+- predicted-vs-actual multi-horizon chart
+- final GPT judge panel
+- specialist bot board
+- public reaction theater
+- branch graph view
+- swarm graph
+- TradingView desk panel
+
+The goal is to keep:
+
+- one area for live market
+- one area for the simulator forecast
+- one area for final judgment
+- one area for raw feeds
+- one area for graphs and manual chart confirmation
+
+### Multi-Horizon Forecasting
+
+The live simulator is moving away from a 5-minute-only view.
+
+Current direction:
+
+- selectable forecast horizons
+  - 5m
+  - 10m
+  - 15m
+  - 30m
+- one combined final forecast path built from:
+  - branch simulator
+  - bot swarm aggregate
+  - GPT sidecar tilt
+  - base model bias
+
+This makes the compare chart closer to a final consensus path rather than only the raw simulator center.
+
+### Model Routing
+
+The LLM sidecar path is no longer assumed to be one backend only.
+
+Current direction:
+
+- selectable provider routing
+  - `LM Studio Local`
+  - `Ollama Cloud`
+- both market-context extraction and swarm judgment can be routed through the selected provider
+- the app still treats the LLM as a sidecar, not the main numeric predictor
+
 ## What Is Still Missing Relative To The Real Vision
 
 These pieces are still underbuilt compared with the target architecture:
@@ -164,6 +321,11 @@ These pieces are still underbuilt compared with the target architecture:
 - stronger confidence calibration
 - better use of macro/news/crowd in the actual branch simulator
 - walk-forward evaluation and reliability tracking
+- deeper smart-money-style structural logic
+- stronger technical overlays and annotation quality
+- historical validation of bot-swarm usefulness
+- better multi-horizon consistency checks across bots and branches
+- cleaner information hierarchy in the UI
 
 ## What “MiroFish Functionality” Should Mean Here
 
@@ -182,12 +344,14 @@ To get closer to the intended design, the branching system should behave like th
    - consistency with current regime
    - historical analog fit
    - agreement / disagreement with the neural model bias
+   - structural validity
 6. Reverse collapse should preserve every leaf as a vote.
 7. Final confidence should come from:
    - branch directional agreement
    - branch price dispersion
    - branch fit quality
    - model calibration
+   - realism of the projected move
 
 That is much closer to the real target than the current lighter implementation.
 
@@ -197,11 +361,13 @@ That is much closer to the real target than the current lighter implementation.
 
 Highest-value work:
 
-- branch over simulated candle paths, not just simple repeated ABM steps
+- branch over simulated candle paths, not just repeated ABM steps
 - store branch state per timestep
 - compute branch fitness using historical analog windows
 - keep more than one “winning” path alive
 - collapse from all leaves, never a single winner
+- keep an explicit minority scenario even in strong-consensus regimes
+- connect branch fitness more directly to the specialist bot swarm
 
 ### 2. Reverse Collapse
 
@@ -256,7 +422,25 @@ Also add regime-specific behavior:
 - panic / liquidation
 - post-news fade
 
-### 5. Evaluation
+### 5. Technical Market Structure
+
+The simulator should get better at reading structure the same way a discretionary human would.
+
+Important additions:
+
+- higher-timeframe dealing range context
+- better order-block validation
+- liquidity pool detection above highs / below lows
+- fair value gap prioritization
+- premium / discount logic
+- stronger swing failure pattern recognition
+
+These should inform both:
+
+- branch scoring
+- UI overlays for manual reading
+
+### 6. Evaluation
 
 Current project still needs stronger evaluation than plain classifier metrics.
 
@@ -268,8 +452,11 @@ Priorities:
 - cone containment rate
 - directional hit-rate after filtering
 - regime-by-regime performance
+- minority-scenario rescue rate
+- bot-vs-simulator agreement calibration
+- judge stability under repeated runs
 
-### 6. UI / Monitoring
+### 7. UI / Monitoring
 
 Need to keep improving:
 
@@ -279,6 +466,9 @@ Need to keep improving:
 - branch-by-branch explanation
 - source timestamps for every feed
 - stale-feed warnings
+- richer technical overlays
+- better terminal-style layout and panel hierarchy
+- optional TradingView/manual chart workspace
 
 ## Should We Use A Local LLM?
 
@@ -320,6 +510,96 @@ So the main predictor should still be:
 
 The LLM should be an interpretability and perception assistant, not the market oracle.
 
+## On Building Trading Bots
+
+The cleanest stance is:
+
+- Nexus Trader should remain a market simulator first
+- execution bots, if added, should sit downstream as optional consumers
+
+The idea of running many bots in parallel is not wrong, but it will not magically create `90%+` accuracy.
+
+Better version of that idea:
+
+- keep one core simulator
+- add multiple execution-policy agents downstream
+- examples:
+  - trend continuation policy
+  - reversal policy
+  - breakout policy
+  - mean-reversion policy
+  - no-trade filter policy
+- human overseer approves or rejects
+
+That can improve decision quality because different policies specialize in different regimes.
+
+What should not happen:
+
+- 10 random bots all placing equal-weight opinions
+- treating vote count as truth
+
+If multi-agent execution is ever added, it should be:
+
+- simulator first
+- regime filter second
+- strategy policies third
+- human oversight on top
+
+### Better Interpretation Of “10 Bots”
+
+The useful version is not 10 random bots voting blindly.
+
+The useful version is:
+
+- one core simulator
+- one model layer
+- one local LLM judge
+- 10 specialist strategy bots that expose interpretable views
+
+So the 10 bots should be treated as:
+
+- visible specialist analysts
+- structured policy heads
+- manual-analysis helpers
+
+not as autonomous execution engines.
+
+## On LM Studio Parallelism
+
+For the current Nexus use case, GPT-OSS is a sidecar, not the main engine.
+
+That means LM Studio parallelism should be chosen for:
+
+- low latency
+- stable memory usage
+- reliable JSON output
+
+Practical recommendation:
+
+- `4` parallel is reasonable right now
+- increase only if:
+  - GPU memory headroom is clearly available
+  - latency does not spike
+  - JSON reliability does not worsen
+
+For sidecar interpretation calls, higher parallelism is often worse if it causes:
+
+- context swapping
+- slower first-token time
+- unstable response timing
+
+So the default recommendation is:
+
+- keep `4` for now
+- only test `6` or `8` if the machine remains smooth
+- do not increase it just because more sounds better
+
+With an RTX 4070 and 16GB RAM:
+
+- `4` is still the safest default for GPT-OSS sidecar usage
+- `6` may be worth testing only if latency stays acceptable
+- `8+` is likely to hurt responsiveness more than it helps for this project
+
 ## Recommendation On Specific Local Models
 
 Based on current official/public model info:
@@ -354,12 +634,12 @@ Best architecture choice:
 
 If continuing seriously, the best next build order is:
 
-1. Rebuild the branching engine around realistic branch price paths.
-2. Add historical analog branch scoring.
-3. Add regime classification.
-4. Add confidence calibration from actual branch reliability.
-5. Add minority-scenario tracking in the UI.
-6. Add an LLM sidecar for macro/news/crowd interpretation.
+1. Add historical analog branch scoring.
+2. Add regime classification.
+3. Improve reverse collapse and minority scenario logic further.
+4. Improve confidence calibration from actual branch reliability.
+5. Improve technical structure scoring.
+6. Keep GPT-OSS as a structured sidecar.
 7. Only then consider more advanced training loops.
 
 ## Suggested LLM Role In This Project
@@ -414,6 +694,7 @@ Questions to ask during that audit:
 - do personas differ enough to matter?
 - are we leaking future information?
 - is the UI comparing like-for-like timestamps and sources?
+- are technical overlays helping or just adding noise?
 
 ## Master Prompt For Future Chats
 
@@ -445,14 +726,23 @@ Current important truths:
 - Essential cloud artifacts already exist locally, including the TFT checkpoint and evaluation summaries.
 - XAUUSD now uses a spot-calibrated public gold feed instead of raw futures-only display.
 - The old unrealistic 5-minute projection bug was fixed by switching to weighted branch-path price aggregation.
+- Branches now roll forward their own synthetic state instead of replaying the same base row.
+- GPT-OSS is integrated as a local sidecar.
+- GPT receives a 120-bar chart snapshot summary in the live context path.
+- the LLM route can now be switched between LM Studio local and Ollama cloud.
+- The UI includes manual technical-analysis panels and branch overlays.
+- The UI includes a 10-bot specialist swarm, a GPT judge panel, a swarm graph, and a branch graph view.
+- GPT judgment now reads raw news, public discussion, technical structure, branches, and bot outputs together.
+- The UI includes a TradingView desk panel for external chart confirmation.
+- The compare chart is moving toward a multi-horizon final forecast path rather than a 5-minute-only raw simulator line.
 - The project still needs deeper MiroFish-like branching, branch fitness scoring, reverse-confidence collapse, and better confidence calibration.
 
 Highest-value next work:
-1. Make branching more realistic and multi-step.
-2. Add historical analog scoring for branches.
-3. Improve reverse collapse and minority scenario logic.
-4. Deepen persona logic and regime handling.
-5. Add LLM sidecar for structured macro/news/crowd reasoning.
+1. Add historical analog scoring for branches.
+2. Improve reverse collapse and minority scenario logic.
+3. Deepen persona logic and regime handling.
+4. Connect specialist bots more directly into branch scoring and multi-horizon consistency checks.
+5. Improve technical market-structure logic.
 6. Improve evaluation with walk-forward tests and cone hit-rate analysis.
 
 When working, inspect the existing codebase first and explain what is already implemented before changing architecture.
@@ -474,6 +764,13 @@ Nexus Trader is now a partially implemented live market simulator with:
 - spot-calibrated XAU feed
 - branching and reverse-collapse primitives
 - timestamped predicted-vs-actual UI
+- GPT-OSS sidecar integration
+- manual technical-analysis panels
+- 10 specialist strategy bots
+- GPT swarm judge
+- GPT final manual stance
+- swarm and branch graph views
+- TradingView desk panel
 - preserved local model artifacts
 
 But it is still not the full MiroFish-style simulator the user originally wanted.
@@ -481,9 +778,9 @@ But it is still not the full MiroFish-style simulator the user originally wanted
 The next serious step is not “bigger random model.”
 The next serious step is:
 
-- better branching
-- better branch scoring
+- better historical branch scoring
 - better collapse
 - better confidence
-- then an LLM sidecar for structured reasoning
-
+- better bot-simulator integration
+- better technical structure logic
+- then stronger structured reasoning around it

@@ -54,17 +54,19 @@ class Persona:
         crowd_bias = float(row.get("crowd_bias", 0.0))
         crowd_extreme = float(row.get("crowd_extreme", 0.0))
         displacement = float(row.get("displacement", 0.0))
+        llm_market_bias = float(row.get("llm_market_bias", 0.0))
+        llm_persona_bias = float(row.get(f"llm_{self.name}_bias", 0.0))
 
         if self.name == "retail":
-            return (0.15 * news_bias) + (0.34 * crowd_bias) + (0.18 * crowd_extreme * (1.0 if displacement >= 0 else -1.0))
+            return (0.15 * news_bias) + (0.34 * crowd_bias) + (0.18 * crowd_extreme * (1.0 if displacement >= 0 else -1.0)) + (0.08 * llm_market_bias) + (0.18 * llm_persona_bias)
         if self.name == "institutional":
-            return (0.40 * macro_bias) + (0.12 * news_bias) - (0.10 * crowd_bias * crowd_extreme)
+            return (0.40 * macro_bias) + (0.12 * news_bias) - (0.10 * crowd_bias * crowd_extreme) + (0.10 * llm_market_bias) + (0.22 * llm_persona_bias)
         if self.name == "algo":
-            return (0.08 * macro_bias) + (0.05 * news_bias) + (0.06 * np.tanh(displacement))
+            return (0.08 * macro_bias) + (0.05 * news_bias) + (0.06 * np.tanh(displacement)) + (0.05 * llm_market_bias)
         if self.name == "whale":
-            return (0.30 * macro_bias) - (0.28 * crowd_bias * max(0.3, crowd_extreme)) + (0.10 * news_bias)
+            return (0.30 * macro_bias) - (0.28 * crowd_bias * max(0.3, crowd_extreme)) + (0.10 * news_bias) + (0.08 * llm_market_bias) + (0.22 * llm_persona_bias)
         if self.name == "noise":
-            return (0.12 * news_bias) + (0.20 * crowd_bias) + rng_gauss_like(crowd_extreme)
+            return (0.12 * news_bias) + (0.20 * crowd_bias) + rng_gauss_like(crowd_extreme) + (0.04 * llm_market_bias)
         return 0.0
 
     def _contextual_confidence_boost(self, row: Mapping[str, float]) -> float:
