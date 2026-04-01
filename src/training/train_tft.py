@@ -95,8 +95,19 @@ def weighted_multihorizon_loss(
 ):
     if torch is None:
         raise ImportError("PyTorch is required for loss computation.")
-    real_loss = F.binary_cross_entropy(predictions, targets, reduction="none")
-    real_loss = real_loss.mean(dim=1)
+    if predictions.shape[1] == targets.shape[1] and (targets.shape[1] % 3 != 0):
+        real_loss = F.binary_cross_entropy(predictions, targets, reduction="none")
+        real_loss = real_loss.mean(dim=1)
+    else:
+        horizon_count = targets.shape[1] if targets.shape[1] <= 8 else targets.shape[1] // 3
+        direction_pred, hold_pred, confidence_pred = split_multihorizon_heads_torch(predictions, horizon_count)
+        direction_target, hold_target, confidence_target = split_multihorizon_heads_torch(targets, horizon_count)
+        direction_loss = F.binary_cross_entropy(direction_pred, direction_target, reduction="none")
+        direction_weight = 0.35 + 0.65 * (1.0 - hold_target)
+        direction_loss = (direction_loss * direction_weight).mean(dim=1)
+        hold_loss = F.binary_cross_entropy(hold_pred, hold_target, reduction="none").mean(dim=1)
+        confidence_loss = F.mse_loss(confidence_pred, confidence_target, reduction="none").mean(dim=1)
+        real_loss = (0.55 * direction_loss) + (0.25 * hold_loss) + (0.20 * confidence_loss)
     if sample_weights is not None:
         real_loss = real_loss * sample_weights
     real_loss = real_loss.mean()
@@ -109,6 +120,39 @@ def weighted_multihorizon_loss(
         sim_loss = sim_loss * sample_weights
     combined = (3.0 * real_loss + (sim_weight * sim_loss).mean()) / (3.0 + sim_weight.mean().clamp(min=1e-6))
     return combined
+
+
+def split_multihorizon_heads_numpy(values: np.ndarray, horizon_count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError("Expected 2D multi-horizon array.")
+    if values.shape[1] == horizon_count:
+        zeros = np.zeros_like(values)
+        return values, zeros, zeros
+    expected = horizon_count * 3
+    if values.shape[1] != expected:
+        raise ValueError(f"Expected {expected} multi-horizon channels, got {values.shape[1]}")
+    return (
+        values[:, :horizon_count],
+        values[:, horizon_count : 2 * horizon_count],
+        values[:, 2 * horizon_count : 3 * horizon_count],
+    )
+
+
+def split_multihorizon_heads_torch(values, horizon_count: int):
+    if values.dim() != 2:
+        raise ValueError("Expected 2D multi-horizon tensor.")
+    if values.shape[1] == horizon_count:
+        zeros = torch.zeros_like(values)
+        return values, zeros, zeros
+    expected = horizon_count * 3
+    if values.shape[1] != expected:
+        raise ValueError(f"Expected {expected} multi-horizon channels, got {values.shape[1]}")
+    return (
+        values[:, :horizon_count],
+        values[:, horizon_count : 2 * horizon_count],
+        values[:, 2 * horizon_count : 3 * horizon_count],
+    )
 
 
 def collect_binary_metrics(targets: np.ndarray, probabilities: np.ndarray, threshold: float = 0.5) -> Dict[str, float]:
@@ -212,35 +256,71 @@ def collect_multihorizon_metrics(
         raise ValueError("Multi-horizon metrics require 2D target/probability arrays.")
     if targets.shape != probabilities.shape:
         raise ValueError("Multi-horizon targets/probabilities must share shape.")
-    output_dim = targets.shape[1]
+    labels = list(horizon_labels or [])
+    inferred_horizons = len(labels) if labels else (targets.shape[1] if targets.shape[1] <= 8 else targets.shape[1] // 3)
+    if inferred_horizons <= 0:
+        raise ValueError("Unable to infer multi-horizon count.")
+    direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, inferred_horizons)
+    direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, inferred_horizons)
+    output_dim = direction_targets.shape[1]
     threshold_values = list(thresholds or [0.5] * output_dim)
     if len(threshold_values) != output_dim:
         raise ValueError("threshold count must match multi-horizon output dimension")
-    labels = list(horizon_labels or [f"h{i}" for i in range(output_dim)])
+    labels = labels or [f"h{i}" for i in range(output_dim)]
     horizon_metrics: Dict[str, Dict[str, float]] = {}
-    primary_metrics = collect_binary_metrics(targets[:, 0], probabilities[:, 0], threshold=threshold_values[0])
+    hold_metrics: Dict[str, Dict[str, float]] = {}
+    confidence_metrics: Dict[str, Dict[str, float]] = {}
+    primary_metrics = collect_binary_metrics(direction_targets[:, 0], direction_probabilities[:, 0], threshold=threshold_values[0])
     for index, label in enumerate(labels):
-        horizon_metrics[str(label)] = collect_binary_metrics(targets[:, index], probabilities[:, index], threshold=threshold_values[index])
+        horizon_metrics[str(label)] = collect_binary_metrics(direction_targets[:, index], direction_probabilities[:, index], threshold=threshold_values[index])
+        hold_metrics[str(label)] = collect_binary_metrics(hold_targets[:, index], hold_probabilities[:, index], threshold=0.5)
+        confidence_metrics[str(label)] = {
+            "mae": float(np.mean(np.abs(confidence_probabilities[:, index] - confidence_targets[:, index]))) if len(confidence_targets) else 0.0,
+            "mse": float(np.mean((confidence_probabilities[:, index] - confidence_targets[:, index]) ** 2)) if len(confidence_targets) else 0.0,
+            "predicted_mean": float(confidence_probabilities[:, index].mean()) if len(confidence_probabilities) else 0.0,
+            "target_mean": float(confidence_targets[:, index].mean()) if len(confidence_targets) else 0.0,
+        }
+    strategic_probability = direction_probabilities[:, -2:].mean(axis=1)
+    strategic_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_hold = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_confidence = confidence_probabilities[:, -2:].mean(axis=1) * (1.0 - hold_probabilities[:, -2:].mean(axis=1))
     return {
         "primary": primary_metrics,
+        "strategic": collect_binary_metrics(strategic_target, strategic_probability, threshold=0.5),
         "horizons": horizon_metrics,
+        "hold_horizons": hold_metrics,
+        "confidence_horizons": confidence_metrics,
+        "strategic_hold_rate": float(strategic_hold.mean()) if len(strategic_hold) else 0.0,
+        "strategic_confidence_mean": float(strategic_confidence.mean()) if len(strategic_confidence) else 0.0,
     }
 
 
 def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5) -> np.ndarray:
     probabilities = np.asarray(probabilities, dtype=np.float32)
-    labels = (probabilities >= threshold).astype(np.float32)
+    horizon_count = probabilities.shape[1] if probabilities.shape[1] <= 8 else probabilities.shape[1] // 3
+    direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, horizon_count)
+    labels = (direction_probabilities >= threshold).astype(np.float32)
     primary = labels[:, :1]
     agreement = (labels == primary).mean(axis=1, keepdims=True)
-    centered = np.abs(probabilities - 0.5)
+    centered = np.abs(direction_probabilities - 0.5)
+    strategic_direction = direction_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else direction_probabilities.mean(axis=1, keepdims=True)
+    strategic_hold = hold_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else hold_probabilities.mean(axis=1, keepdims=True)
+    strategic_confidence = confidence_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else confidence_probabilities.mean(axis=1, keepdims=True)
     return np.concatenate(
         [
-            probabilities[:, :1],
-            probabilities.mean(axis=1, keepdims=True),
-            probabilities.std(axis=1, keepdims=True),
+            direction_probabilities[:, :1],
+            direction_probabilities.mean(axis=1, keepdims=True),
+            direction_probabilities.std(axis=1, keepdims=True),
             centered.max(axis=1, keepdims=True),
             centered.mean(axis=1, keepdims=True),
             agreement,
+            hold_probabilities.mean(axis=1, keepdims=True),
+            hold_probabilities.std(axis=1, keepdims=True),
+            confidence_probabilities.mean(axis=1, keepdims=True),
+            confidence_probabilities.std(axis=1, keepdims=True),
+            strategic_direction,
+            strategic_hold,
+            strategic_confidence,
         ],
         axis=1,
     ).astype(np.float32)
@@ -260,10 +340,35 @@ def train_precision_gate(
     l2: float = 1e-3,
 ) -> Dict[str, Any]:
     features = horizon_agreement_features(probabilities, threshold=threshold)
-    labels = ((probabilities[:, 0] >= threshold).astype(np.float32) == targets[:, 0].astype(np.float32)).astype(np.float32)
+    horizon_count = probabilities.shape[1] if probabilities.shape[1] <= 8 else probabilities.shape[1] // 3
+    direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, horizon_count)
+    direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, horizon_count)
+    strategic_dir_pred = (direction_probabilities[:, -2:].mean(axis=1) >= threshold).astype(np.float32) if horizon_count >= 2 else (direction_probabilities[:, 0] >= threshold).astype(np.float32)
+    strategic_dir_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32) if horizon_count >= 2 else direction_targets[:, 0]
+    strategic_hold_target = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32) if horizon_count >= 2 else hold_targets[:, 0]
+    strategic_conf_target = confidence_targets[:, -2:].mean(axis=1) if horizon_count >= 2 else confidence_targets[:, 0]
+    labels = np.where(
+        strategic_hold_target >= 0.5,
+        1.0,
+        ((strategic_dir_pred == strategic_dir_target).astype(np.float32) * (strategic_conf_target >= 0.35).astype(np.float32)),
+    ).astype(np.float32)
     if len(np.unique(labels)) < 2:
         return {
-            "feature_names": ["primary_prob", "mean_prob", "std_prob", "max_confidence", "mean_confidence", "agreement_ratio"],
+            "feature_names": [
+                "primary_prob",
+                "mean_prob",
+                "std_prob",
+                "max_confidence",
+                "mean_confidence",
+                "agreement_ratio",
+                "hold_mean",
+                "hold_std",
+                "confidence_mean",
+                "confidence_std",
+                "strategic_direction",
+                "strategic_hold",
+                "strategic_confidence",
+            ],
             "weights": [0.0] * features.shape[1],
             "bias": float(np.log(np.clip(labels.mean() / max(1e-6, 1.0 - labels.mean()), 1e-6, 1e6))) if labels.size else 0.0,
             "train_accuracy": float(labels.mean()) if labels.size else 0.0,
@@ -282,18 +387,33 @@ def train_precision_gate(
     final_probs = _sigmoid(features @ weights + bias)
     best_threshold = 0.5
     best_score = float("-inf")
-    for threshold_candidate in np.linspace(0.5, 0.9, 17):
+    for threshold_candidate in np.linspace(0.45, 0.9, 19):
         active = final_probs >= float(threshold_candidate)
         participation = float(active.mean()) if active.size else 0.0
-        if participation < 0.05:
+        if participation < 0.01:
             continue
         precision = float(labels[active].mean()) if active.any() else 0.0
-        score = (0.75 * precision) + (0.25 * participation)
+        abstain_quality = float(labels[~active].mean()) if np.any(~active) else 0.5
+        score = (0.65 * precision) + (0.20 * participation) + (0.15 * abstain_quality)
         if score > best_score:
             best_score = score
             best_threshold = float(threshold_candidate)
     return {
-        "feature_names": ["primary_prob", "mean_prob", "std_prob", "max_confidence", "mean_confidence", "agreement_ratio"],
+        "feature_names": [
+            "primary_prob",
+            "mean_prob",
+            "std_prob",
+            "max_confidence",
+            "mean_confidence",
+            "agreement_ratio",
+            "hold_mean",
+            "hold_std",
+            "confidence_mean",
+            "confidence_std",
+            "strategic_direction",
+            "strategic_hold",
+            "strategic_confidence",
+        ],
         "weights": [float(value) for value in weights],
         "bias": float(bias),
         "train_accuracy": float((((final_probs >= 0.5).astype(np.float32)) == labels).mean()),
@@ -511,11 +631,14 @@ def train_multihorizon_model(
             epoch_losses.append(float(loss.item()))
         val_metrics, _, _ = evaluate_multihorizon_model(model, val_loader, device, horizon_labels=horizon_labels)
         primary_metrics = val_metrics.get("primary", {})
+        strategic_metrics = val_metrics.get("strategic", {})
         train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         epoch_record = {"epoch": epoch, "train_loss": train_loss, **primary_metrics}
+        for key, value in strategic_metrics.items():
+            epoch_record[f"strategic_{key}"] = value
         history.append(epoch_record)
 
-        score = float(primary_metrics.get(selection_metric, 0.0))
+        score = (0.35 * float(primary_metrics.get(selection_metric, 0.0))) + (0.65 * float(strategic_metrics.get(selection_metric, 0.0)))
         if score > best_score:
             best_score = score
             patience_left = patience

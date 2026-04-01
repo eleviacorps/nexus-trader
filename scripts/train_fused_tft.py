@@ -230,8 +230,11 @@ def main() -> int:
     if not feature_path.exists() or not target_path.exists():
         raise FileNotFoundError('Missing fused artifacts. Run scripts/build_fused_artifacts.py first.')
     multi_target_path = TARGETS_MULTIHORIZON_PATH if TARGETS_MULTIHORIZON_PATH.exists() and not args.disable_multihorizon else None
-    horizon_keys = ['target_5m', 'target_10m', 'target_15m', 'target_30m']
     horizon_labels = ['5m', '10m', '15m', '30m']
+    direction_keys = [f'target_{label}' for label in horizon_labels]
+    hold_keys = [f'hold_{label}' for label in horizon_labels]
+    confidence_keys = [f'confidence_{label}' for label in horizon_labels]
+    horizon_keys = direction_keys + hold_keys + confidence_keys
     use_multihorizon = multi_target_path is not None
 
     sim_target_path = SIM_TARGETS_PATH if SIM_TARGETS_PATH.exists() else None
@@ -340,9 +343,9 @@ def main() -> int:
             horizon_labels=horizon_labels,
         )
         val_metrics, val_targets, val_probabilities = evaluate_multihorizon_model(model, val_loader, device, horizon_labels=horizon_labels)
-        threshold_selection = find_optimal_threshold(val_targets[:, 0], val_probabilities[:, 0], metric=args.metric)
+        threshold_selection = find_optimal_threshold(val_targets[:, 2], val_probabilities[:, 2], metric=args.metric)
         threshold = float(threshold_selection['threshold'])
-        horizon_thresholds = [threshold] + [0.5] * (len(horizon_keys) - 1)
+        horizon_thresholds = [0.5, 0.5, threshold, threshold]
         calibrated_val_metrics = collect_multihorizon_metrics(val_targets, val_probabilities, thresholds=horizon_thresholds, horizon_labels=horizon_labels)
         gate = train_precision_gate(val_probabilities, val_targets, threshold=threshold)
         gate_probabilities_val = apply_precision_gate(val_probabilities, gate)
@@ -350,15 +353,15 @@ def main() -> int:
         gate_probabilities_test = apply_precision_gate(test_probabilities, gate)
         calibration_report = {
             'selection': threshold_selection,
-            'validation_curve': build_calibration_report(val_targets[:, 0], val_probabilities[:, 0]),
-            'test_curve': build_calibration_report(test_targets[:, 0], test_probabilities[:, 0]),
+            'validation_curve': build_calibration_report(val_targets[:, 2], val_probabilities[:, 2]),
+            'test_curve': build_calibration_report(test_targets[:, 2], test_probabilities[:, 2]),
             'precision_gate': {
                 'validation_curve': build_calibration_report(
-                    ((val_probabilities[:, 0] >= threshold).astype(np.float32) == val_targets[:, 0].astype(np.float32)).astype(np.float32),
+                    ((val_probabilities[:, 2] >= threshold).astype(np.float32) == val_targets[:, 2].astype(np.float32)).astype(np.float32),
                     gate_probabilities_val,
                 ),
                 'test_curve': build_calibration_report(
-                    ((test_probabilities[:, 0] >= threshold).astype(np.float32) == test_targets[:, 0].astype(np.float32)).astype(np.float32),
+                    ((test_probabilities[:, 2] >= threshold).astype(np.float32) == test_targets[:, 2].astype(np.float32)).astype(np.float32),
                     gate_probabilities_test,
                 ),
             },
@@ -408,6 +411,7 @@ def main() -> int:
         'model_config': vars(model.config),
         'split_report': split_report,
         'horizon_labels': horizon_labels if use_multihorizon else ['5m'],
+        'output_labels': horizon_keys if use_multihorizon else ['target_5m'],
         'multi_horizon': bool(use_multihorizon),
         'generated_at': datetime.now(timezone.utc).isoformat(),
     }
@@ -441,6 +445,7 @@ def main() -> int:
         'run_tag': args.run_tag,
         'multi_horizon': bool(use_multihorizon),
         'horizon_labels': horizon_labels if use_multihorizon else ['5m'],
+        'output_labels': horizon_keys if use_multihorizon else ['target_5m'],
         'precision_gate_path': str(precision_gate_path) if gate is not None else '',
     }
     metrics_report = {
@@ -464,7 +469,8 @@ def main() -> int:
         'split_report': split_report,
         'metrics_path': str(metrics_path),
         'horizon_labels': horizon_labels if use_multihorizon else ['5m'],
-        'primary_horizon': '5m',
+        'output_labels': horizon_keys if use_multihorizon else ['target_5m'],
+        'primary_horizon': '15m' if use_multihorizon else '5m',
         'multi_horizon': bool(use_multihorizon),
         'precision_gate_path': str(precision_gate_path) if gate is not None else '',
         'run_tag': args.run_tag,

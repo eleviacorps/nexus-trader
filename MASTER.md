@@ -801,6 +801,128 @@ Interpretation:
 - this is still not remotely close to a trustworthy `90%+` engine
 - the next gains are still much more likely to come from target redesign, alignment fixes, regime routing, and stronger filtering than from bigger models alone
 
+## Latest Multi-Horizon Retrain
+
+Another remote MI300X pass was completed after the target redesign and model upgrade.
+
+What changed in that run:
+
+- fused artifacts were rebuilt with the new hold-aware multi-horizon targets
+- the TFT head was upgraded to emit:
+  - `5m`
+  - `10m`
+  - `15m`
+  - `30m`
+- a lightweight precision gate was trained from validation behavior
+- two separate remote training runs were executed:
+  - full-history model
+  - recent-regime model
+
+### Full-History Multi-Horizon Result
+
+Split:
+
+- train: `2009 -> 2020`
+- val: `2021 -> 2023`
+- test: `2024 -> 2026`
+
+Key results:
+
+- `5m` test ROC-AUC: about `0.5107`
+- `10m` test ROC-AUC: about `0.5145`
+- `15m` test ROC-AUC: about `0.5145`
+- `30m` test ROC-AUC: about `0.5143`
+
+Interpretation:
+
+- the multi-horizon head is slightly more useful away from the shortest horizon
+- the primary `5m` edge is still very weak
+- the precision gate collapsed in this run and filtered everything out, which means the current gate feature set is not yet strong enough
+
+### Recent-Regime Model Result
+
+Split:
+
+- train: `2021 -> 2024`
+- val: `2025`
+- test: `2026`
+
+Key results on `2026`:
+
+- `5m` test ROC-AUC: about `0.5084`
+- `10m` test ROC-AUC: about `0.5139`
+- `15m` test ROC-AUC: about `0.5160`
+- `30m` test ROC-AUC: about `0.5250`
+
+Interpretation:
+
+- the recent-regime model still did not beat the `5m` ceiling meaningfully
+- but the longer horizons improved more than the primary horizon
+- that is a useful sign: the system appears to learn better at slightly slower horizons than at ultra-short directional timing
+- the recent-model gate became too permissive and passed everything, so it also needs another iteration
+
+### Honest Conclusion From This Pass
+
+This pass improved the architecture more than it improved the tradable edge.
+
+What got better:
+
+- cleaner supervision
+- real multi-horizon outputs
+- separate recent-regime path
+- proper gate artifact generation
+- better evaluation clarity
+
+What did not improve enough:
+
+- `5m` primary edge
+- abstain quality
+- selective win rate
+
+The most important new lesson is:
+
+- the project may have more signal at `15m / 30m` than at raw `5m`
+- if we keep forcing the evaluation story to be mostly about `5m`, we may be throwing away the part of the model that is actually learning something
+
+## Latest Hold / Confidence Upgrade
+
+The next architectural pass moved beyond plain directional horizon outputs.
+
+What changed:
+
+- each horizon now has three explicit supervised surfaces:
+  - `direction`
+  - `hold`
+  - `confidence`
+- the target builder now writes these into `targets_multihorizon.npz`
+- the model head can now emit `12` outputs:
+  - `target_5m`
+  - `target_10m`
+  - `target_15m`
+  - `target_30m`
+  - `hold_5m`
+  - `hold_10m`
+  - `hold_15m`
+  - `hold_30m`
+  - `confidence_5m`
+  - `confidence_10m`
+  - `confidence_15m`
+  - `confidence_30m`
+
+Why this matters:
+
+- abstention can now be modeled directly instead of bolted on later
+- the gate can reason over:
+  - horizon disagreement
+  - horizon hold likelihood
+  - horizon confidence quality
+- evaluation can now treat `15m / 30m` as a strategic surface instead of an afterthought
+
+Important practical note:
+
+- the local smoke run confirms the new head and reports execute end-to-end
+- this is still an early structural upgrade, not proof of a better live edge yet
+
 ## Latest Strategic Update
 
 The analog layer has now been upgraded from single-row similarity toward short-window regime analogs.
@@ -886,6 +1008,20 @@ What it is still not the best tool for:
 6. Train a separate regime / precision-gate model so the simulator can abstain more often instead of forcing weak predictions.
 7. Only then revisit whether LLM fine-tuning is worth the cost.
 
+Updated practical priority after the latest remote pass:
+
+1. redesign the precision gate features and threshold search so abstention is neither all-or-nothing nor fully permissive
+2. treat `15m / 30m` as first-class evaluation horizons instead of focusing almost entirely on `5m`
+3. promote the next numeric head toward explicit horizon-specific confidence / hold outputs
+4. add regime-conditioned training or routing instead of one shared head for every environment
+
+Updated again after the hold/confidence pass:
+
+1. run the next cloud pass on the new `12-output` head
+2. redesign gate labels around real tradeability and minority-risk avoidance
+3. evaluate strategic `15m / 30m` performance before spending more energy on raw `5m`
+4. route UI / live decision summaries through the strategic horizon view instead of the old first-channel assumption
+
 ## Concrete Ways To Break The Low-50% Ceiling
 
 These are the most realistic paths to beat the current roughly `51%` regime.
@@ -910,6 +1046,36 @@ These are the most realistic paths to beat the current roughly `51%` regime.
 
 7. Use GPT-OSS for labels, not for raw price forecasting.
    LoRA can still help if it improves regime labels, event severity, discussion polarity, and abstain logic. That can materially help the numeric stack without pretending the LLM is a market oracle.
+
+## On Retraining Again And Again
+
+Blindly retraining the same model again and again is usually not how the edge improves.
+
+Why:
+
+- if labels are weak, more retraining mostly teaches the same noise again
+- if the split is weak, more retraining often means overfitting
+- if the gate is weak, more retraining only makes the same bad decisions look more confident
+- if the signal is stronger at `15m / 30m` than `5m`, retraining a `5m`-obsessed setup just keeps wasting compute
+
+What repeated retraining is good for:
+
+- after changing labels
+- after changing horizons
+- after improving modalities
+- after improving regime routing
+- after improving abstention logic
+
+So the correct loop is:
+
+1. improve the problem definition
+2. retrain
+3. walk-forward test
+4. inspect failure modes
+5. change the system again
+6. retrain
+
+That is very different from simply rerunning the same training command and hoping accuracy drifts upward.
 
 ## Codebase Areas To Audit Next
 

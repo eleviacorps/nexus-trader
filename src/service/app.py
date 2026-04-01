@@ -175,6 +175,7 @@ class ModelServer:
         self.device = get_torch_device()
         config_payload = self.manifest.get('model_config', {})
         self.horizon_labels = list(self.manifest.get('horizon_labels', ['5m']))
+        self.output_labels = list(self.manifest.get('output_labels', [f'target_{label}' for label in self.horizon_labels]))
         config = NexusTFTConfig(
             input_dim=int(config_payload.get('input_dim', self.feature_dim)),
             hidden_dim=int(config_payload.get('hidden_dim', 128)),
@@ -195,11 +196,17 @@ class ModelServer:
             horizon_values = raw_output.astype(float).tolist()
         else:
             horizon_values = raw_output[0].astype(float).tolist()
-        bullish_probability = float(horizon_values[0])
-        horizon_probabilities = {
-            label: float(value)
-            for label, value in zip(self.horizon_labels, horizon_values)
-        }
+        output_map = {label: float(value) for label, value in zip(self.output_labels, horizon_values)}
+        if any(label.startswith('target_') for label in self.output_labels):
+            horizon_probabilities = {label.replace('target_', ''): value for label, value in output_map.items() if label.startswith('target_')}
+            hold_probabilities = {label.replace('hold_', ''): value for label, value in output_map.items() if label.startswith('hold_')}
+            confidence_outputs = {label.replace('confidence_', ''): value for label, value in output_map.items() if label.startswith('confidence_')}
+        else:
+            horizon_probabilities = {label: float(value) for label, value in zip(self.horizon_labels, horizon_values)}
+            hold_probabilities = {}
+            confidence_outputs = {}
+        primary_horizon = str(self.manifest.get('primary_horizon', self.horizon_labels[0] if self.horizon_labels else '5m'))
+        bullish_probability = float(horizon_probabilities.get(primary_horizon, next(iter(horizon_probabilities.values()), 0.5)))
         return PredictResponse(
             bullish_probability=bullish_probability,
             bearish_probability=float(1.0 - bullish_probability),
@@ -207,7 +214,7 @@ class ModelServer:
             threshold=self.threshold,
             sequence_len=self.sequence_len,
             feature_dim=self.feature_dim,
-            horizon_probabilities=horizon_probabilities,
+            horizon_probabilities={**horizon_probabilities, **{f'hold_{k}': v for k, v in hold_probabilities.items()}, **{f'confidence_{k}': v for k, v in confidence_outputs.items()}},
         )
 
     def predict_dict(self, sequence: list[list[float]]) -> dict[str, Any]:

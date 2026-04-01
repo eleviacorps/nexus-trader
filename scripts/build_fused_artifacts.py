@@ -115,6 +115,14 @@ def main() -> int:
             f'target_{horizon}m': (np.asarray(values[:row_count], dtype=np.float32) > 0.0).astype(np.float32)
             for horizon, values in target_artifacts.horizon_returns.items()
         },
+        **{
+            f'hold_{horizon}m': np.asarray(values[:row_count], dtype=np.float32)
+            for horizon, values in target_artifacts.horizon_hold_targets.items()
+        },
+        **{
+            f'confidence_{horizon}m': np.asarray(values[:row_count], dtype=np.float32)
+            for horizon, values in target_artifacts.horizon_confidence_targets.items()
+        },
         primary_targets=targets,
         primary_hold_mask=hold_mask,
         sample_weights=sample_weights,

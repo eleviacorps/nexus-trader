@@ -19,7 +19,13 @@ from config.project_config import (
 )
 from src.data.fused_dataset import DatasetSlice, FusedMultiHorizonSequenceDataset, FusedSequenceDataset
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
-from src.training.train_tft import apply_precision_gate, build_calibration_report, collect_binary_metrics, collect_multihorizon_metrics
+from src.training.train_tft import (
+    apply_precision_gate,
+    build_calibration_report,
+    collect_binary_metrics,
+    collect_multihorizon_metrics,
+    split_multihorizon_heads_numpy,
+)
 
 try:
     import torch  # type: ignore
@@ -173,6 +179,25 @@ def confidence_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
     return np.clip(np.abs(values - 0.5) * 2.0, 0.0, 1.0)
 
 
+def strategic_view_from_multihorizon(targets: np.ndarray, probabilities: np.ndarray, horizon_labels: Sequence[str]) -> dict[str, np.ndarray]:
+    direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, len(horizon_labels))
+    direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, len(horizon_labels))
+    strategic_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_probability = direction_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_hold_target = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_hold_probability = hold_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_confidence_target = confidence_targets[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_confidence_probability = confidence_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    return {
+        "strategic_target": strategic_target,
+        "strategic_probability": strategic_probability,
+        "strategic_hold_target": strategic_hold_target,
+        "strategic_hold_probability": strategic_hold_probability,
+        "strategic_confidence_target": strategic_confidence_target,
+        "strategic_confidence_probability": strategic_confidence_probability,
+    }
+
+
 def directional_backtest(
     targets: np.ndarray,
     probabilities: np.ndarray,
@@ -181,12 +206,23 @@ def directional_backtest(
     confidence_floor: float = 0.12,
     gate_scores: np.ndarray | None = None,
     gate_threshold: float = 0.5,
+    hold_probabilities: np.ndarray | None = None,
+    hold_threshold: float = 0.5,
+    confidence_probabilities: np.ndarray | None = None,
 ) -> dict[str, Any]:
     targets = np.asarray(targets, dtype=np.float32)
     probabilities = np.asarray(probabilities, dtype=np.float32)
     confidence = confidence_from_probabilities(probabilities)
     long_mask = (probabilities >= decision_threshold) & (confidence >= confidence_floor)
     short_mask = (probabilities <= (1.0 - decision_threshold)) & (confidence >= confidence_floor)
+    if hold_probabilities is not None:
+        predicted_hold = np.asarray(hold_probabilities, dtype=np.float32) >= float(hold_threshold)
+        long_mask = long_mask & (~predicted_hold)
+        short_mask = short_mask & (~predicted_hold)
+    if confidence_probabilities is not None:
+        explicit_conf = np.asarray(confidence_probabilities, dtype=np.float32)
+        long_mask = long_mask & (explicit_conf >= confidence_floor)
+        short_mask = short_mask & (explicit_conf >= confidence_floor)
     if gate_scores is not None:
         gate_values = np.asarray(gate_scores, dtype=np.float32)
         gate_mask = gate_values >= float(gate_threshold)
@@ -219,6 +255,7 @@ def directional_backtest(
         "decision_threshold": float(decision_threshold),
         "confidence_floor": float(confidence_floor),
         "gate_threshold": float(gate_threshold),
+        "hold_threshold": float(hold_threshold),
     }
 
 
@@ -257,7 +294,7 @@ def run_walkforward_evaluation(
         raise ValueError("No walk-forward folds were produced for the requested years.")
     multi_horizon = bool(manifest.get("multi_horizon", False)) and target_bundle_path.exists()
     horizon_labels = list(manifest.get("horizon_labels", ["5m"]))
-    horizon_keys = [f"target_{label}" for label in horizon_labels] if multi_horizon else []
+    horizon_keys = ([f"target_{label}" for label in horizon_labels] + [f"hold_{label}" for label in horizon_labels] + [f"confidence_{label}" for label in horizon_labels]) if multi_horizon else []
     threshold = float(manifest.get("classification_threshold", 0.5))
     precision_gate = None
     precision_gate_path = Path(manifest.get("precision_gate_path", str(PRECISION_GATE_PATH)))
@@ -269,6 +306,8 @@ def run_walkforward_evaluation(
     all_probs_raw: list[np.ndarray] = []
     all_probs_calibrated: list[np.ndarray] = []
     all_probs_multi: list[np.ndarray] = []
+    all_hold_probs: list[np.ndarray] = []
+    all_conf_probs: list[np.ndarray] = []
     validation_years = manifest.get("split_report", {}).get("val_years", []) or list(VAL_YEARS)
     validation_folds = yearly_slices(timestamps, sequence_len=sequence_len, years=validation_years)
     calibration_targets: list[np.ndarray] = []
@@ -288,8 +327,9 @@ def run_walkforward_evaluation(
                 sequence_len=sequence_len,
                 batch_size=batch_size,
             )
-            calibration_targets.append(targets_val[:, 0])
-            calibration_probabilities.append(probabilities_val[:, 0])
+            strategic_val = strategic_view_from_multihorizon(targets_val, probabilities_val, horizon_labels)
+            calibration_targets.append(strategic_val["strategic_target"])
+            calibration_probabilities.append(strategic_val["strategic_probability"])
             continue
         targets_val, probabilities_val = predict_for_slice(model, device, active_slice, feature_path=feature_path, target_path=target_path, sequence_len=sequence_len, batch_size=batch_size)
         calibration_targets.append(targets_val)
@@ -316,8 +356,9 @@ def run_walkforward_evaluation(
                 sequence_len=sequence_len,
                 batch_size=batch_size,
             )
-            primary_targets_year = targets_year[:, 0]
-            primary_probabilities_year = probabilities_year[:, 0]
+            strategic_view = strategic_view_from_multihorizon(targets_year, probabilities_year, horizon_labels)
+            primary_targets_year = strategic_view["strategic_target"]
+            primary_probabilities_year = strategic_view["strategic_probability"]
         else:
             targets_year, probabilities_year = predict_for_slice(
                 model,
@@ -332,10 +373,13 @@ def run_walkforward_evaluation(
             primary_probabilities_year = probabilities_year
         calibrated_probabilities = apply_bucket_calibration(primary_probabilities_year, global_calibration)
         if multi_horizon:
-            raw_metrics = collect_multihorizon_metrics(targets_year, probabilities_year, thresholds=[threshold] + [0.5] * (len(horizon_labels) - 1), horizon_labels=horizon_labels)
+            raw_metrics = collect_multihorizon_metrics(targets_year, probabilities_year, thresholds=[0.5, 0.5, threshold, threshold], horizon_labels=horizon_labels)
             calibrated_metrics = {
                 "primary": collect_binary_metrics(primary_targets_year, calibrated_probabilities, threshold=threshold),
                 "horizons": raw_metrics["horizons"],
+                "strategic": raw_metrics.get("strategic", {}),
+                "hold_horizons": raw_metrics.get("hold_horizons", {}),
+                "confidence_horizons": raw_metrics.get("confidence_horizons", {}),
             }
         else:
             raw_metrics = collect_binary_metrics(primary_targets_year, primary_probabilities_year, threshold=threshold)
@@ -346,6 +390,11 @@ def run_walkforward_evaluation(
         if precision_gate is not None and multi_horizon:
             gate_scores = apply_precision_gate(probabilities_year, precision_gate)
             gate_threshold = float(precision_gate.get("threshold", 0.5))
+            strategic_hold_probability = strategic_view["strategic_hold_probability"]
+            strategic_confidence_probability = strategic_view["strategic_confidence_probability"]
+        else:
+            strategic_hold_probability = None
+            strategic_confidence_probability = None
         backtest = directional_backtest(
             primary_targets_year,
             calibrated_probabilities,
@@ -353,6 +402,8 @@ def run_walkforward_evaluation(
             confidence_floor=confidence_floor,
             gate_scores=gate_scores,
             gate_threshold=gate_threshold,
+            hold_probabilities=strategic_hold_probability,
+            confidence_probabilities=strategic_confidence_probability,
         )
         if precision_gate is not None and multi_horizon:
             backtest["precision_gate_positive_rate"] = round(float((gate_scores >= float(precision_gate.get("threshold", 0.5))).mean()), 6)
@@ -371,6 +422,8 @@ def run_walkforward_evaluation(
         all_probs_calibrated.append(calibrated_probabilities)
         if multi_horizon:
             all_probs_multi.append(probabilities_year)
+            all_hold_probs.append(strategic_view["strategic_hold_probability"])
+            all_conf_probs.append(strategic_view["strategic_confidence_probability"])
 
     all_targets_np = np.concatenate(all_targets) if all_targets else np.empty(0, dtype=np.float32)
     all_probs_raw_np = np.concatenate(all_probs_raw) if all_probs_raw else np.empty(0, dtype=np.float32)
@@ -386,6 +439,8 @@ def run_walkforward_evaluation(
             confidence_floor=confidence_floor,
             gate_scores=apply_precision_gate(np.concatenate(all_probs_multi), precision_gate) if precision_gate is not None and multi_horizon and all_probs_multi else None,
             gate_threshold=float(precision_gate.get("threshold", 0.5)) if precision_gate is not None and multi_horizon else 0.5,
+            hold_probabilities=np.concatenate(all_hold_probs) if multi_horizon and all_hold_probs else None,
+            confidence_probabilities=np.concatenate(all_conf_probs) if multi_horizon and all_conf_probs else None,
         ),
     }
     if precision_gate is not None:

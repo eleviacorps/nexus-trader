@@ -37,6 +37,8 @@ class TargetArtifacts:
     primary_hold_mask: np.ndarray
     sample_weights: np.ndarray
     horizon_returns: dict[int, np.ndarray]
+    horizon_hold_targets: dict[int, np.ndarray]
+    horizon_confidence_targets: dict[int, np.ndarray]
     summary: dict[str, Any]
 
 
@@ -134,17 +136,23 @@ def build_trade_target_artifacts(
 
     significant_signs = []
     horizon_summary: dict[str, Any] = {}
+    horizon_hold_targets: dict[int, np.ndarray] = {}
+    horizon_confidence_targets: dict[int, np.ndarray] = {}
     for horizon in horizons:
         returns = horizon_returns[int(horizon)]
         threshold = threshold_by_horizon[int(horizon)]
         hold_mask = np.abs(returns) <= threshold
+        confidence = np.clip(np.abs(returns) / np.maximum(threshold, 1e-6), 0.0, 3.0) / 3.0
         sign = np.sign(returns)
         sign[hold_mask] = 0.0
         significant_signs.append(sign.astype(np.float32))
+        horizon_hold_targets[int(horizon)] = hold_mask.astype(np.float32)
+        horizon_confidence_targets[int(horizon)] = confidence.astype(np.float32)
         horizon_summary[f"{horizon}m"] = {
             "positive_rate": float((returns > 0.0).mean()) if len(returns) else 0.0,
             "negative_rate": float((returns < 0.0).mean()) if len(returns) else 0.0,
             "hold_rate": float(hold_mask.mean()) if len(returns) else 0.0,
+            "avg_confidence_target": float(np.mean(confidence)) if len(confidence) else 0.0,
             "avg_abs_return": float(np.mean(np.abs(returns))) if len(returns) else 0.0,
             "avg_threshold": float(np.mean(threshold)) if len(threshold) else 0.0,
         }
@@ -182,6 +190,8 @@ def build_trade_target_artifacts(
         primary_hold_mask=primary_hold_mask.astype(np.float32, copy=False),
         sample_weights=weights.astype(np.float32, copy=False),
         horizon_returns={int(key): value.astype(np.float32, copy=False) for key, value in horizon_returns.items()},
+        horizon_hold_targets={int(key): value.astype(np.float32, copy=False) for key, value in horizon_hold_targets.items()},
+        horizon_confidence_targets={int(key): value.astype(np.float32, copy=False) for key, value in horizon_confidence_targets.items()},
         summary=summary,
     )
 
