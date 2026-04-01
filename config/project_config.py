@@ -159,6 +159,7 @@ CALIBRATION_REPORT_PATH = OUTPUTS_EVAL_DIR / "calibration_report.json"
 TRAINING_SUMMARY_PATH = OUTPUTS_EVAL_DIR / "training_summary.json"
 FUTURE_BRANCHES_PATH = BRANCHES_DIR / "future_branches.json"
 LATEST_MARKET_SNAPSHOT_PATH = OUTPUTS_EVAL_DIR / "latest_market_snapshot.json"
+LIVE_SIMULATION_HISTORY_PATH = OUTPUTS_EVAL_DIR / "live_simulation_history.json"
 FINAL_TFT_METRICS_PATH = OUTPUTS_EVAL_DIR / "tft_metrics.json"
 MODEL_MANIFEST_PATH = TFT_MODEL_DIR / "model_manifest.json"
 MACRO_REPORT_PATH = OUTPUTS_EVAL_DIR / "macro_report.json"
@@ -169,6 +170,10 @@ PERSONA_BREAKDOWN_HTML_PATH = OUTPUTS_CHARTS_DIR / "persona_breakdown.html"
 FINAL_DASHBOARD_HTML_PATH = OUTPUTS_CHARTS_DIR / "nexus_dashboard.html"
 MODEL_SERVICE_HOST = os.getenv("NEXUS_MODEL_HOST", "0.0.0.0")
 MODEL_SERVICE_PORT = int(os.getenv("NEXUS_MODEL_PORT", "8000"))
+LM_STUDIO_BASE_URL = os.getenv("NEXUS_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234")
+LM_STUDIO_MODEL = os.getenv("NEXUS_LM_STUDIO_MODEL", "openai/gpt-oss-20b")
+LM_STUDIO_TIMEOUT_SECONDS = int(os.getenv("NEXUS_LM_STUDIO_TIMEOUT_SECONDS", "45"))
+LM_STUDIO_ENABLED = os.getenv("NEXUS_LM_STUDIO_ENABLED", "1") == "1"
 
 NORM_STATS_PATH = PROJECT_ROOT / "config" / "norm_stats_1m.json"
 PERSONA_CONFIG_PATH = PROJECT_ROOT / "config" / "persona_config.json"

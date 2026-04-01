@@ -19,7 +19,8 @@ from config.project_config import (
     TFT_CHECKPOINT_PATH,
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
-from src.service.live_data import build_live_simulation
+from src.service.llm_sidecar import request_market_context, sidecar_health
+from src.service.live_data import build_live_monitor, build_live_simulation, record_simulation_history
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
 
@@ -175,7 +176,29 @@ def create_app() -> Any:
                 payload['model_prediction'] = {'error': str(exc)}
         else:
             payload['model_prediction'] = None
+        payload['history_entry'] = record_simulation_history(payload, payload.get('model_prediction'))
         return payload
+
+    @app.get('/api/live-monitor')
+    def live_monitor(symbol: str = 'XAUUSD'):
+        return build_live_monitor(symbol)
+
+    @app.get('/api/llm/health')
+    def llm_health():
+        return sidecar_health()
+
+    @app.get('/api/llm/context')
+    def llm_context(symbol: str = 'XAUUSD'):
+        payload = build_live_simulation(symbol, sequence_len=server.sequence_len)
+        context = {
+            'symbol': symbol,
+            'market': payload.get('market', {}),
+            'simulation': payload.get('simulation', {}),
+            'macro': payload.get('feeds', {}).get('macro', {}),
+            'news_headlines': [item.get('title', '') for item in payload.get('feeds', {}).get('news', [])[:5]],
+            'crowd_items': [item.get('title', '') for item in payload.get('feeds', {}).get('public_discussions', [])[:5]],
+        }
+        return request_market_context(symbol, context)
 
     @app.get('/ui', response_class=HTMLResponse)
     def ui():

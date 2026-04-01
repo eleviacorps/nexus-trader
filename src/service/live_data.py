@@ -14,8 +14,16 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from config.project_config import CROWD_EVENTS_PATH, FEATURE_DIM_CROWD, FEATURE_DIM_NEWS, NEWS_EVENTS_PATH, PRICE_FEATURE_COLUMNS, SEQUENCE_LEN
-from src.mcts.cone import build_probability_cone
+from config.project_config import (
+    CROWD_EVENTS_PATH,
+    FEATURE_DIM_CROWD,
+    FEATURE_DIM_NEWS,
+    LIVE_SIMULATION_HISTORY_PATH,
+    NEWS_EVENTS_PATH,
+    PRICE_FEATURE_COLUMNS,
+    SEQUENCE_LEN,
+)
+from src.service.llm_sidecar import request_market_context
 from src.mcts.reverse_collapse import reverse_collapse
 from src.mcts.tree import dominant_persona_name, expand_binary_tree, iter_leaves
 from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vectors, reduce_text_embeddings
@@ -30,18 +38,22 @@ SYMBOL_CONFIG: dict[str, dict[str, Any]] = {
         "label": "Gold",
         "news_query": "gold OR xauusd OR fed OR cpi OR dollar",
         "discussion_query": "gold OR xauusd OR fed OR cpi",
+        "spot_api": "https://api.gold-api.com/price/XAU",
+        "market_source": "spot_calibrated_gold_api_plus_gcf",
     },
     "EURUSD": {
         "ticker": "EURUSD=X",
         "label": "EUR/USD",
         "news_query": "eurusd OR euro dollar OR ecb OR fed",
         "discussion_query": "eurusd OR euro OR dxy",
+        "market_source": "yahoo_chart",
     },
     "BTCUSD": {
         "ticker": "BTC-USD",
         "label": "Bitcoin",
         "news_query": "bitcoin OR btcusd OR crypto regulation OR etf",
         "discussion_query": "bitcoin OR btc OR crypto",
+        "market_source": "yahoo_chart",
     },
 }
 
@@ -53,6 +65,7 @@ MACRO_TICKERS: dict[str, str] = {
 }
 
 _CACHE: dict[str, tuple[float, Any]] = {}
+SIMULATION_SCHEMA_VERSION = "live_v2_atr_bounded"
 
 
 def _fetch_url(url: str, timeout: int = 20) -> bytes:
@@ -132,7 +145,27 @@ def _fetch_yahoo_chart(ticker: str, interval: str, range_: str) -> pd.DataFrame:
 def fetch_recent_market_candles(symbol: str, interval: str = "5m", range_: str = "5d") -> pd.DataFrame:
     settings = _symbol_settings(symbol)
     cache_key = f"candles:{settings['ticker']}:{interval}:{range_}"
-    return _cached(cache_key, 45, lambda: _fetch_yahoo_chart(settings["ticker"], interval=interval, range_=range_))
+    frame = _cached(cache_key, 45, lambda: _fetch_yahoo_chart(settings["ticker"], interval=interval, range_=range_))
+    if settings["symbol"] != "XAUUSD":
+        return frame
+
+    def _spot_calibrate() -> pd.DataFrame:
+        calibrated = frame.copy()
+        try:
+            payload = _fetch_json(str(settings.get("spot_api")), timeout=20)
+            spot_price = _safe_float(payload.get("price"), default=float(calibrated["close"].iloc[-1]))
+            futures_price = _safe_float(calibrated["close"].iloc[-1], default=spot_price)
+            ratio = spot_price / futures_price if futures_price else 1.0
+            for column in ["open", "high", "low", "close"]:
+                calibrated[column] = (calibrated[column].astype(float) * ratio).round(5)
+            calibrated.attrs["spot_price"] = round(spot_price, 5)
+            calibrated.attrs["spot_ratio"] = ratio
+            calibrated.attrs["market_source"] = str(settings.get("market_source", "spot_calibrated"))
+        except Exception:
+            calibrated.attrs["market_source"] = "futures_proxy_gc_f"
+        return calibrated
+
+    return _cached(f"{cache_key}:spot", 25, _spot_calibrate)
 
 
 def _score_news_text(text: str, market_label: str) -> float:
@@ -565,17 +598,226 @@ def _build_persona_snapshot(decisions: dict[str, dict[str, float]]) -> dict[str,
     return {name: round(float(values.get("impact", 0.0)), 4) for name, values in decisions.items()}
 
 
+def _normalized_weights_from_leaves(leaves) -> np.ndarray:
+    weights = np.asarray([max(float(leaf.probability_weight), 1e-9) for leaf in leaves], dtype=np.float64)
+    total = float(weights.sum())
+    if total <= 0.0:
+        return np.full(len(weights), 1.0 / max(1, len(weights)), dtype=np.float64)
+    return weights / total
+
+
+def _price_cone_from_leaves(leaves, last_timestamp: pd.Timestamp, last_price: float, step_minutes: int = 5) -> list[dict[str, Any]]:
+    if not leaves:
+        return []
+    weights = _normalized_weights_from_leaves(leaves)
+    max_horizon = max(len(leaf.path_prices or []) for leaf in leaves)
+    if max_horizon <= 0:
+        return []
+
+    points: list[dict[str, Any]] = []
+    for horizon_index in range(max_horizon):
+        horizon_prices = []
+        horizon_weights = []
+        for weight, leaf in zip(weights, leaves):
+            prices = leaf.path_prices or []
+            if horizon_index < len(prices):
+                horizon_prices.append(float(prices[horizon_index]))
+                horizon_weights.append(float(weight))
+        if not horizon_prices:
+            continue
+        price_array = np.asarray(horizon_prices, dtype=np.float64)
+        weight_array = np.asarray(horizon_weights, dtype=np.float64)
+        weight_array = weight_array / weight_array.sum()
+        center_price = float(np.average(price_array, weights=weight_array))
+        variance = float(np.average((price_array - center_price) ** 2, weights=weight_array))
+        std_dev = variance ** 0.5
+        lower_price = max(0.0, center_price - std_dev)
+        upper_price = max(center_price, center_price + std_dev)
+        center_probability = 0.5 if last_price == 0.0 else float(np.clip(0.5 + ((center_price - last_price) / max(last_price, 1e-6)) * 12.0, 0.0, 1.0))
+        lower_probability = 0.5 if last_price == 0.0 else float(np.clip(0.5 + ((lower_price - last_price) / max(last_price, 1e-6)) * 12.0, 0.0, 1.0))
+        upper_probability = 0.5 if last_price == 0.0 else float(np.clip(0.5 + ((upper_price - last_price) / max(last_price, 1e-6)) * 12.0, 0.0, 1.0))
+        horizon = horizon_index + 1
+        points.append(
+            {
+                "horizon": horizon,
+                "timestamp": (last_timestamp + pd.Timedelta(minutes=step_minutes * horizon)).isoformat(),
+                "center_probability": round(center_probability, 6),
+                "lower_probability": round(lower_probability, 6),
+                "upper_probability": round(upper_probability, 6),
+                "center_price": round(center_price, 5),
+                "lower_price": round(lower_price, 5),
+                "upper_price": round(upper_price, 5),
+            }
+        )
+    return points
+
+
+def _candles_to_records(price_frame: pd.DataFrame, limit: int = 240) -> list[dict[str, Any]]:
+    return [
+        {
+            "timestamp": index.isoformat(),
+            "open": round(float(row["open"]), 5),
+            "high": round(float(row["high"]), 5),
+            "low": round(float(row["low"]), 5),
+            "close": round(float(row["close"]), 5),
+            "volume": round(float(row["volume"]), 2),
+        }
+        for index, row in price_frame.tail(limit).iterrows()
+    ]
+
+
+def _read_simulation_history(limit: int = 200) -> list[dict[str, Any]]:
+    if not LIVE_SIMULATION_HISTORY_PATH.exists():
+        return []
+    try:
+        payload = json.loads(LIVE_SIMULATION_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return payload[-limit:]
+
+
+def _write_simulation_history(entries: list[dict[str, Any]]) -> None:
+    LIVE_SIMULATION_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LIVE_SIMULATION_HISTORY_PATH.write_text(json.dumps(entries[-200:], indent=2), encoding="utf-8")
+
+
+def build_history_entry(payload: dict[str, Any], model_prediction: dict[str, Any] | None = None) -> dict[str, Any]:
+    market = payload.get("market", {})
+    simulation = payload.get("simulation", {})
+    candles = list(market.get("candles", []))
+    anchor_timestamp = candles[-1]["timestamp"] if candles else payload.get("generated_at")
+    anchor_price = _safe_float(market.get("current_price"), 0.0)
+    cone = list(payload.get("cone", []))
+    entry = {
+        "symbol": payload.get("symbol", "XAUUSD"),
+        "generated_at": payload.get("generated_at"),
+        "simulation_version": SIMULATION_SCHEMA_VERSION,
+        "anchor_timestamp": anchor_timestamp,
+        "anchor_price": anchor_price,
+        "market_source": market.get("source", "unknown"),
+        "scenario_bias": simulation.get("scenario_bias", "neutral"),
+        "overall_confidence": _safe_float(simulation.get("overall_confidence"), 0.0),
+        "consensus_score": _safe_float(simulation.get("consensus_score"), 0.0),
+        "uncertainty_width": _safe_float(simulation.get("uncertainty_width"), 0.0),
+        "dominant_driver": simulation.get("dominant_driver", "unknown"),
+        "cone": cone,
+        "center_path": [
+            {"timestamp": point.get("timestamp"), "price": _safe_float(point.get("center_price"), anchor_price)}
+            for point in cone
+        ],
+        "model_prediction": model_prediction or {},
+    }
+    return entry
+
+
+def record_simulation_history(payload: dict[str, Any], model_prediction: dict[str, Any] | None = None) -> dict[str, Any]:
+    entry = build_history_entry(payload, model_prediction=model_prediction)
+    history = _read_simulation_history(limit=400)
+    history.append(entry)
+    history = history[-200:]
+    _write_simulation_history(history)
+    return entry
+
+
+def _history_entries_for_symbol(symbol: str, limit: int = 20) -> list[dict[str, Any]]:
+    upper = symbol.upper()
+    return [entry for entry in _read_simulation_history(limit=200) if str(entry.get("symbol", "")).upper() == upper][-limit:]
+
+
+def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limit: int = 12) -> dict[str, Any]:
+    current_source = str(candles.attrs.get("market_source", "unknown"))
+    history = [
+        entry
+        for entry in _history_entries_for_symbol(symbol, limit=history_limit * 4)
+        if str(entry.get("market_source", "unknown")) == current_source
+        and str(entry.get("simulation_version", "")) == SIMULATION_SCHEMA_VERSION
+    ][-history_limit:]
+    candle_records = _candles_to_records(candles, limit=240)
+    if not history:
+        return {
+            "live_market": candle_records,
+            "active_prediction": None,
+            "recent_simulations": [],
+            "server_timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_source": current_source,
+        }
+
+    recent_summaries: list[dict[str, Any]] = []
+    active_payload: dict[str, Any] | None = None
+    for position, entry in enumerate(reversed(history), start=1):
+        anchor_timestamp = pd.to_datetime(entry.get("anchor_timestamp"), utc=True, errors="coerce")
+        if pd.isna(anchor_timestamp):
+            continue
+        actual = candles[candles.index > anchor_timestamp].copy()
+        predicted_center = list(entry.get("center_path", []))
+        cone = list(entry.get("cone", []))
+        actual_future = []
+        matched = 0
+        hits = 0
+        for prediction, (_, actual_row) in zip(predicted_center, actual.iterrows()):
+            actual_close = _safe_float(actual_row.get("close"), 0.0)
+            cone_point = cone[matched] if matched < len(cone) else {}
+            lower = _safe_float(cone_point.get("lower_price"), actual_close)
+            upper = _safe_float(cone_point.get("upper_price"), actual_close)
+            inside = lower <= actual_close <= upper
+            hits += 1 if inside else 0
+            matched += 1
+            actual_future.append(
+                {
+                    "timestamp": actual_row.name.isoformat(),
+                    "close": round(actual_close, 5),
+                    "inside_cone": inside,
+                    "predicted_center": _safe_float(prediction.get("price"), actual_close),
+                }
+            )
+
+        last_actual_close = _safe_float(actual_future[-1]["close"], entry.get("anchor_price", 0.0)) if actual_future else _safe_float(entry.get("anchor_price"), 0.0)
+        realized_direction = "bullish" if last_actual_close >= _safe_float(entry.get("anchor_price"), 0.0) else "bearish"
+        direction_match = realized_direction == str(entry.get("scenario_bias", "neutral"))
+        summary = {
+            "generated_at": entry.get("generated_at"),
+            "anchor_timestamp": entry.get("anchor_timestamp"),
+            "scenario_bias": entry.get("scenario_bias"),
+            "realized_direction": realized_direction if matched else "pending",
+            "direction_match": direction_match if matched else None,
+            "matched_points": matched,
+            "hit_rate": round(hits / matched, 4) if matched else None,
+            "overall_confidence": _safe_float(entry.get("overall_confidence"), 0.0),
+            "dominant_driver": entry.get("dominant_driver", "unknown"),
+        }
+        recent_summaries.append(summary)
+
+        if position == 1:
+            active_payload = {
+                "simulation": entry,
+                "actual_future": actual_future,
+                "matched_points": matched,
+                "hit_rate": round(hits / matched, 4) if matched else None,
+                "direction_match": direction_match if matched else None,
+                "realized_direction": realized_direction if matched else "pending",
+            }
+
+    return {
+        "live_market": candle_records,
+        "active_prediction": active_payload,
+        "recent_simulations": recent_summaries,
+        "server_timestamp": datetime.now(timezone.utc).isoformat(),
+        "market_source": current_source,
+    }
+
+
 def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str) -> dict[str, Any]:
     personas = default_personas()
     seed_state = simulate_one_step(current_row=current_row, personas=personas, seed=42)
     root = expand_binary_tree(current_row, personas, max_depth=5)
     leaves = iter_leaves(root)
     collapse = reverse_collapse(leaves)
-    horizon_steps = max(5, len(leaves[0].path_prices) if leaves and leaves[0].path_prices else 5)
-    cone = build_probability_cone(collapse, horizon_steps=horizon_steps)
 
     last_timestamp = price_frame.index[-1]
     last_price = float(price_frame.iloc[-1]["close"])
+    atr = max(float(current_row.get("atr_14", 0.0) or 0.0), max(last_price * 0.0015, 0.5))
     branches = []
     for index, leaf in enumerate(sorted(leaves, key=lambda item: item.probability_weight, reverse=True), start=1):
         prices = leaf.path_prices or [last_price]
@@ -591,47 +833,26 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             }
         )
 
-    cone_points = []
-    for point in cone.points:
-        center_price = last_price * (1.0 + ((point.center - 0.5) * 0.02 * point.horizon))
-        lower_price = max(0.0, last_price * (1.0 + ((point.lower - 0.5) * 0.02 * point.horizon)))
-        upper_price = max(center_price, last_price * (1.0 + ((point.upper - 0.5) * 0.02 * point.horizon)))
-        cone_points.append(
-            {
-                "horizon": point.horizon,
-                "timestamp": (last_timestamp + pd.Timedelta(minutes=5 * point.horizon)).isoformat(),
-                "center_probability": round(float(point.center), 6),
-                "lower_probability": round(float(point.lower), 6),
-                "upper_probability": round(float(point.upper), 6),
-                "center_price": round(float(center_price), 5),
-                "lower_price": round(float(lower_price), 5),
-                "upper_price": round(float(upper_price), 5),
-            }
-        )
-
-    direction_strength = abs(collapse.mean_probability - 0.5) * 2.0
-    overall_confidence = max(0.0, min(1.0, direction_strength * collapse.consensus_score * (1.0 - collapse.uncertainty_width * 0.35)))
+    cone_points = _price_cone_from_leaves(leaves, last_timestamp=last_timestamp, last_price=last_price, step_minutes=5)
+    predicted_center = cone_points[-1]["center_price"] if cone_points else last_price
+    mean_move = abs(predicted_center - last_price)
+    directional_votes = []
+    for leaf in leaves:
+        if leaf.path_prices:
+            directional_votes.append(1.0 if leaf.path_prices[-1] >= last_price else -1.0)
+    directional_agreement = abs(float(np.mean(directional_votes))) if directional_votes else 0.0
+    move_strength = min(1.0, mean_move / max(atr * 2.5, 1e-6))
+    overall_confidence = max(0.0, min(0.92, directional_agreement * (0.35 + 0.65 * move_strength) * collapse.consensus_score))
     price_change = last_price - float(price_frame.iloc[-2]["close"]) if len(price_frame) > 1 else 0.0
-    candles = [
-        {
-            "timestamp": index.isoformat(),
-            "open": round(float(row["open"]), 5),
-            "high": round(float(row["high"]), 5),
-            "low": round(float(row["low"]), 5),
-            "close": round(float(row["close"]), 5),
-            "volume": round(float(row["volume"]), 2),
-        }
-        for index, row in price_frame.tail(240).iterrows()
-    ]
-
     return {
         "symbol": symbol,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "simulator_mode": "market_simulator",
         "market": {
-            "candles": candles,
+            "candles": _candles_to_records(price_frame, limit=240),
             "current_price": round(last_price, 5),
             "price_change": round(float(price_change), 5),
+            "source": str(price_frame.attrs.get("market_source", "unknown")),
         },
         "simulation": {
             "mean_probability": collapse.mean_probability,
@@ -639,7 +860,7 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "consensus_score": collapse.consensus_score,
             "overall_confidence": round(float(overall_confidence), 6),
             "dominant_driver": collapse.dominant_driver,
-            "scenario_bias": "bullish" if collapse.mean_probability >= 0.5 else "bearish",
+            "scenario_bias": "bullish" if predicted_center >= last_price else "bearish",
         },
         "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
         "branches": branches,
@@ -695,6 +916,25 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN) -> tuple[
         "fear_greed": fear_greed,
         "macro": macro,
     }
+    llm_context_input = {
+        "symbol": symbol,
+        "market": payload["market"],
+        "simulation": payload["simulation"],
+        "macro": macro,
+        "news_headlines": [item.get("title", "") for item in news_items[:5]],
+        "crowd_items": [item.get("title", "") for item in discussion_items[:5]],
+        "current_row": {
+            "macro_bias": latest.get("macro_bias"),
+            "macro_shock": latest.get("macro_shock"),
+            "news_bias": latest.get("news_bias"),
+            "news_intensity": latest.get("news_intensity"),
+            "crowd_bias": latest.get("crowd_bias"),
+            "crowd_extreme": latest.get("crowd_extreme"),
+            "close": latest.get("close"),
+            "atr_14": latest.get("atr_14"),
+        },
+    }
+    payload["llm_context"] = request_market_context(symbol, llm_context_input)
     payload["current_row"] = latest
     return fused[-sequence_len:], payload
 
@@ -703,3 +943,9 @@ def build_live_simulation(symbol: str, sequence_len: int = SEQUENCE_LEN) -> dict
     sequence, payload = build_live_sequence(symbol, sequence_len=sequence_len)
     payload["sequence_shape"] = [int(sequence.shape[0]), int(sequence.shape[1])]
     return payload | {"sequence": sequence.tolist()}
+
+
+def build_live_monitor(symbol: str) -> dict[str, Any]:
+    candles = fetch_recent_market_candles(symbol)
+    price_frame = engineer_price_features(candles)
+    return build_simulation_comparison(symbol, price_frame)
