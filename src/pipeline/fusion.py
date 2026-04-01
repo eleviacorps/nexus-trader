@@ -134,6 +134,18 @@ def build_trade_target_artifacts(
     primary_targets = (primary_returns > 0.0).astype(np.float32)
     primary_hold_mask = (np.abs(primary_returns) <= primary_threshold).astype(np.float32)
 
+    quant_regime_strength = frame["quant_regime_strength"].to_numpy(dtype=np.float32, copy=True) if "quant_regime_strength" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    quant_transition_risk = frame["quant_transition_risk"].to_numpy(dtype=np.float32, copy=True) if "quant_transition_risk" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    quant_vol_realism = frame["quant_vol_realism"].to_numpy(dtype=np.float32, copy=True) if "quant_vol_realism" in frame.columns else np.full(len(frame), 0.5, dtype=np.float32)
+    quant_fair_value_z = frame["quant_fair_value_z"].to_numpy(dtype=np.float32, copy=True) if "quant_fair_value_z" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    quant_trend_score = frame["quant_trend_score"].to_numpy(dtype=np.float32, copy=True) if "quant_trend_score" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    quant_quantized_hold = (
+        (quant_transition_risk >= 0.68)
+        | (quant_vol_realism <= 0.18)
+        | (np.abs(quant_fair_value_z) >= 2.75)
+    ).astype(np.float32)
+    primary_hold_mask = np.maximum(primary_hold_mask, quant_quantized_hold).astype(np.float32)
+
     significant_signs = []
     horizon_summary: dict[str, Any] = {}
     horizon_hold_targets: dict[int, np.ndarray] = {}
@@ -168,6 +180,15 @@ def build_trade_target_artifacts(
     move_strength = np.abs(primary_returns) / np.maximum(primary_threshold, 1e-6)
     weights = 0.65 + 0.55 * np.clip(move_strength, 0.0, 3.0) + 0.90 * agreement_ratio - 0.45 * disagreement_ratio
     weights = np.where(primary_hold_mask > 0.5, hold_weight + 0.15 * agreement_ratio, weights)
+    trend_alignment = ((np.sign(primary_returns) == np.sign(quant_trend_score)) & (np.abs(primary_returns) > primary_threshold)).astype(np.float32)
+    quant_bonus = (
+        0.30 * quant_regime_strength
+        + 0.22 * quant_vol_realism
+        + 0.18 * trend_alignment
+        - 0.35 * quant_transition_risk
+        - 0.10 * np.clip(np.abs(quant_fair_value_z) - 1.5, 0.0, 2.0)
+    )
+    weights = weights * np.clip(0.85 + quant_bonus, 0.30, 1.65)
     weights = np.clip(weights, max(0.05, hold_weight), 4.0).astype(np.float32)
 
     summary = {
@@ -182,6 +203,10 @@ def build_trade_target_artifacts(
         "avg_horizon_disagreement": float(np.mean(disagreement_ratio)) if len(disagreement_ratio) else 0.0,
         "sample_weight_mean": float(weights.mean()) if len(weights) else 0.0,
         "sample_weight_max": float(weights.max()) if len(weights) else 0.0,
+        "avg_quant_regime_strength": float(np.mean(quant_regime_strength)) if len(quant_regime_strength) else 0.0,
+        "avg_quant_transition_risk": float(np.mean(quant_transition_risk)) if len(quant_transition_risk) else 0.0,
+        "avg_quant_vol_realism": float(np.mean(quant_vol_realism)) if len(quant_vol_realism) else 0.0,
+        "avg_quant_fair_value_z": float(np.mean(np.abs(quant_fair_value_z))) if len(quant_fair_value_z) else 0.0,
         "hold_weight": float(hold_weight),
         "horizon_summary": horizon_summary,
     }

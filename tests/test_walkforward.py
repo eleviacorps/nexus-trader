@@ -4,8 +4,10 @@ import numpy as np
 
 from src.evaluation.walkforward import (
     apply_bucket_calibration,
+    capital_backtest_from_unit_pnl,
     confidence_from_probabilities,
     directional_backtest,
+    fixed_risk_capital_backtest_from_unit_pnl,
     optimize_backtest_thresholds,
 )
 from src.training.train_tft import apply_precision_gate, train_precision_gate
@@ -32,6 +34,10 @@ class WalkforwardUtilityTests(unittest.TestCase):
         self.assertEqual(report["hold_count"], 3)
         self.assertGreaterEqual(report["win_rate"], 0.0)
         self.assertLessEqual(report["win_rate"], 1.0)
+        self.assertIn("usd_10", report["capital_backtests"])
+        self.assertIn("usd_1000", report["capital_backtests"])
+        self.assertIn("usd_10_fixed_risk", report["capital_backtests"])
+        self.assertIn("usd_1000_fixed_risk", report["capital_backtests"])
 
     def test_optimize_backtest_thresholds_returns_finite_configuration(self):
         targets = np.asarray([1, 1, 1, 0, 0, 0, 1, 0], dtype=np.float32)
@@ -43,6 +49,18 @@ class WalkforwardUtilityTests(unittest.TestCase):
         confidence = confidence_from_probabilities(probabilities)
         self.assertTrue(np.all(confidence >= 0.0))
         self.assertTrue(np.all(confidence <= 1.0))
+
+    def test_capital_backtest_compounds_from_unit_pnl(self):
+        report = capital_backtest_from_unit_pnl(np.asarray([1, -1, 0, 1], dtype=np.float32), initial_capital=1000.0, risk_fraction=0.02)
+        self.assertEqual(report["trade_count"], 3)
+        self.assertGreater(report["final_capital"], 0.0)
+        self.assertIn("return_pct", report)
+
+    def test_fixed_risk_capital_backtest_scales_linearly(self):
+        report = fixed_risk_capital_backtest_from_unit_pnl(np.asarray([1, -1, 0, 1], dtype=np.float32), initial_capital=1000.0, risk_fraction=0.02)
+        self.assertEqual(report["trade_count"], 3)
+        self.assertAlmostEqual(report["risk_amount"], 20.0, places=6)
+        self.assertGreater(report["final_capital"], 0.0)
 
     def test_precision_gate_trains_and_scores(self):
         probabilities = np.asarray(

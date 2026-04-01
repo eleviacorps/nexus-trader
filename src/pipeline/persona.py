@@ -93,17 +93,42 @@ def align_macro_to_price(price_index, macro_frame):
     dollar = 0.65 * _rolling_zscore(col("DTWEXBGS")) + 0.35 * _rolling_zscore(col("UUP"))
     real_rates = _rolling_zscore(col("DFII10"))
     nominal_rates = _rolling_zscore(col("DGS10"))
+    front_end_rates = _rolling_zscore(col("DGS2"))
+    curve = _rolling_zscore(col("T10Y2Y"))
     risk = _rolling_zscore(col("VIXCLS"))
+    credit = _rolling_zscore(col("BAMLH0A0HYM2"))
+    financial_conditions = _rolling_zscore(col("NFCI"))
     inflation = _rolling_zscore(col("T10YIE"))
+    inflation_5y = _rolling_zscore(col("T5YIE"))
     bonds = _rolling_zscore(col("TLT"))
     oil = _rolling_zscore(col("DCOILWTICO"))
+    payrolls = _rolling_zscore(col("PAYEMS"))
+    unemployment = _rolling_zscore(col("UNRATE"))
     gold_proxy = 0.50 * _rolling_zscore(col("GC_F")) + 0.50 * _rolling_zscore(col("GLD"))
 
-    macro_bias = np.tanh((-0.80 * dollar) + (-0.55 * real_rates) + (-0.25 * nominal_rates) + (0.50 * risk) + (0.30 * inflation) + (0.25 * bonds) + (0.15 * oil) + (0.35 * gold_proxy))
+    macro_bias = np.tanh(
+        (-0.75 * dollar)
+        + (-0.45 * real_rates)
+        + (-0.15 * nominal_rates)
+        + (-0.08 * front_end_rates)
+        + (-0.10 * curve)
+        + (0.42 * risk)
+        + (0.28 * credit)
+        + (0.22 * financial_conditions)
+        + (0.20 * inflation)
+        + (0.10 * inflation_5y)
+        + (0.20 * bonds)
+        + (0.12 * oil)
+        + (-0.08 * payrolls)
+        + (0.10 * unemployment)
+        + (0.35 * gold_proxy)
+    )
     macro_shock = np.clip(
         0.45 * col("VIXCLS").pct_change().abs().fillna(0.0)
         + 0.35 * col("DTWEXBGS").pct_change().abs().fillna(0.0)
-        + 0.20 * col("DGS10").pct_change().abs().fillna(0.0),
+        + 0.15 * col("DGS10").pct_change().abs().fillna(0.0)
+        + 0.10 * col("DGS2").pct_change().abs().fillna(0.0)
+        + 0.15 * col("BAMLH0A0HYM2").pct_change().abs().fillna(0.0),
         0.0,
         1.0,
     )
@@ -112,6 +137,7 @@ def align_macro_to_price(price_index, macro_frame):
         "dollar_weakness": (-dollar).to_numpy(dtype=np.float32),
         "real_yields_falling": (-real_rates).to_numpy(dtype=np.float32),
         "risk_aversion": risk.to_numpy(dtype=np.float32),
+        "financial_stress": (0.60 * credit + 0.40 * financial_conditions).to_numpy(dtype=np.float32),
         "inflation_rising": inflation.to_numpy(dtype=np.float32),
         "gold_proxy_strength": gold_proxy.to_numpy(dtype=np.float32),
     }

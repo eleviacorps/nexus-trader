@@ -111,6 +111,7 @@ Important truth:
 - the model can run locally
 - branching and reverse-collapse primitives exist
 - short-window historical analog scoring now exists for branches
+- a quant-hybrid regime / volatility / fair-value layer now exists
 - walk-forward evaluation and directional backtesting now exist as first-class tools
 - GPT-OSS is now integrated as a local sidecar
 - manual technical-analysis panels now exist
@@ -183,6 +184,44 @@ Recent branching improvements:
   - it tilts personas
   - it contributes a small numeric prior
   - it does not replace the simulator
+
+### Quant-Hybrid Layer
+
+The project now includes a quant-finance support layer rather than relying only on the simulator plus TFT.
+
+Current quant context includes:
+
+- regime clustering / regime-strength estimation
+- transition-risk estimation
+- volatility realism scoring
+- fair-value z-score estimation
+- trend-score estimation
+
+These quant features are now folded into:
+
+- fused-target construction
+- hold-mask / abstention logic
+- sample weighting
+- live simulation context
+- branch scoring
+
+Current local quant build on the synced slice:
+
+- rows: `7611`
+- feature columns: `11`
+- average transition risk: about `0.0559`
+- average volatility realism: about `0.8284`
+- average regime strength: `1.0`
+
+Current cloud quant rebuild on the full dataset:
+
+- rows: `6,024,602`
+- feature columns: `11`
+- average transition risk: about `0.1271`
+- average volatility realism: about `0.8096`
+- average regime strength: about `0.8721`
+
+This is still a support layer, not a standalone quant strategy engine.
 
 ### Specialist Bot Swarm
 
@@ -1022,6 +1061,251 @@ Updated again after the hold/confidence pass:
 3. evaluate strategic `15m / 30m` performance before spending more energy on raw `5m`
 4. route UI / live decision summaries through the strategic horizon view instead of the old first-channel assumption
 
+Updated again after the stricter abstention + richer macro/positioning expansion:
+
+1. redesign the precision gate around true tradeability instead of letting hold-heavy windows dominate
+2. make abstention much stricter and keep participation intentionally low
+3. keep `15m / 30m` as the main simulator product story
+4. expand official macro + positioning coverage before spending more GPU time on LLM fine-tuning
+
+## Latest Cloud Pass On The 12-Output Head
+
+The upgraded cloud run is now complete for both:
+
+- `mh12_full`
+- `mh12_recent`
+
+This was the first real remote pass using:
+
+- multi-horizon direction targets
+- per-horizon hold targets
+- per-horizon confidence targets
+- strategic evaluation centered on `15m / 30m`
+- the current precision gate
+
+### Full-History Run (`mh12_full`)
+
+Split:
+
+- train: `2009-2020`
+- validation: `2021-2023`
+- test: `2024-2026`
+
+Key test metrics:
+
+- strategic ROC-AUC: `0.5133`
+- `15m` ROC-AUC: `0.5125`
+- `30m` ROC-AUC: `0.5139`
+- `15m` hold ROC-AUC: `0.7142`
+- `30m` hold ROC-AUC: `0.7124`
+- strategic hold rate: `0.7650`
+- strategic confidence mean: `0.2975`
+
+Walk-forward / filtered backtest view:
+
+- calibrated strategic ROC-AUC: `0.5098`
+- participation rate: `0.6387`
+- win rate: `0.6453`
+- trade count: `504205`
+- hold count: `285262`
+
+Important interpretation:
+
+- the direction edge is still weak
+- the hold head is learning something materially better than the direction head
+- the backtest win rate looks much better than ROC-AUC because the system is still structurally long-biased and class-imbalanced
+- so this is not evidence of a true `64.5%` directional edge
+
+### Recent-Regime Run (`mh12_recent`)
+
+Split:
+
+- train: `2021-2024`
+- validation: `2025`
+- test: `2026`
+
+Key test metrics:
+
+- strategic ROC-AUC: `0.5136`
+- `15m` ROC-AUC: `0.5110`
+- `30m` ROC-AUC: `0.5157`
+- `15m` hold ROC-AUC: `0.6473`
+- `30m` hold ROC-AUC: `0.6377`
+- strategic hold rate: `0.5799`
+- strategic confidence mean: `0.4334`
+
+Walk-forward / filtered backtest view:
+
+- calibrated strategic ROC-AUC: `0.4948`
+- participation rate: `0.8559`
+- win rate: `0.6485`
+- trade count: `66062`
+- hold count: `11123`
+
+Important interpretation:
+
+- the recent-regime model is slightly better on `30m` direction than the full-history run
+- the recent-regime hold head is weaker than the full-history hold head
+- the gate is still not meaningful enough, because it allows too much participation
+- calibrated ROC-AUC falling below `0.5` in walk-forward is a warning that confidence calibration and thresholding still need work
+
+### What These Runs Actually Tell Us
+
+Good news:
+
+- `15m / 30m` really are better targets than raw `5m`
+- the hold/confidence redesign was the right architectural move
+- the model is learning abstention-related structure better than pure direction
+
+Bad news:
+
+- the directional edge is still only slightly above chance
+- the current precision gate is not selective enough
+- backtest win rate is still too easy to overread because it is helped by bias / participation structure
+
+So the next best move is still:
+
+1. redesign gate labels around real tradeability and minority-risk avoidance
+2. make abstention much more selective
+3. treat `15m / 30m` as the primary product story
+4. improve regime conditioning and analog scoring before chasing larger models
+
+## Current In-Flight V2 Cloud Pass
+
+There is now a newer cloud run in progress built around the lessons from `mh12_full` and `mh12_recent`.
+
+The current remote tags are:
+
+- `mh12_full_v2`
+- `mh12_recent_v2`
+
+What changed in this pass:
+
+- the precision gate was redesigned around true strategic tradeability
+- new gate features were added for:
+  - strategic spread
+  - strategic tradeability
+- threshold search now targets lower participation instead of letting the gate stay almost always-on
+- fusion was rebuilt with `15m` as the primary horizon
+- hold-row weight was lowered to reduce over-holding bias
+- macro inputs were expanded with more official series
+- positioning inputs were expanded with much broader historical CFTC coverage
+
+Current remote status:
+
+- fast data refresh completed
+- perception rebuild completed
+- fusion rebuild completed
+- the `v2` cloud pass completed and artifacts are now local
+
+Latest facts from that refreshed data pass:
+
+- news aligned coverage ratio: about `0.0097`
+- crowd aligned coverage ratio: about `0.5633`
+- primary fusion horizon: `15m`
+- rebuilt primary hold rate: about `0.4908`
+- rebuilt sample-weight mean: about `1.4698`
+
+Important interpretation:
+
+- official macro + positioning context is now materially better represented than before
+- crowd/positioning coverage is much stronger than news coverage
+- this makes the next `15m / 30m` pass more meaningful than the earlier `5m`-anchored runs
+
+### Final V2 Result
+
+`mh12_full_v2`:
+
+- strategic ROC-AUC: `0.5142`
+- `15m` ROC-AUC: `0.5153`
+- `30m` ROC-AUC: `0.5141`
+- `15m` hold ROC-AUC: `0.6749`
+- `30m` hold ROC-AUC: `0.6784`
+- walk-forward calibrated ROC-AUC: `0.5117`
+- backtest trade count: `0`
+- backtest participation: `0.0`
+
+`mh12_recent_v2`:
+
+- strategic ROC-AUC: `0.5086`
+- `15m` ROC-AUC: `0.5046`
+- `30m` ROC-AUC: `0.5082`
+- `15m` hold ROC-AUC: `0.6226`
+- `30m` hold ROC-AUC: `0.6157`
+- walk-forward calibrated ROC-AUC: `0.4954`
+- backtest trade count: `0`
+- backtest participation: `0.0`
+
+What this means:
+
+- the richer macro / positioning context helped the `15m / 30m` framing slightly
+- the new gate logic overshot and became too strict
+- the next problem is no longer “make abstention stricter”
+- the next problem is “restore low but non-zero participation without losing selectivity”
+
+So the next concrete step is:
+
+1. keep the `15m / 30m` framing
+2. keep the richer macro / positioning inputs
+3. relax and recalibrate the gate
+4. only then run capital-based `$10 / $1000` backtests once real trades exist again
+
+### Local Relaxed-Gate Re-Evaluation On Synced `v2` Artifacts
+
+After the strict `v2` runs landed with zero trades, the local evaluation stack was upgraded so synced cloud manifests can be reused properly:
+
+- remote checkpoint paths now resolve to local `models/tft/*`
+- remote precision-gate paths now resolve to local `models/tft/*`
+- local walk-forward calibration now falls back to the available local years when the manifest's original validation years are missing
+- gate-threshold search now uses score quantiles from the actual learned gate distribution instead of hardcoded threshold bands
+- capital-style backtests now include both:
+  - compounding `R`-multiple view
+  - fixed-risk `R`-multiple view
+
+Important local-data caveat:
+
+- the current local fused tensor / timestamp bundle only covers `2026`
+- so these relaxed reruns are useful for gate recovery and account-style inspection
+- but they are not replacements for the original full cloud walk-forward runs
+
+Local relaxed rerun result on `mh12_full_v2`:
+
+- calibration source years: `2026`
+- optimized thresholds:
+  - decision threshold: `0.53`
+  - confidence floor: `0.06`
+  - hold threshold: `0.55`
+  - gate threshold: `0.1240`
+- participation rate: `0.1500`
+- win rate: `0.5614`
+- trades: `1124`
+- fixed-risk backtest:
+  - `$10`: final capital about `37.60`, return about `276.0%`, max drawdown about `42.9%`
+  - `$1000`: final capital about `3760.0`, return about `276.0%`, max drawdown about `42.9%`
+
+Local relaxed rerun result on `mh12_recent_v2`:
+
+- calibration source years: `2026`
+- optimized thresholds:
+  - decision threshold: `0.53`
+  - confidence floor: `0.06`
+  - hold threshold: `0.55`
+  - gate threshold: `0.1824`
+- participation rate: `0.1500`
+- win rate: `0.6085`
+- trades: `1124`
+- fixed-risk backtest:
+  - `$10`: final capital about `58.80`, return about `488.0%`, max drawdown about `27.9%`
+  - `$1000`: final capital about `5880.0`, return about `488.0%`, max drawdown about `27.9%`
+
+How to interpret these:
+
+- the gate is no longer dead
+- low but non-zero participation is back
+- the recent-regime `v2` model still looks stronger than the full-history `v2` model on the local `2026` slice
+- the capital curves are still `R`-multiple simulations, not broker-grade execution backtests
+- the next real test should happen on the cloud again after retraining, not only on the reduced local artifact slice
+
 ## Concrete Ways To Break The Low-50% Ceiling
 
 These are the most realistic paths to beat the current roughly `51%` regime.
@@ -1046,6 +1330,9 @@ These are the most realistic paths to beat the current roughly `51%` regime.
 
 7. Use GPT-OSS for labels, not for raw price forecasting.
    LoRA can still help if it improves regime labels, event severity, discussion polarity, and abstain logic. That can materially help the numeric stack without pretending the LLM is a market oracle.
+
+8. Improve the gate before improving model size.
+   Right now the abstention path is a bigger bottleneck than model scale. Better trade selection is more likely to help than a larger predictor.
 
 ## On Retraining Again And Again
 
@@ -1076,6 +1363,136 @@ So the correct loop is:
 6. retrain
 
 That is very different from simply rerunning the same training command and hoping accuracy drifts upward.
+
+## No-Auth Data Sources Worth Adding Next
+
+These are the most promising public sources to expand the project without adding account friction.
+
+Highest-priority additions:
+
+- GDELT event / mention / GKG feeds for broader geopolitical and finance context:
+  `https://www.gdeltproject.org/data.html`
+- FRED API for rates, dollar, inflation, spreads, and macro state:
+  `https://fred.stlouisfed.org/docs/api/fred/`
+- U.S. Treasury daily yield curve archives for cleaner rate-curve features:
+  `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives`
+- CFTC historical Commitment of Traders archives for positioning / crowd proxy:
+  `https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalCompressed/index.htm`
+- BLS developer/API resources for CPI and labor/event context:
+  `https://www.bls.gov/developers/`
+- Federal Reserve FOMC historical calendars and statements:
+  `https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm`
+- ECB Data Portal API for FX and euro-area macro context:
+  `https://data.ecb.europa.eu/help/api/overview`
+- World Gold Council Goldhub data and research for structural gold context:
+  `https://www.gold.org/goldhub/data`
+
+Why these matter more than random extra datasets:
+
+- they add macro regime context
+- they add positioning context
+- they add event / policy context
+- they are more likely to improve `15m / 30m` strategic simulation quality than generic sentiment noise
+
+Lower-priority / already partially covered:
+
+- Google News RSS query feeds
+- Yahoo chart endpoints
+- Stooq-style market context mirrors
+
+These are still useful, but the bigger gain now is richer macro + positioning + event-state structure, not just more headline volume.
+
+What was already wired in after the latest expansion:
+
+- extra FRED series:
+  - `DGS2`
+  - `T10Y2Y`
+  - `BAMLH0A0HYM2`
+  - `NFCI`
+- official Treasury archive CSVs:
+  - par yield curve archive
+  - par real yield curve archive
+  - real long-term rate archive
+- Federal Reserve raw policy pages:
+  - `fomccalendars.htm`
+  - yearly FOMC press-release index pages for `2023-2026`
+- extra GDELT slices:
+  - central-bank gold reserve headlines
+  - rates / yield-shock headlines
+  - energy / inflation headlines
+- persona macro logic now reads:
+  - front-end rates
+  - curve shape
+  - credit stress
+  - financial conditions
+  - payroll / unemployment context
+- historical CFTC financial futures archives were expanded across many years instead of only the most recent files
+- historical CFTC disaggregated archives were expanded across `2010-2026`
+
+Current local raw-data footprint after the latest pull:
+
+- total files under `data/raw`: `89`
+- total size: about `48.0 MB`
+- macro: `19` files / about `3.0 MB`
+- news: `14` files / about `1.0 MB`
+- crowd / positioning: `56` files / about `43.9 MB`
+
+## Current V3 Run
+
+A new cloud `v3` run is now in progress with the quant-hybrid layer and the refreshed macro / news / positioning inputs.
+
+Primary goals of `v3`:
+
+- keep `15m / 30m` as the main story
+- use richer macro / positioning context
+- keep GPT as a sidecar only
+- restore low-but-nonzero participation after the over-strict `v2` gate
+- test whether the quant-hybrid layer improves strategic ROC-AUC and filtered backtests
+
+Current `v3` cloud pipeline steps:
+
+1. fast dataset refresh
+2. macro rebuild
+3. news embeddings rebuild
+4. crowd embeddings rebuild
+5. quant context build
+6. persona outputs rebuild
+7. fused artifacts rebuild
+8. tests
+9. `mh12_full_v3` training
+10. `mh12_full_v3` walk-forward evaluation
+11. `mh12_recent_v3` training
+12. `mh12_recent_v3` walk-forward evaluation
+
+Latest confirmed `v3` runtime facts:
+
+- remote full quant rebuild completed successfully
+- remote persona rebuild completed successfully
+- remote fusion rebuild completed successfully
+- remote tests passed
+- `mh12_full_v3` is actively training on the MI300X
+- latest confirmed runtime in this chat: about `2h+` into `mh12_full_v3`
+- current remote fused rows: `6,024,602`
+- current primary horizon: `15m`
+- current fused hold rate: about `0.5078`
+- current fused sample-weight mean: about `1.9238`
+- current quant transition risk: about `0.1271`
+- current quant volatility realism: about `0.8096`
+- GPU memory usage during training has been around `91%`
+- latest observed GPU package power during training has ranged roughly `267W - 299W`
+
+Important operational note:
+
+- an overlapping duplicate `v3` launch was detected and cleaned up
+- the active remote run is now the detached, logged pipeline written to:
+  - `outputs/logs/remote_v3_pipeline.log`
+- a local watcher is now polling the cloud run every `60s` and will auto-sync:
+  - `outputs/evaluation`
+  - `models/tft`
+  - `outputs/logs`
+- a local post-sync summarizer is also waiting to generate:
+  - `outputs/evaluation/v3_summary.json`
+  - `outputs/evaluation/v3_summary.md`
 
 ## Codebase Areas To Audit Next
 
@@ -1145,10 +1562,10 @@ Current important truths:
 
 Highest-value next work:
 1. Rebuild and verify news/crowd embeddings plus timestamp alignment in the fused artifacts.
-2. Add an explicit regime classifier and fold it into branch weighting and persona behavior.
-3. Retrain on the cloud with short-window analog regime features and multi-horizon hold-aware targets.
+2. Expand the quant layer beyond clustering into regime routing, volatility realism penalties, and fair-value-aware branch scoring.
+3. Retrain on the cloud with short-window analog regime features, quant-hybrid context, and multi-horizon hold-aware targets.
 4. Improve reverse collapse and minority scenario logic.
-5. Build a meta-label precision gate so the system can abstain when edge is weak.
+5. Build a meta-label precision gate so the system can abstain when edge is weak without collapsing to zero trades.
 6. Connect specialist bots more directly into branch scoring and multi-horizon consistency checks.
 7. Expand walk-forward tests and stricter filtered backtests beyond capped smoke runs.
 8. Add cone hit-rate and branch-tracking evaluation into the reporting loop.

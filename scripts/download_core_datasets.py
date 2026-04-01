@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import which
@@ -32,8 +33,200 @@ except ImportError:  # pragma: no cover
     yf = None
 
 
+SESSION = requests.Session()
+
+
+def get_with_retry(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 60,
+    retries: int = 3,
+) -> Any:
+    last_error = None
+    for attempt in range(retries):
+        try:
+            response = SESSION.get(url, params=params, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            if attempt == retries - 1:
+                raise
+    raise last_error
+
+
 def load_manifest(path: Path) -> dict[str, list[dict[str, Any]]]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def extend_manifest(manifest: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    output = {key: list(value) for key, value in manifest.items()}
+    current_year = datetime.now(timezone.utc).year
+
+    existing_macro_names = {entry.get("name") for entry in output.get("macro", [])}
+    extra_macro = [
+        ("two_year_yield", "DGS2"),
+        ("yield_curve_10y2y", "T10Y2Y"),
+        ("high_yield_spread", "BAMLH0A0HYM2"),
+        ("financial_conditions", "NFCI"),
+    ]
+    for name, series_id in extra_macro:
+        if name in existing_macro_names:
+            continue
+        output.setdefault("macro", []).append(
+            {
+                "name": name,
+                "kind": "fred_csv",
+                "series_id": series_id,
+                "filename": f"fred/{series_id}.csv",
+                "priority": "high",
+            }
+        )
+
+    extra_direct_macro = [
+        (
+            "treasury_par_yield_curve_archive",
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives/par-yield-curve-rates-1990-2023.csv",
+            "treasury/par_yield_curve_rates_1990_2023.csv",
+            "high",
+        ),
+        (
+            "treasury_par_real_yield_curve_archive",
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives/par-real-yield-curve-rates-2003-2023.csv",
+            "treasury/par_real_yield_curve_rates_2003_2023.csv",
+            "high",
+        ),
+        (
+            "treasury_real_long_term_archive",
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives/real-long-term-rates-2000-2023.csv",
+            "treasury/real_long_term_rates_2000_2023.csv",
+            "medium",
+        ),
+    ]
+    for name, url, filename, priority in extra_direct_macro:
+        if name in existing_macro_names:
+            continue
+        output.setdefault("macro", []).append(
+            {
+                "name": name,
+                "kind": "direct",
+                "url": url,
+                "filename": filename,
+                "priority": priority,
+            }
+        )
+
+    existing_news_names = {entry.get("name") for entry in output.get("news", [])}
+    extra_news = [
+        (
+            "central_bank_gold_headlines",
+            "(gold OR bullion OR central bank gold reserves) AND (central bank OR reserve diversification OR de-dollarization)",
+            "gdelt/central_bank_gold_headlines.csv",
+            "medium",
+        ),
+        (
+            "rates_shock_headlines",
+            "(Treasury yields OR yield curve OR real yields OR bond market) AND (gold OR dollar OR XAUUSD)",
+            "gdelt/rates_shock_headlines.csv",
+            "medium",
+        ),
+        (
+            "energy_inflation_headlines",
+            "(oil OR crude OR energy prices) AND (inflation OR CPI OR Fed OR gold)",
+            "gdelt/energy_inflation_headlines.csv",
+            "medium",
+        ),
+    ]
+    for name, query, filename, priority in extra_news:
+        if name in existing_news_names:
+            continue
+        output.setdefault("news", []).append(
+            {
+                "name": name,
+                "kind": "gdelt_doc",
+                "query": query,
+                "timespan": "365d",
+                "maxrecords": 250,
+                "mode": "ArtList",
+                "format": "CSV",
+                "filename": filename,
+                "priority": priority,
+            }
+        )
+    direct_news = [
+        (
+            "fomc_calendars",
+            "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+            "fed/fomc_calendars.html",
+            "high",
+        ),
+        (
+            "world_gold_council_data_page",
+            "https://www.gold.org/goldhub/data",
+            "gold/world_gold_council_data.html",
+            "medium",
+        ),
+    ]
+    for year in range(max(2020, current_year - 3), current_year + 1):
+        direct_news.append(
+            (
+                f"fed_monetary_releases_{year}",
+                f"https://www.federalreserve.gov/newsevents/pressreleases/{year}-press-fomc.htm",
+                f"fed/monetary_{year}.html",
+                "medium",
+            )
+        )
+    for name, url, filename, priority in direct_news:
+        if name in existing_news_names:
+            continue
+        output.setdefault("news", []).append(
+            {
+                "name": name,
+                "kind": "direct",
+                "url": url,
+                "filename": filename,
+                "priority": priority,
+            }
+        )
+
+    existing_crowd_names = {entry.get("name") for entry in output.get("crowd", [])}
+    for year in range(2010, current_year + 1):
+        financial_name = f"cftc_financial_futures_{year}"
+        if financial_name not in existing_crowd_names:
+            output.setdefault("crowd", []).append(
+                {
+                    "name": financial_name,
+                    "kind": "direct",
+                    "url": f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip",
+                    "filename": f"cftc/fut_fin_txt_{year}.zip",
+                    "priority": "high",
+                }
+            )
+        combined_name = f"cftc_financial_combined_{year}"
+        if combined_name not in existing_crowd_names:
+            output.setdefault("crowd", []).append(
+                {
+                    "name": combined_name,
+                    "kind": "direct",
+                    "url": f"https://www.cftc.gov/files/dea/history/com_fin_txt_{year}.zip",
+                    "filename": f"cftc/com_fin_txt_{year}.zip",
+                    "priority": "medium",
+                }
+            )
+        disagg_name = f"cftc_disaggregated_{year}"
+        if disagg_name not in existing_crowd_names:
+            output.setdefault("crowd", []).append(
+                {
+                    "name": disagg_name,
+                    "kind": "direct",
+                    "url": f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip",
+                    "filename": f"cftc/fut_disagg_txt_{year}.zip",
+                    "priority": "medium",
+                }
+            )
+    return output
 
 
 def ensure_parent(path: Path) -> None:
@@ -80,8 +273,7 @@ def download_with_aria2(url: str, destination: Path) -> None:
 
 def download_fred_csv(series_id: str, destination: Path) -> dict[str, Any]:
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
+    response = get_with_retry(url, timeout=60)
     ensure_parent(destination)
     destination.write_text(response.text, encoding="utf-8")
     return {"url": url, "bytes": len(response.content)}
@@ -96,8 +288,7 @@ def download_gdelt_doc(entry: dict[str, Any], destination: Path) -> dict[str, An
         "timespan": entry.get("timespan", "365d"),
         "maxrecords": entry.get("maxrecords", 250),
     }
-    response = requests.get(url, params=params, timeout=120)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=120)
     ensure_parent(destination)
     destination.write_text(response.text, encoding="utf-8")
     return {"url": response.url, "bytes": len(response.content)}
@@ -114,8 +305,7 @@ def download_reddit_search(entry: dict[str, Any], destination: Path) -> dict[str
         "limit": entry.get("limit", 100),
     }
     headers = {"User-Agent": "nexus-trader/0.1 dataset bootstrap"}
-    response = requests.get(url, params=params, headers=headers, timeout=60)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, headers=headers, timeout=60)
     payload = response.json()
     ensure_parent(destination)
     destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -142,8 +332,7 @@ def download_yfinance_csv(entry: dict[str, Any], destination: Path) -> dict[str,
 
 
 def download_json_api(entry: dict[str, Any], destination: Path) -> dict[str, Any]:
-    response = requests.get(entry["url"], timeout=60)
-    response.raise_for_status()
+    response = get_with_retry(entry["url"], timeout=60)
     ensure_parent(destination)
     destination.write_text(json.dumps(response.json(), indent=2), encoding="utf-8")
     return {"url": entry["url"], "bytes": len(response.content)}
@@ -177,8 +366,7 @@ def download_entry(category: str, entry: dict[str, Any], force: bool) -> dict[st
             download_with_aria2(url, destination)
             detail = {"url": url, "transport": "aria2c"}
         else:
-            response = requests.get(url, timeout=120)
-            response.raise_for_status()
+            response = get_with_retry(url, timeout=120)
             ensure_parent(destination)
             destination.write_bytes(response.content)
             detail = {"url": url, "transport": "requests", "bytes": len(response.content)}
@@ -219,7 +407,7 @@ def main() -> int:
     parser.add_argument("--allow-errors", action="store_true")
     args = parser.parse_args()
 
-    manifest = load_manifest(DATASET_MANIFEST_PATH)
+    manifest = extend_manifest(load_manifest(DATASET_MANIFEST_PATH))
     entries = selected_entries(manifest, args.category)
     if args.plan:
         print_plan(entries)

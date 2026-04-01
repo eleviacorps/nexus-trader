@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Mapping
 
+import numpy as np
+
 from src.mcts.analog import AnalogScore, HistoricalAnalogScorer
 from src.simulation.abm import SyntheticMarketState, simulate_one_step
 from src.simulation.personas import Persona
@@ -74,6 +76,17 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
     upper_wick = (high - max(open_, close)) / candle_range
     lower_wick = (min(open_, close) - low) / candle_range
     body_pct = min(1.0, abs(body) / candle_range)
+    prior_transition = float(current_row.get("quant_transition_risk", 0.0) or 0.0)
+    prior_strength = float(current_row.get("quant_regime_strength", 0.0) or 0.0)
+    prior_vol = float(current_row.get("quant_vol_forecast", max(abs(return_1), 1e-6)) or max(abs(return_1), 1e-6))
+    prior_fair_value = float(current_row.get("quant_fair_value_z", 0.0) or 0.0)
+    current_trend_score = float(current_row.get("quant_trend_score", 0.0) or 0.0)
+    next_trend_score = _clamp(0.72 * current_trend_score + 1.10 * displacement, -1.0, 1.0)
+    next_vol_forecast = max(1e-6, 0.75 * prior_vol + 0.25 * abs(return_1))
+    vol_realism = _clamp(float(np.exp(-min(3.0, abs((next_vol_forecast / max(prior_vol, 1e-6)) - 1.0)))), 0.0, 1.0)
+    transition_risk = _clamp(0.55 * prior_transition + 0.20 * (1.0 - vol_realism) + 0.25 * abs(next_trend_score - current_trend_score), 0.0, 1.0)
+    regime_strength = _clamp(0.60 * prior_strength + 0.40 * abs(next_trend_score), 0.0, 1.0)
+    fair_value_z = _clamp(0.72 * prior_fair_value + displacement * 0.85, -4.0, 4.0)
 
     next_row.update(
         {
@@ -104,6 +117,12 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
             "ll": 1.0 if dist_to_low <= 0.12 and close <= prev_close else 0.0,
             "is_bullish": 1.0 if close >= open_ else 0.0,
             "consensus_score": abs(float(state.directional_bias)),
+            "quant_regime_strength": regime_strength,
+            "quant_transition_risk": transition_risk,
+            "quant_vol_forecast": next_vol_forecast,
+            "quant_vol_realism": vol_realism,
+            "quant_fair_value_z": fair_value_z,
+            "quant_trend_score": next_trend_score,
         }
     )
     return next_row
@@ -138,20 +157,30 @@ def score_state(state: SyntheticMarketState, current_row: Mapping[str, float]) -
     analog_bias = float(current_row.get("analog_bias", 0.0) or 0.0)
     analog_confidence = float(current_row.get("analog_confidence", 0.0) or 0.0)
     analog_alignment = 1.0 - min(1.0, abs(analog_bias - float(state.directional_bias)) / 2.0)
+    quant_regime_strength = float(current_row.get("quant_regime_strength", 0.0) or 0.0)
+    quant_transition_risk = float(current_row.get("quant_transition_risk", 0.0) or 0.0)
+    quant_vol_realism = float(current_row.get("quant_vol_realism", 0.5) or 0.5)
+    quant_trend_score = float(current_row.get("quant_trend_score", 0.0) or 0.0)
+    quant_alignment = 1.0 - min(1.0, abs(quant_trend_score - float(state.directional_bias)) / 2.0)
+    transition_bonus = 1.0 - min(1.0, quant_transition_risk)
     return max(
         0.0,
         min(
             1.0,
-            0.21 * vol_score
-            + 0.16 * body_score
-            + 0.10 * wick_balance
-            + 0.16 * directional_alignment
-            + 0.10 * macro_alignment
-            + 0.10 * narrative_alignment
-            + 0.07 * crowd_fade_bonus
+            0.16 * vol_score
+            + 0.12 * body_score
+            + 0.08 * wick_balance
+            + 0.14 * directional_alignment
+            + 0.09 * macro_alignment
+            + 0.09 * narrative_alignment
+            + 0.05 * crowd_fade_bonus
             + 0.05 * consensus_score
-            + 0.14 * analog_alignment
-            + 0.11 * analog_confidence,
+            + 0.11 * analog_alignment
+            + 0.09 * analog_confidence
+            + 0.10 * quant_alignment
+            + 0.07 * quant_regime_strength
+            + 0.08 * quant_vol_realism
+            + 0.07 * transition_bonus,
         ),
     )
 

@@ -15,6 +15,7 @@ from config.project_config import (
     TARGETS_PATH,
     TARGETS_MULTIHORIZON_PATH,
     TFT_CHECKPOINT_PATH,
+    TFT_MODEL_DIR,
     VAL_YEARS,
 )
 from src.data.fused_dataset import DatasetSlice, FusedMultiHorizonSequenceDataset, FusedSequenceDataset
@@ -61,6 +62,42 @@ def load_manifest(path: Path = MODEL_MANIFEST_PATH) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def resolve_checkpoint_path(manifest: dict[str, Any], manifest_path: Path) -> Path:
+    configured_path = Path(manifest.get("checkpoint_path", str(_resolve_checkpoint())))
+    if configured_path.exists():
+        return configured_path
+    local_by_name = TFT_MODEL_DIR / configured_path.name
+    if local_by_name.exists():
+        return local_by_name
+    local_by_manifest_tag = TFT_MODEL_DIR / manifest_path.with_suffix(".ckpt").name.replace("model_manifest", "final_tft")
+    if local_by_manifest_tag.exists():
+        return local_by_manifest_tag
+    fallback = _resolve_checkpoint()
+    if fallback.exists():
+        return fallback
+    raise FileNotFoundError(
+        f"Unable to resolve checkpoint for manifest {manifest_path}. "
+        f"Tried {configured_path}, {local_by_name}, and {local_by_manifest_tag}."
+    )
+
+
+def resolve_precision_gate_path(manifest: dict[str, Any]) -> Path | None:
+    configured = Path(manifest.get("precision_gate_path", str(PRECISION_GATE_PATH)))
+    if configured.exists():
+        return configured
+    local_by_name = TFT_MODEL_DIR / configured.name
+    if local_by_name.exists():
+        return local_by_name
+    run_tag = str(manifest.get("run_tag", "")).strip()
+    if run_tag:
+        tagged_local = TFT_MODEL_DIR / f"{PRECISION_GATE_PATH.stem}_{run_tag}{PRECISION_GATE_PATH.suffix}"
+        if tagged_local.exists():
+            return tagged_local
+    if PRECISION_GATE_PATH.exists():
+        return PRECISION_GATE_PATH
+    return None
+
+
 def load_model(device: str | None = None, manifest_path: Path = MODEL_MANIFEST_PATH) -> tuple[Any, dict[str, Any], Any]:
     if torch is None:
         raise ImportError("PyTorch is required for walk-forward evaluation.")
@@ -77,7 +114,7 @@ def load_model(device: str | None = None, manifest_path: Path = MODEL_MANIFEST_P
         )
     )
     target_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    checkpoint_path = Path(manifest.get("checkpoint_path", str(_resolve_checkpoint())))
+    checkpoint_path = resolve_checkpoint_path(manifest, manifest_path)
     load_checkpoint_with_expansion(model, checkpoint_path, new_input_dim=feature_dim)
     model = model.to(target_device)
     model.eval()
@@ -256,20 +293,177 @@ def directional_backtest(
         "confidence_floor": float(confidence_floor),
         "gate_threshold": float(gate_threshold),
         "hold_threshold": float(hold_threshold),
+        "capital_backtests": {
+            "usd_10": capital_backtest_from_unit_pnl(pnl, initial_capital=10.0, risk_fraction=0.02),
+            "usd_1000": capital_backtest_from_unit_pnl(pnl, initial_capital=1000.0, risk_fraction=0.02),
+            "usd_10_fixed_risk": fixed_risk_capital_backtest_from_unit_pnl(pnl, initial_capital=10.0, risk_fraction=0.02),
+            "usd_1000_fixed_risk": fixed_risk_capital_backtest_from_unit_pnl(pnl, initial_capital=1000.0, risk_fraction=0.02),
+        },
     }
 
 
-def optimize_backtest_thresholds(targets: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
-    best = {"decision_threshold": 0.5, "confidence_floor": 0.02, "score": 0.0}
-    for threshold in np.linspace(0.5, 0.7, 9):
-        for floor in np.linspace(0.01, 0.25, 13):
-            report = directional_backtest(targets, probabilities, decision_threshold=float(threshold), confidence_floor=float(floor))
-            participation = float(report["participation_rate"])
-            if participation < 0.005:
-                continue
-            score = float(report["avg_unit_pnl"]) * 0.55 + float(report["win_rate"]) * 0.35 + participation * 0.10
-            if score > best["score"]:
-                best = {"decision_threshold": float(threshold), "confidence_floor": float(floor), "score": float(score)}
+def capital_backtest_from_unit_pnl(
+    pnl: np.ndarray,
+    *,
+    initial_capital: float,
+    risk_fraction: float = 0.02,
+) -> dict[str, Any]:
+    pnl = np.asarray(pnl, dtype=np.float32)
+    equity = float(initial_capital)
+    equity_curve = []
+    peak = equity
+    max_drawdown_pct = 0.0
+    winning_trades = 0
+    losing_trades = 0
+    trade_count = 0
+    for unit in pnl:
+        if float(unit) == 0.0:
+            equity_curve.append(equity)
+            peak = max(peak, equity)
+            drawdown_pct = 0.0 if peak <= 0 else (peak - equity) / peak
+            max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
+            continue
+        trade_count += 1
+        stake = max(0.0, equity * float(risk_fraction))
+        equity += stake * float(unit)
+        if unit > 0:
+            winning_trades += 1
+        else:
+            losing_trades += 1
+        equity_curve.append(equity)
+        peak = max(peak, equity)
+        drawdown_pct = 0.0 if peak <= 0 else (peak - equity) / peak
+        max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
+    return {
+        "initial_capital": round(float(initial_capital), 6),
+        "mode": "compounding_r_multiple",
+        "risk_fraction": float(risk_fraction),
+        "final_capital": round(float(equity), 6),
+        "net_profit": round(float(equity - initial_capital), 6),
+        "return_pct": round(float((equity / initial_capital - 1.0) * 100.0) if initial_capital > 0 else 0.0, 6),
+        "max_drawdown_pct": round(float(max_drawdown_pct * 100.0), 6),
+        "trade_count": int(trade_count),
+        "winning_trades": int(winning_trades),
+        "losing_trades": int(losing_trades),
+    }
+
+
+def fixed_risk_capital_backtest_from_unit_pnl(
+    pnl: np.ndarray,
+    *,
+    initial_capital: float,
+    risk_fraction: float = 0.02,
+) -> dict[str, Any]:
+    pnl = np.asarray(pnl, dtype=np.float32)
+    stake = float(initial_capital) * float(risk_fraction)
+    equity = float(initial_capital)
+    equity_curve = []
+    winning_trades = 0
+    losing_trades = 0
+    trade_count = 0
+    for unit in pnl:
+        if float(unit) == 0.0:
+            equity_curve.append(equity)
+            continue
+        trade_count += 1
+        equity = max(0.0, equity + stake * float(unit))
+        if unit > 0:
+            winning_trades += 1
+        else:
+            losing_trades += 1
+        equity_curve.append(equity)
+    equity_array = np.asarray(equity_curve, dtype=np.float32) if equity_curve else np.asarray([initial_capital], dtype=np.float32)
+    final_capital = float(equity_array[-1]) if equity_array.size else float(initial_capital)
+    peak = np.maximum.accumulate(equity_array) if equity_array.size else np.asarray([initial_capital], dtype=np.float32)
+    drawdown = peak - equity_array if equity_array.size else np.asarray([0.0], dtype=np.float32)
+    drawdown_pct = np.divide(drawdown, np.maximum(peak, 1e-6)) if drawdown.size else np.asarray([0.0], dtype=np.float32)
+    return {
+        "initial_capital": round(float(initial_capital), 6),
+        "mode": "fixed_r_multiple",
+        "risk_fraction": float(risk_fraction),
+        "risk_amount": round(float(stake), 6),
+        "final_capital": round(final_capital, 6),
+        "net_profit": round(final_capital - float(initial_capital), 6),
+        "return_pct": round(float((final_capital / initial_capital - 1.0) * 100.0) if initial_capital > 0 else 0.0, 6),
+        "max_drawdown_pct": round(float(drawdown_pct.max() * 100.0), 6),
+        "trade_count": int(trade_count),
+        "winning_trades": int(winning_trades),
+        "losing_trades": int(losing_trades),
+    }
+
+
+def optimize_backtest_thresholds(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    hold_probabilities: np.ndarray | None = None,
+    confidence_probabilities: np.ndarray | None = None,
+    gate_scores: np.ndarray | None = None,
+    gate_threshold: float | None = None,
+) -> dict[str, float]:
+    best = {
+        "decision_threshold": 0.56,
+        "confidence_floor": 0.12,
+        "hold_threshold": 0.62,
+        "gate_threshold": float(gate_threshold) if gate_threshold is not None else 0.5,
+        "score": 0.0,
+    }
+    target_participation = 0.14
+    hold_candidates = np.linspace(0.55, 0.85, 7) if hold_probabilities is not None else [0.5]
+    gate_candidates: list[float]
+    if gate_scores is not None:
+        gate_values = np.asarray(gate_scores, dtype=np.float32)
+        quantile_points = [0.40, 0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99]
+        gate_candidates = sorted({float(np.quantile(gate_values, q)) for q in quantile_points})
+        if gate_threshold is not None:
+            gate_candidates.append(float(gate_threshold))
+            gate_candidates = sorted(set(gate_candidates))
+    else:
+        gate_candidates = [0.5]
+    best_backup = None
+    best_backup_score = float("-inf")
+    for threshold in np.linspace(0.53, 0.75, 12):
+        for floor in np.linspace(0.06, 0.30, 13):
+            for hold_threshold_value in hold_candidates:
+                for gate_threshold_value in gate_candidates:
+                    report = directional_backtest(
+                        targets,
+                        probabilities,
+                        decision_threshold=float(threshold),
+                        confidence_floor=float(floor),
+                        gate_scores=gate_scores,
+                        gate_threshold=float(gate_threshold_value),
+                        hold_probabilities=hold_probabilities,
+                        hold_threshold=float(hold_threshold_value),
+                        confidence_probabilities=confidence_probabilities,
+                    )
+                    participation = float(report["participation_rate"])
+                    participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / target_participation)
+                    score = (
+                        float(report["win_rate"]) * 0.55
+                        + float(report["avg_unit_pnl"]) * 0.25
+                        + participation_reward * 0.15
+                        + (1.0 - min(1.0, participation / 0.35)) * 0.05
+                    )
+                    if 0.01 <= participation <= 0.35 and score > best["score"]:
+                        best = {
+                            "decision_threshold": float(threshold),
+                            "confidence_floor": float(floor),
+                            "hold_threshold": float(hold_threshold_value),
+                            "gate_threshold": float(gate_threshold_value),
+                            "score": float(score),
+                        }
+                    if participation > 0.0 and score > best_backup_score:
+                        best_backup = {
+                            "decision_threshold": float(threshold),
+                            "confidence_floor": float(floor),
+                            "hold_threshold": float(hold_threshold_value),
+                            "gate_threshold": float(gate_threshold_value),
+                            "score": float(score),
+                        }
+                        best_backup_score = float(score)
+    if best["score"] <= 0.0 and best_backup is not None:
+        best = best_backup
     return best
 
 
@@ -297,8 +491,8 @@ def run_walkforward_evaluation(
     horizon_keys = ([f"target_{label}" for label in horizon_labels] + [f"hold_{label}" for label in horizon_labels] + [f"confidence_{label}" for label in horizon_labels]) if multi_horizon else []
     threshold = float(manifest.get("classification_threshold", 0.5))
     precision_gate = None
-    precision_gate_path = Path(manifest.get("precision_gate_path", str(PRECISION_GATE_PATH)))
-    if precision_gate_path.exists():
+    precision_gate_path = resolve_precision_gate_path(manifest)
+    if precision_gate_path is not None and precision_gate_path.exists():
         precision_gate = json.loads(precision_gate_path.read_text(encoding="utf-8"))
 
     reports: list[FoldReport] = []
@@ -310,8 +504,14 @@ def run_walkforward_evaluation(
     all_conf_probs: list[np.ndarray] = []
     validation_years = manifest.get("split_report", {}).get("val_years", []) or list(VAL_YEARS)
     validation_folds = yearly_slices(timestamps, sequence_len=sequence_len, years=validation_years)
+    if not validation_folds:
+        validation_folds = folds
+        validation_years = [int(year) for year, _ in folds]
     calibration_targets: list[np.ndarray] = []
     calibration_probabilities: list[np.ndarray] = []
+    calibration_probabilities_multi: list[np.ndarray] = []
+    calibration_hold_probabilities: list[np.ndarray] = []
+    calibration_conf_probabilities: list[np.ndarray] = []
     for _, fold_slice in validation_folds:
         active_slice = fold_slice
         if max_calibration_windows > 0 and len(fold_slice) > max_calibration_windows:
@@ -330,6 +530,9 @@ def run_walkforward_evaluation(
             strategic_val = strategic_view_from_multihorizon(targets_val, probabilities_val, horizon_labels)
             calibration_targets.append(strategic_val["strategic_target"])
             calibration_probabilities.append(strategic_val["strategic_probability"])
+            calibration_probabilities_multi.append(probabilities_val)
+            calibration_hold_probabilities.append(strategic_val["strategic_hold_probability"])
+            calibration_conf_probabilities.append(strategic_val["strategic_confidence_probability"])
             continue
         targets_val, probabilities_val = predict_for_slice(model, device, active_slice, feature_path=feature_path, target_path=target_path, sequence_len=sequence_len, batch_size=batch_size)
         calibration_targets.append(targets_val)
@@ -337,9 +540,23 @@ def run_walkforward_evaluation(
     calibration_targets_np = np.concatenate(calibration_targets) if calibration_targets else np.empty(0, dtype=np.float32)
     calibration_probabilities_np = np.concatenate(calibration_probabilities) if calibration_probabilities else np.empty(0, dtype=np.float32)
     global_calibration = build_calibration_report(calibration_targets_np, calibration_probabilities_np)
-    optimized_thresholds = optimize_backtest_thresholds(calibration_targets_np, apply_bucket_calibration(calibration_probabilities_np, global_calibration))
+    calibration_gate_scores = (
+        apply_precision_gate(np.concatenate(calibration_probabilities_multi), precision_gate)
+        if precision_gate is not None and multi_horizon and calibration_probabilities_multi
+        else None
+    )
+    optimized_thresholds = optimize_backtest_thresholds(
+        calibration_targets_np,
+        apply_bucket_calibration(calibration_probabilities_np, global_calibration),
+        hold_probabilities=np.concatenate(calibration_hold_probabilities) if calibration_hold_probabilities else None,
+        confidence_probabilities=np.concatenate(calibration_conf_probabilities) if calibration_conf_probabilities else None,
+        gate_scores=calibration_gate_scores,
+        gate_threshold=float(precision_gate.get("threshold", 0.5)) if precision_gate is not None and multi_horizon else None,
+    )
     decision_threshold = float(optimized_thresholds["decision_threshold"])
     confidence_floor = float(optimized_thresholds["confidence_floor"])
+    optimized_hold_threshold = float(optimized_thresholds.get("hold_threshold", 0.5))
+    optimized_gate_threshold = float(optimized_thresholds.get("gate_threshold", 0.5))
 
     for year, fold_slice in folds:
         active_slice = fold_slice
@@ -389,7 +606,7 @@ def run_walkforward_evaluation(
         gate_threshold = 0.5
         if precision_gate is not None and multi_horizon:
             gate_scores = apply_precision_gate(probabilities_year, precision_gate)
-            gate_threshold = float(precision_gate.get("threshold", 0.5))
+            gate_threshold = optimized_gate_threshold
             strategic_hold_probability = strategic_view["strategic_hold_probability"]
             strategic_confidence_probability = strategic_view["strategic_confidence_probability"]
         else:
@@ -403,6 +620,7 @@ def run_walkforward_evaluation(
             gate_scores=gate_scores,
             gate_threshold=gate_threshold,
             hold_probabilities=strategic_hold_probability,
+            hold_threshold=optimized_hold_threshold,
             confidence_probabilities=strategic_confidence_probability,
         )
         if precision_gate is not None and multi_horizon:
@@ -438,8 +656,9 @@ def run_walkforward_evaluation(
             decision_threshold=decision_threshold,
             confidence_floor=confidence_floor,
             gate_scores=apply_precision_gate(np.concatenate(all_probs_multi), precision_gate) if precision_gate is not None and multi_horizon and all_probs_multi else None,
-            gate_threshold=float(precision_gate.get("threshold", 0.5)) if precision_gate is not None and multi_horizon else 0.5,
+            gate_threshold=optimized_gate_threshold if precision_gate is not None and multi_horizon else 0.5,
             hold_probabilities=np.concatenate(all_hold_probs) if multi_horizon and all_hold_probs else None,
+            hold_threshold=optimized_hold_threshold,
             confidence_probabilities=np.concatenate(all_conf_probs) if multi_horizon and all_conf_probs else None,
         ),
     }

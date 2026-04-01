@@ -21,6 +21,25 @@ except ImportError:  # pragma: no cover
     roc_auc_score = None
 
 
+GATE_FEATURE_NAMES = [
+    "primary_prob",
+    "mean_prob",
+    "std_prob",
+    "max_confidence",
+    "mean_confidence",
+    "agreement_ratio",
+    "hold_mean",
+    "hold_std",
+    "confidence_mean",
+    "confidence_std",
+    "strategic_direction",
+    "strategic_hold",
+    "strategic_confidence",
+    "strategic_spread",
+    "strategic_tradeability",
+]
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     epochs: int = 10
@@ -306,6 +325,12 @@ def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5
     strategic_direction = direction_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else direction_probabilities.mean(axis=1, keepdims=True)
     strategic_hold = hold_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else hold_probabilities.mean(axis=1, keepdims=True)
     strategic_confidence = confidence_probabilities[:, -2:].mean(axis=1, keepdims=True) if horizon_count >= 2 else confidence_probabilities.mean(axis=1, keepdims=True)
+    strategic_spread = (
+        np.abs(direction_probabilities[:, -1:] - direction_probabilities[:, -2:-1])
+        if horizon_count >= 2
+        else np.zeros((len(direction_probabilities), 1), dtype=np.float32)
+    )
+    strategic_tradeability = strategic_confidence * (1.0 - strategic_hold)
     return np.concatenate(
         [
             direction_probabilities[:, :1],
@@ -321,6 +346,8 @@ def horizon_agreement_features(probabilities: np.ndarray, threshold: float = 0.5
             strategic_direction,
             strategic_hold,
             strategic_confidence,
+            strategic_spread,
+            strategic_tradeability,
         ],
         axis=1,
     ).astype(np.float32)
@@ -343,36 +370,38 @@ def train_precision_gate(
     horizon_count = probabilities.shape[1] if probabilities.shape[1] <= 8 else probabilities.shape[1] // 3
     direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, horizon_count)
     direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, horizon_count)
-    strategic_dir_pred = (direction_probabilities[:, -2:].mean(axis=1) >= threshold).astype(np.float32) if horizon_count >= 2 else (direction_probabilities[:, 0] >= threshold).astype(np.float32)
-    strategic_dir_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32) if horizon_count >= 2 else direction_targets[:, 0]
-    strategic_hold_target = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32) if horizon_count >= 2 else hold_targets[:, 0]
-    strategic_conf_target = confidence_targets[:, -2:].mean(axis=1) if horizon_count >= 2 else confidence_targets[:, 0]
-    labels = np.where(
-        strategic_hold_target >= 0.5,
-        1.0,
-        ((strategic_dir_pred == strategic_dir_target).astype(np.float32) * (strategic_conf_target >= 0.35).astype(np.float32)),
+    if horizon_count >= 2:
+        strategic_dir_pred = (direction_probabilities[:, -2:].mean(axis=1) >= threshold).astype(np.float32)
+        strategic_dir_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+        strategic_hold_target = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+        strategic_conf_target = confidence_targets[:, -2:].mean(axis=1)
+        target_direction_agreement = ((direction_targets[:, -1] >= 0.5) == (direction_targets[:, -2] >= 0.5)).astype(np.float32)
+        target_hold_any = (hold_targets[:, -2:].max(axis=1) >= 0.5).astype(np.float32)
+    else:
+        strategic_dir_pred = (direction_probabilities[:, 0] >= threshold).astype(np.float32)
+        strategic_dir_target = direction_targets[:, 0]
+        strategic_hold_target = hold_targets[:, 0]
+        strategic_conf_target = confidence_targets[:, 0]
+        target_direction_agreement = np.ones(len(strategic_dir_target), dtype=np.float32)
+        target_hold_any = strategic_hold_target.copy()
+
+    minority_risk_target = np.maximum(1.0 - target_direction_agreement, target_hold_any).astype(np.float32)
+    tradeable_target = (
+        (strategic_hold_target < 0.45)
+        & (strategic_conf_target >= 0.40)
+        & (target_direction_agreement >= 0.5)
+        & (minority_risk_target < 0.5)
     ).astype(np.float32)
+    labels = (tradeable_target * (strategic_dir_pred == strategic_dir_target).astype(np.float32)).astype(np.float32)
     if len(np.unique(labels)) < 2:
         return {
-            "feature_names": [
-                "primary_prob",
-                "mean_prob",
-                "std_prob",
-                "max_confidence",
-                "mean_confidence",
-                "agreement_ratio",
-                "hold_mean",
-                "hold_std",
-                "confidence_mean",
-                "confidence_std",
-                "strategic_direction",
-                "strategic_hold",
-                "strategic_confidence",
-            ],
+            "feature_names": GATE_FEATURE_NAMES,
             "weights": [0.0] * features.shape[1],
             "bias": float(np.log(np.clip(labels.mean() / max(1e-6, 1.0 - labels.mean()), 1e-6, 1e6))) if labels.size else 0.0,
             "train_accuracy": float(labels.mean()) if labels.size else 0.0,
             "threshold": 0.5,
+            "positive_rate": float(labels.mean()) if labels.size else 0.0,
+            "tradeable_rate": float(tradeable_target.mean()) if labels.size else 0.0,
         }
     weights = np.zeros(features.shape[1], dtype=np.float32)
     bias = 0.0
@@ -385,41 +414,33 @@ def train_precision_gate(
         weights -= lr * grad_w
         bias -= lr * grad_b
     final_probs = _sigmoid(features @ weights + bias)
-    best_threshold = 0.5
+    best_threshold = float(np.quantile(final_probs, 0.82)) if final_probs.size else 0.5
     best_score = float("-inf")
-    for threshold_candidate in np.linspace(0.45, 0.9, 19):
+    target_participation = 0.14
+    for threshold_candidate in np.linspace(0.25, 0.85, 25):
         active = final_probs >= float(threshold_candidate)
         participation = float(active.mean()) if active.size else 0.0
-        if participation < 0.01:
+        if participation < 0.01 or participation > 0.40:
             continue
         precision = float(labels[active].mean()) if active.any() else 0.0
-        abstain_quality = float(labels[~active].mean()) if np.any(~active) else 0.5
-        score = (0.65 * precision) + (0.20 * participation) + (0.15 * abstain_quality)
+        abstain_quality = 1.0 - (float(labels[~active].mean()) if np.any(~active) else 0.0)
+        participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / target_participation)
+        score = (0.62 * precision) + (0.18 * abstain_quality) + (0.20 * participation_reward)
         if score > best_score:
             best_score = score
             best_threshold = float(threshold_candidate)
+    if final_probs.size and np.mean(final_probs >= best_threshold) < 0.005:
+        best_threshold = float(np.quantile(final_probs, max(0.60, 1.0 - target_participation)))
     return {
-        "feature_names": [
-            "primary_prob",
-            "mean_prob",
-            "std_prob",
-            "max_confidence",
-            "mean_confidence",
-            "agreement_ratio",
-            "hold_mean",
-            "hold_std",
-            "confidence_mean",
-            "confidence_std",
-            "strategic_direction",
-            "strategic_hold",
-            "strategic_confidence",
-        ],
+        "feature_names": GATE_FEATURE_NAMES,
         "weights": [float(value) for value in weights],
         "bias": float(bias),
         "train_accuracy": float((((final_probs >= 0.5).astype(np.float32)) == labels).mean()),
         "threshold": float(best_threshold),
         "train_participation": float((final_probs >= best_threshold).mean()) if final_probs.size else 0.0,
         "train_precision": float(labels[final_probs >= best_threshold].mean()) if np.any(final_probs >= best_threshold) else 0.0,
+        "positive_rate": float(labels.mean()) if labels.size else 0.0,
+        "tradeable_rate": float(tradeable_target.mean()) if labels.size else 0.0,
     }
 
 

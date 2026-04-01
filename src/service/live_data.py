@@ -29,6 +29,7 @@ from src.mcts.analog import get_historical_analog_scorer
 from src.mcts.reverse_collapse import reverse_collapse
 from src.mcts.tree import dominant_persona_name, expand_binary_tree, iter_leaves
 from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vectors, reduce_text_embeddings
+from src.quant.hybrid import build_quant_features, merge_quant_features
 from src.simulation.abm import persona_vote_breakdown, simulate_one_step
 from src.simulation.personas import default_personas
 
@@ -1318,6 +1319,8 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
 def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provider: str | None = None) -> tuple[np.ndarray, dict[str, Any]]:
     candles = fetch_recent_market_candles(symbol)
     price_frame = engineer_price_features(candles)
+    quant_frame = build_quant_features(price_frame)
+    price_frame = merge_quant_features(price_frame, quant_frame)
     technical_analysis = build_technical_analysis(price_frame)
     chart_snapshot = build_chart_snapshot(price_frame, bars=120)
     news_items = fetch_live_news(symbol)
@@ -1386,6 +1389,10 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
             "session": technical_analysis.get("session"),
             "location": technical_analysis.get("location"),
             "equilibrium": technical_analysis.get("equilibrium"),
+            "quant_regime_strength": round(float(latest.get("quant_regime_strength", 0.0)), 4),
+            "quant_transition_risk": round(float(latest.get("quant_transition_risk", 0.0)), 4),
+            "quant_vol_realism": round(float(latest.get("quant_vol_realism", 0.0)), 4),
+            "quant_fair_value_z": round(float(latest.get("quant_fair_value_z", 0.0)), 4),
             "nearest_support": technical_analysis.get("nearest_support"),
             "nearest_resistance": technical_analysis.get("nearest_resistance"),
             "order_blocks": technical_analysis.get("order_blocks", [])[:3],

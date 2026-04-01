@@ -6,6 +6,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import pandas as pd  # type: ignore
+except ImportError:  # pragma: no cover
+    pd = None
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -27,12 +32,15 @@ from config.project_config import (  # noqa: E402
     PERSONA_OUTPUTS_PATH,
     PRICE_FEATURES_CSV_FALLBACK,
     PRICE_FEATURES_PATH,
+    QUANT_FEATURES_CSV_FALLBACK,
+    QUANT_FEATURES_PATH,
     SAMPLE_WEIGHTS_PATH,
     SEQUENCE_LEN,
     TARGET_HOLD_MASK_PATH,
     TARGETS_PATH,
     TARGETS_MULTIHORIZON_PATH,
 )
+from src.quant.hybrid import merge_quant_features  # noqa: E402
 from src.pipeline.fusion import (  # noqa: E402
     FusionReport,
     build_trade_target_artifacts,
@@ -75,6 +83,17 @@ def main() -> int:
     crowd_path = resolve_first_existing([CROWD_EMBEDDINGS_NPY_PATH, LEGACY_CROWD_EMBEDDINGS_NPY_PATH])
 
     price_frame = load_price_frame(price_path)
+    quant_path = QUANT_FEATURES_PATH if QUANT_FEATURES_PATH.exists() else QUANT_FEATURES_CSV_FALLBACK if QUANT_FEATURES_CSV_FALLBACK.exists() else None
+    if quant_path is not None:
+        if pd is None:
+            raise ImportError("pandas is required to merge quant features into fused artifacts.")
+        if quant_path.suffix.lower() == ".parquet":
+            quant_frame = pd.read_parquet(quant_path)
+        else:
+            quant_frame = pd.read_csv(quant_path, index_col=0, parse_dates=True)
+        if "timestamp" in quant_frame.columns:
+            quant_frame = quant_frame.set_index(pd.to_datetime(quant_frame["timestamp"], errors="coerce")).drop(columns=["timestamp"])
+        price_frame = merge_quant_features(price_frame, quant_frame)
     price_block = extract_price_block(price_frame)
     target_artifacts = build_trade_target_artifacts(
         price_frame,
