@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from contextlib import nullcontext
 from typing import Any, Dict, Mapping, Sequence
 
 try:
@@ -48,6 +49,49 @@ class TrainingConfig:
     batch_size: int = 512
     inherited_lr: float = 1e-4
     new_layers_lr: float = 5e-4
+
+
+def resolve_amp_dtype(dtype_name: str):
+    if torch is None:
+        return None
+    name = str(dtype_name).strip().lower()
+    if name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if name in {"fp16", "float16", "half"}:
+        return torch.float16
+    return None
+
+
+def autocast_context(device: Any, enabled: bool, dtype_name: str = "bfloat16"):
+    if torch is None or not enabled:
+        return nullcontext()
+    device_type = getattr(device, "type", str(device))
+    if device_type not in {"cuda", "cpu"}:
+        return nullcontext()
+    amp_dtype = resolve_amp_dtype(dtype_name)
+    if amp_dtype is None:
+        return nullcontext()
+    try:
+        return torch.autocast(device_type=device_type, dtype=amp_dtype, enabled=True)
+    except Exception:
+        return nullcontext()
+
+
+def build_grad_scaler(device: Any, enabled: bool, dtype_name: str = "bfloat16"):
+    if torch is None or not enabled:
+        return None
+    if not hasattr(torch, "cuda") or not hasattr(torch.cuda, "amp"):
+        return None
+    device_type = getattr(device, "type", str(device))
+    if device_type != "cuda":
+        return None
+    amp_dtype = resolve_amp_dtype(dtype_name)
+    if amp_dtype != torch.float16:
+        return None
+    try:
+        return torch.cuda.amp.GradScaler(enabled=True)
+    except Exception:
+        return None
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -490,7 +534,15 @@ def apply_precision_gate(
     return _sigmoid(features @ weights + bias).astype(np.float32)
 
 
-def evaluate_binary_model(model, dataloader, device, threshold: float = 0.5) -> tuple[Dict[str, float], np.ndarray, np.ndarray]:
+def evaluate_binary_model(
+    model,
+    dataloader,
+    device,
+    threshold: float = 0.5,
+    *,
+    amp_enabled: bool = False,
+    amp_dtype: str = "bfloat16",
+) -> tuple[Dict[str, float], np.ndarray, np.ndarray]:
     if torch is None:
         raise ImportError("PyTorch is required for evaluation.")
 
@@ -511,15 +563,19 @@ def evaluate_binary_model(model, dataloader, device, threshold: float = 0.5) -> 
                 features, targets, sim_targets, sim_conf = batch
             else:
                 features, targets, sim_targets, sim_conf, sample_weights = batch
-            features = features.to(device)
-            targets = targets.to(device)
-            probs = model(features)
+            features = features.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            sim_targets_device = sim_targets.to(device, non_blocking=True) if sim_targets is not None else None
+            sim_conf_device = sim_conf.to(device, non_blocking=True) if sim_conf is not None else None
+            sample_weights_device = sample_weights.to(device, non_blocking=True) if sample_weights is not None else None
+            with autocast_context(device, amp_enabled, amp_dtype):
+                probs = model(features)
             loss = weighted_binary_loss(
-                probs,
-                targets,
-                sim_targets.to(device) if sim_targets is not None else None,
-                sim_conf.to(device) if sim_conf is not None else None,
-                sample_weights.to(device) if sample_weights is not None else None,
+                probs.float(),
+                targets.float(),
+                sim_targets_device.float() if sim_targets_device is not None else None,
+                sim_conf_device.float() if sim_conf_device is not None else None,
+                sample_weights_device.float() if sample_weights_device is not None else None,
             )
             losses.append(float(loss.item()))
             all_targets.append(targets.detach().cpu().numpy())
@@ -531,7 +587,16 @@ def evaluate_binary_model(model, dataloader, device, threshold: float = 0.5) -> 
     return metrics, targets_np, probs_np
 
 
-def evaluate_multihorizon_model(model, dataloader, device, thresholds: Sequence[float] | None = None, horizon_labels: Sequence[str] | None = None):
+def evaluate_multihorizon_model(
+    model,
+    dataloader,
+    device,
+    thresholds: Sequence[float] | None = None,
+    horizon_labels: Sequence[str] | None = None,
+    *,
+    amp_enabled: bool = False,
+    amp_dtype: str = "bfloat16",
+):
     if torch is None:
         raise ImportError("PyTorch is required for evaluation.")
     all_targets = []
@@ -551,15 +616,19 @@ def evaluate_multihorizon_model(model, dataloader, device, thresholds: Sequence[
                 features, targets, sim_targets, sim_conf = batch
             else:
                 features, targets, sim_targets, sim_conf, sample_weights = batch
-            features = features.to(device)
-            targets = targets.to(device)
-            probs = model(features)
+            features = features.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            sim_targets_device = sim_targets.to(device, non_blocking=True) if sim_targets is not None else None
+            sim_conf_device = sim_conf.to(device, non_blocking=True) if sim_conf is not None else None
+            sample_weights_device = sample_weights.to(device, non_blocking=True) if sample_weights is not None else None
+            with autocast_context(device, amp_enabled, amp_dtype):
+                probs = model(features)
             loss = weighted_multihorizon_loss(
-                probs,
-                targets,
-                sim_targets.to(device) if sim_targets is not None else None,
-                sim_conf.to(device) if sim_conf is not None else None,
-                sample_weights.to(device) if sample_weights is not None else None,
+                probs.float(),
+                targets.float(),
+                sim_targets_device.float() if sim_targets_device is not None else None,
+                sim_conf_device.float() if sim_conf_device is not None else None,
+                sample_weights_device.float() if sample_weights_device is not None else None,
             )
             losses.append(float(loss.item()))
             all_targets.append(targets.detach().cpu().numpy())
@@ -580,6 +649,9 @@ def train_binary_model(
     epochs: int,
     patience: int,
     selection_metric: str = "accuracy",
+    *,
+    amp_enabled: bool = False,
+    amp_dtype: str = "bfloat16",
 ):
     if torch is None:
         raise ImportError("PyTorch is required for training.")
@@ -589,6 +661,7 @@ def train_binary_model(
     best_score = float("-inf")
     patience_left = patience
     history = []
+    scaler = build_grad_scaler(device, amp_enabled, amp_dtype)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -605,21 +678,35 @@ def train_binary_model(
                 features, targets, sim_targets, sim_conf = batch
             else:
                 features, targets, sim_targets, sim_conf, sample_weights = batch
-            features = features.to(device)
-            targets = targets.to(device)
-            sim_targets = sim_targets.to(device) if sim_targets is not None else None
-            sim_conf = sim_conf.to(device) if sim_conf is not None else None
-            sample_weights = sample_weights.to(device) if sample_weights is not None else None
+            features = features.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            sim_targets = sim_targets.to(device, non_blocking=True) if sim_targets is not None else None
+            sim_conf = sim_conf.to(device, non_blocking=True) if sim_conf is not None else None
+            sample_weights = sample_weights.to(device, non_blocking=True) if sample_weights is not None else None
 
             optimizer.zero_grad(set_to_none=True)
-            probs = model(features)
-            loss = weighted_binary_loss(probs, targets, sim_targets, sim_conf, sample_weights)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            with autocast_context(device, amp_enabled, amp_dtype):
+                probs = model(features)
+            loss = weighted_binary_loss(
+                probs.float(),
+                targets.float(),
+                sim_targets.float() if sim_targets is not None else None,
+                sim_conf.float() if sim_conf is not None else None,
+                sample_weights.float() if sample_weights is not None else None,
+            )
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
             epoch_losses.append(float(loss.item()))
 
-        val_metrics, _, _ = evaluate_binary_model(model, val_loader, device)
+        val_metrics, _, _ = evaluate_binary_model(model, val_loader, device, amp_enabled=amp_enabled, amp_dtype=amp_dtype)
         train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         epoch_record = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
         history.append(epoch_record)
@@ -650,6 +737,9 @@ def train_multihorizon_model(
     patience: int,
     selection_metric: str = "accuracy",
     horizon_labels: Sequence[str] | None = None,
+    *,
+    amp_enabled: bool = False,
+    amp_dtype: str = "bfloat16",
 ):
     if torch is None:
         raise ImportError("PyTorch is required for training.")
@@ -659,6 +749,7 @@ def train_multihorizon_model(
     best_score = float("-inf")
     patience_left = patience
     history = []
+    scaler = build_grad_scaler(device, amp_enabled, amp_dtype)
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_losses = []
@@ -674,20 +765,34 @@ def train_multihorizon_model(
                 features, targets, sim_targets, sim_conf = batch
             else:
                 features, targets, sim_targets, sim_conf, sample_weights = batch
-            features = features.to(device)
-            targets = targets.to(device)
-            sim_targets = sim_targets.to(device) if sim_targets is not None else None
-            sim_conf = sim_conf.to(device) if sim_conf is not None else None
-            sample_weights = sample_weights.to(device) if sample_weights is not None else None
+            features = features.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            sim_targets = sim_targets.to(device, non_blocking=True) if sim_targets is not None else None
+            sim_conf = sim_conf.to(device, non_blocking=True) if sim_conf is not None else None
+            sample_weights = sample_weights.to(device, non_blocking=True) if sample_weights is not None else None
 
             optimizer.zero_grad(set_to_none=True)
-            probs = model(features)
-            loss = weighted_multihorizon_loss(probs, targets, sim_targets, sim_conf, sample_weights)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            with autocast_context(device, amp_enabled, amp_dtype):
+                probs = model(features)
+            loss = weighted_multihorizon_loss(
+                probs.float(),
+                targets.float(),
+                sim_targets.float() if sim_targets is not None else None,
+                sim_conf.float() if sim_conf is not None else None,
+                sample_weights.float() if sample_weights is not None else None,
+            )
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
             epoch_losses.append(float(loss.item()))
-        val_metrics, _, _ = evaluate_multihorizon_model(model, val_loader, device, horizon_labels=horizon_labels)
+        val_metrics, _, _ = evaluate_multihorizon_model(model, val_loader, device, horizon_labels=horizon_labels, amp_enabled=amp_enabled, amp_dtype=amp_dtype)
         primary_metrics = val_metrics.get("primary", {})
         strategic_metrics = val_metrics.get("strategic", {})
         train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0

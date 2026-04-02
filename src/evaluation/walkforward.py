@@ -12,8 +12,14 @@ from config.project_config import (
     FUSED_TIMESTAMPS_PATH,
     GATE_CONTEXT_PATH,
     META_GATE_PATH,
+    AMP_DTYPE,
+    AMP_ENABLED,
     MODEL_MANIFEST_PATH,
+    NUM_WORKERS,
+    PIN_MEMORY,
+    PREFETCH_FACTOR,
     PRECISION_GATE_PATH,
+    PERSISTENT_WORKERS,
     TARGETS_PATH,
     TARGETS_MULTIHORIZON_PATH,
     TFT_CHECKPOINT_PATH,
@@ -25,6 +31,7 @@ from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_
 from src.training.meta_gate import apply_meta_gate, combine_gate_scores, load_meta_gate
 from src.training.train_tft import (
     apply_precision_gate,
+    autocast_context,
     build_calibration_report,
     collect_binary_metrics,
     collect_multihorizon_metrics,
@@ -191,17 +198,20 @@ def predict_for_slice(
     target_path: Path = TARGETS_PATH,
     sequence_len: int,
     batch_size: int = 1024,
+    amp_enabled: bool = AMP_ENABLED,
+    amp_dtype: str = AMP_DTYPE,
 ) -> tuple[np.ndarray, np.ndarray]:
     if torch is None or DataLoader is None:
         raise ImportError("PyTorch is required for walk-forward evaluation.")
     dataset = FusedSequenceDataset(feature_path, target_path, sequence_len=sequence_len, row_slice=row_slice)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, **_loader_kwargs())
     probabilities: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     with torch.no_grad():
         for features, labels in dataloader:
-            features = features.to(device)
-            outputs = model(features).detach().cpu().numpy().astype(np.float32)
+            features = features.to(device, non_blocking=True)
+            with autocast_context(device, amp_enabled, amp_dtype):
+                outputs = model(features).detach().cpu().numpy().astype(np.float32)
             probabilities.append(outputs)
             targets.append(labels.detach().cpu().numpy().astype(np.float32))
     probs = np.concatenate(probabilities) if probabilities else np.empty(0, dtype=np.float32)
@@ -219,17 +229,20 @@ def predict_multihorizon_for_slice(
     target_keys: Sequence[str],
     sequence_len: int,
     batch_size: int = 1024,
+    amp_enabled: bool = AMP_ENABLED,
+    amp_dtype: str = AMP_DTYPE,
 ) -> tuple[np.ndarray, np.ndarray]:
     if torch is None or DataLoader is None:
         raise ImportError("PyTorch is required for walk-forward evaluation.")
     dataset = FusedMultiHorizonSequenceDataset(feature_path, target_bundle_path, target_keys=target_keys, sequence_len=sequence_len, row_slice=row_slice)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, **_loader_kwargs())
     probabilities: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     with torch.no_grad():
         for features, labels in dataloader:
-            features = features.to(device)
-            outputs = model(features).detach().cpu().numpy().astype(np.float32)
+            features = features.to(device, non_blocking=True)
+            with autocast_context(device, amp_enabled, amp_dtype):
+                outputs = model(features).detach().cpu().numpy().astype(np.float32)
             probabilities.append(outputs)
             targets.append(labels.detach().cpu().numpy().astype(np.float32))
     probs = np.concatenate(probabilities) if probabilities else np.empty((0, 0), dtype=np.float32)
@@ -411,6 +424,18 @@ def capital_backtest_from_unit_pnl(
         "overflowed": False,
         "log10_final_capital": round(float(np.log10(max(equity, 1e-12))), 6),
     }
+
+
+def _loader_kwargs() -> dict[str, Any]:
+    workers = max(0, int(NUM_WORKERS))
+    kwargs: dict[str, Any] = {
+        "num_workers": workers,
+        "pin_memory": bool(PIN_MEMORY),
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = bool(PERSISTENT_WORKERS)
+        kwargs["prefetch_factor"] = max(2, int(PREFETCH_FACTOR))
+    return kwargs
 
 
 def fixed_risk_capital_backtest_from_unit_pnl(

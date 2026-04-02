@@ -32,6 +32,7 @@ from src.pipeline.perception import align_event_matrix, build_crowd_numeric_vect
 from src.quant.hybrid import build_quant_features, merge_quant_features
 from src.simulation.abm import persona_vote_breakdown, simulate_one_step
 from src.simulation.personas import default_personas
+from src.v6 import build_volatility_envelopes, detect_regime, get_historical_path_retriever, rank_branches_with_selector
 
 USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
 
@@ -1226,6 +1227,12 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
 
     last_timestamp = price_frame.index[-1]
     last_price = float(price_frame.iloc[-1]["close"])
+    regime = detect_regime(current_row)
+    envelopes = build_volatility_envelopes(last_price, current_row, regime, horizons=(5, 15, 30))
+    try:
+        retrieval = get_historical_path_retriever().retrieve(current_row)
+    except Exception:
+        retrieval = None
     atr = max(float(current_row.get("atr_14", 0.0) or 0.0), max(last_price * 0.0015, 0.5))
     ranked_leaves = sorted(
         leaves,
@@ -1255,6 +1262,23 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
                 "dominant_driver": leaf.dominant_driver,
             }
         )
+    selector_result = rank_branches_with_selector(branches, current_row, regime, envelopes, retrieval)
+    selector_score_map = {entry["path_id"]: entry["selector_score"] for entry in selector_result.rationale}
+    selector_rationale_map = {entry["path_id"]: entry["top_drivers"] for entry in selector_result.rationale}
+    for branch in branches:
+        path_id = branch.get("path_id")
+        branch["selector_score"] = round(float(selector_score_map.get(path_id, 0.0)), 6)
+        branch["selector_rationale"] = selector_rationale_map.get(path_id, [])
+    branches = sorted(
+        branches,
+        key=lambda branch: (
+            _safe_float(branch.get("selector_score"), 0.0) * 0.50
+            + _safe_float(branch.get("probability"), 0.0) * 0.30
+            + _safe_float(branch.get("branch_fitness"), 0.0) * 0.15
+            + _safe_float(branch.get("minority_guardrail"), 0.0) * 0.05
+        ),
+        reverse=True,
+    )
 
     cone_points = _price_cone_from_leaves(leaves, last_timestamp=last_timestamp, last_price=last_price, step_minutes=5)
     predicted_center = cone_points[-1]["center_price"] if cone_points else last_price
@@ -1304,15 +1328,21 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "analog_confidence": round(float(analog_snapshot.confidence), 6),
             "analog_support": int(analog_snapshot.support),
             "branch_count": len(branches),
+            "detected_regime": regime.dominant_regime,
+            "regime_confidence": round(float(regime.dominant_confidence), 6),
+            "retrieval_similarity": round(float(retrieval.similarity), 6) if retrieval is not None else 0.0,
+            "selector_top_branch_id": selector_result.selected_branch_id,
+            "selector_top_score": round(float(selector_result.selected_score), 6),
         },
         "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
         "branches": branches,
         "cone": cone_points,
         "branch_conversation": branch_conversation,
         "highlighted_branches": {
-            "top_branch_id": branch_conversation.get("top_branch_id"),
+            "top_branch_id": selector_result.selected_branch_id or branch_conversation.get("top_branch_id"),
             "minority_branch_id": branch_conversation.get("minority_branch_id"),
         },
+        "selector_rationale": selector_result.rationale,
     }
 
 

@@ -126,7 +126,7 @@ Also important:
 
 ## Latest Update
 
-The completed cloud `v5` pass kept the stronger filtered-win-rate regime alive, while the new routed predictor only improved raw ranking quality slightly.
+The completed cloud `v5` pass kept the stronger filtered-win-rate regime alive, and the project has now moved into a real `v6` redesign where the TFT is treated as the imagination engine and a new selector stack is being built to judge candidate futures.
 
 Latest synced `v4` results:
 
@@ -178,6 +178,39 @@ Important `v5` interpretation:
 - `30m` remains slightly stronger than `15m`
 - the recent-regime `v5` run is still the cleaner filtered profile because drawdown is materially lower
 - the strongest progress is still on `filtered win rate + participation control`, not raw standalone classifier strength
+
+## Training Throughput Diagnosis
+
+One important systems problem was finally identified clearly: the cloud box was not slow because the MI300X was weak. It was slow because the training / evaluation code was underfeeding it.
+
+Main bottlenecks that were present:
+
+- hardcoded `num_workers=0` in key training loaders
+- hardcoded `num_workers=0` in walk-forward prediction loaders
+- no AMP path in the main train/eval loop
+- blocking host-to-device tensor transfers
+- no configurable worker / prefetch / persistent-worker controls
+
+What that caused:
+
+- GPU compute often sat around `15% - 30%`
+- CPU workers never ramped hard enough to keep batches flowing
+- VRAM looked permanently high because ROCm / PyTorch was caching reserved memory even while compute was low
+
+What has now been fixed locally:
+
+- configurable worker counts in `config/project_config.py`
+- AMP support in `src/training/train_tft.py`
+- non-blocking tensor transfers in training and evaluation
+- workerized loaders in `scripts/train_fused_tft.py`
+- workerized walk-forward loaders in `src/evaluation/walkforward.py`
+- remote `v6` runner now sets higher worker counts and AMP by default
+
+Important honesty about the `90% VRAM` reading:
+
+- on ROCm that does not necessarily mean the GPU is actively training
+- it often means the allocator is holding reserved memory for the process
+- low GPU utilization plus high VRAM reservation usually means the data pipeline or evaluation stage is the bottleneck, not that the card is “fully busy”
 
 ## Current Local Architecture Upgrade
 
@@ -233,6 +266,75 @@ What `v5` proved:
 - regime-aware ensemble weighting preserved the stronger filtered win-rate regime
 - deeper specialist-bot integration into branch scoring did not break branch generation or the live simulator path
 - raw `15m/30m` ranking quality improved only marginally, so the next gains are still more likely to come from better targets, routing, and branch realism than from model size alone
+
+## Current Local `v6` Architecture Direction
+
+The project is now moving toward this structure:
+
+```text
+Current Market State
+  -> Regime Detector
+  -> Volatility / Range Envelope
+  -> Historical Retrieval Prior
+  -> TFT / Routed Predictor Generates Candidate Futures
+  -> Branch Feature Extractor
+  -> Branch Selector / Judge
+  -> Reverse Collapse + Final Most-Realistic Future Path
+```
+
+This is different from the older assumption that the TFT itself should become the final predictor.
+
+Current `v6` local modules now in the repo:
+
+- `src/v6/regime_detection.py`
+- `src/v6/volatility_constraints.py`
+- `src/v6/historical_retrieval.py`
+- `src/v6/branch_features.py`
+- `src/v6/branch_selector.py`
+
+What these modules do now:
+
+- detect a higher-level market regime without predicting price directly
+- estimate realistic `5m / 15m / 30m` movement envelopes
+- retrieve historically similar states as an additional branch prior
+- compute branch-level realism / plausibility features
+- score branches with a dedicated selector model or a fallback learned-style score
+
+This means the architecture is finally starting to reflect the user’s intended design:
+
+- TFT = imagination engine
+- selector = future judge
+- collapse = uncertainty-preserving compression layer
+
+## Current Remote `v6` Status
+
+The cloud `v6` cycle has now been launched on the Jupyter ROCm box.
+
+Remote execution details:
+
+- Jupyter workspace root: `nexus/`
+- remote launcher script: `scripts/remote_v6_train.py`
+- remote pid file: `outputs/logs/remote_v6_pipeline.pid`
+- remote log: `outputs/logs/remote_v6_pipeline.log`
+- latest confirmed stage in this chat: `===== build_quant_context =====`
+- latest confirmed remote pid: `751202`
+
+Current `v6` cloud goals:
+
+1. rebuild quant context with the faster loader path
+2. rebuild persona outputs
+3. rebuild fused artifacts
+4. run tests
+5. train `mh12_full_v6`
+6. walk-forward evaluate `mh12_full_v6`
+7. train `mh12_recent_v6`
+8. walk-forward evaluate `mh12_recent_v6`
+
+Main `v6` intent:
+
+- keep `15m / 30m` as the primary product story
+- make the generator faster to train and evaluate
+- prepare the codebase for a real learned branch-selector layer instead of relying mostly on post-hoc gating
 
 ## What Was Fixed Recently
 
@@ -1929,6 +2031,53 @@ GPT-OSS role remains unchanged:
   - swarm judgment
 - GPT-OSS should not replace the numeric forecaster or the quant gate
 
+## Open-Source Comparative Review
+
+I reviewed the projects under [SimilarExistingSolutions](C:/PersonalDrive/Programming/AiStudio/nexus-trader/SimilarExistingSolutions) to identify which production patterns Nexus should borrow from mature open-source systems.
+
+Projects reviewed:
+
+- `nautilus_trader-develop`
+- `freqtrade-develop`
+- `zipline-master`
+- `backtrader-master`
+- `pysystemtrade-develop`
+- `TradeMaster-1.0.0`
+- `TradingAgents-main`
+- `AI-Trader-main`
+- `awesome-systematic-trading-main`
+
+Highest-value conclusions:
+
+- `NautilusTrader` is the best model for deterministic event-driven backtest architecture and research/live parity.
+- `Freqtrade` is the best model for validation tooling, especially lookahead-bias detection, recursive-analysis, and threshold-search ergonomics.
+- `Zipline` and `Backtrader` are the best models for slippage, commission, fill realism, and trade lifecycle accounting.
+- `pysystemtrade` is the best model for production operations discipline, backups, diagnostics, and scheduled system workflows.
+- `TradeMaster` is the strongest reference for market-dynamics labeling and regime-supervision ideas.
+- `TradingAgents` and `AI-Trader` are useful for the GPT sidecar, debate memory, and market-intel aggregation, but not for the numeric prediction core.
+- `awesome-systematic-trading` is a reference list, not an implementation source.
+
+What Nexus should implement from this review:
+
+- a proper `src/backtest/` module with event-driven semantics
+- slippage / fee / fill abstractions
+- a Nexus-specific `lookahead-analysis` command
+- a Nexus-specific recursive feature / leakage analysis command
+- a structured backtest result object instead of ad hoc report assembly
+- explicit market-dynamics label generation for regime supervision
+- daily diagnostics / backup / rebuild scripts
+- better GPT-sidecar debate memory and market-intel snapshot caching
+
+What Nexus should not copy:
+
+- LLM as the primary numeric forecaster
+- generic copy-trading marketplace patterns
+- RL-first core prediction architecture
+
+The full implementation breakdown from this review is now documented in:
+
+- [SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md](C:/PersonalDrive/Programming/AiStudio/nexus-trader/SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md)
+
 ## Codebase Areas To Audit Next
 
 High-priority files to audit in future chats:
@@ -2043,11 +2192,29 @@ Current honest performance summary:
 - the most credible edge still comes from abstention, branch selection, and regime-aware filtering
 
 The next serious step is not “bigger random model.”
-The next serious step is:
+The next serious step for `v6` is:
 
-- better historical branch scoring
-- better collapse
-- better confidence
-- better bot-simulator integration
-- better technical structure logic
-- then stronger structured reasoning around it
+- finish the cloud `v6` run and compare it honestly against `v5`
+- train a real historical branch-selector dataset where branches are labeled by similarity to actual future paths
+- learn branch-selector weights instead of leaning mainly on fallback scoring
+- add branch-level volatility rejection directly into ranking and collapse
+- use historical retrieval priors more strongly in branch survival probability
+- add richer order-flow / liquidity proxies if reliable data becomes available
+- only after that deepen GPT-OSS as the structured catalyst / explanation sidecar
+
+## Latest Open-Source-Informed Roadmap Note
+
+The previous "bigger model" framing should be treated as outdated.
+
+The better next step is:
+
+- keep the predictor and selector architecture branch-first
+- improve realism and validation before scaling model size
+- implement production-grade backtest semantics, slippage, fees, and fills
+- add lookahead-analysis and recursive leakage checks
+- add explicit market-dynamics labeling for regime supervision
+- keep GPT-OSS as a sidecar for reasoning, labeling, and explanation, not as the numeric predictor
+
+See:
+
+- [SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md](C:/PersonalDrive/Programming/AiStudio/nexus-trader/SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md)

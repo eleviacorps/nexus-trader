@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 
 from config.project_config import (  # noqa: E402
+    AMP_DTYPE,
+    AMP_ENABLED,
     CALIBRATION_REPORT_PATH,
     FEATURE_IMPORTANCE_REPORT_PATH,
     FINAL_TFT_METRICS_PATH,
@@ -23,7 +25,11 @@ from config.project_config import (  # noqa: E402
     LOOKAHEAD,
     META_GATE_PATH,
     MODEL_MANIFEST_PATH,
+    NUM_WORKERS,
+    PIN_MEMORY,
+    PREFETCH_FACTOR,
     PRECISION_GATE_PATH,
+    PERSISTENT_WORKERS,
     SAMPLE_WEIGHTS_PATH,
     SEQUENCE_LEN,
     SIM_CONFIDENCE_PATH,
@@ -37,6 +43,7 @@ from config.project_config import (  # noqa: E402
     TFT_CHECKPOINT_PATH,
     TRAIN_SPLIT,
     TRAIN_YEARS,
+    TORCH_COMPILE_ENABLED,
     VAL_SPLIT,
     VAL_YEARS,
 )
@@ -117,7 +124,18 @@ def build_loaders(
     sim_target_path: Path | None = None,
     sim_confidence_path: Path | None = None,
     sample_weight_path: Path | None = None,
+    *,
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY,
+    persistent_workers: bool = PERSISTENT_WORKERS,
+    prefetch_factor: int = PREFETCH_FACTOR,
 ):
+    loader_kwargs = _loader_kwargs(
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+    )
     train_ds = FusedSequenceDataset(
         feature_path,
         target_path,
@@ -146,9 +164,9 @@ def build_loaders(
         sample_weight_path=sample_weight_path,
     )
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True),
-        DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True),
-        DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True),
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs),
+        DataLoader(val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs),
+        DataLoader(test_ds, batch_size=batch_size, shuffle=False, **loader_kwargs),
     )
 
 
@@ -164,7 +182,18 @@ def build_multihorizon_loaders(
     sim_target_path: Path | None = None,
     sim_confidence_path: Path | None = None,
     sample_weight_path: Path | None = None,
+    *,
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY,
+    persistent_workers: bool = PERSISTENT_WORKERS,
+    prefetch_factor: int = PREFETCH_FACTOR,
 ):
+    loader_kwargs = _loader_kwargs(
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+    )
     train_ds = FusedMultiHorizonSequenceDataset(
         feature_path,
         target_bundle_path,
@@ -196,10 +225,28 @@ def build_multihorizon_loaders(
         sample_weight_path=sample_weight_path,
     )
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True),
-        DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True),
-        DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True),
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs),
+        DataLoader(val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs),
+        DataLoader(test_ds, batch_size=batch_size, shuffle=False, **loader_kwargs),
     )
+
+
+def _loader_kwargs(
+    *,
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY,
+    persistent_workers: bool = PERSISTENT_WORKERS,
+    prefetch_factor: int = PREFETCH_FACTOR,
+) -> dict[str, object]:
+    workers = max(0, int(num_workers))
+    kwargs: dict[str, object] = {
+        "num_workers": workers,
+        "pin_memory": bool(pin_memory),
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = bool(persistent_workers)
+        kwargs["prefetch_factor"] = max(2, int(prefetch_factor))
+    return kwargs
 
 
 def resolve_slices(total_rows: int, sequence_len: int, split_mode: str, train_years: list[int], val_years: list[int], test_years: list[int]):
@@ -240,6 +287,12 @@ def main() -> int:
     parser.add_argument('--test-years', default=None, help='Comma-separated years for test split.')
     parser.add_argument('--run-tag', default='', help='Optional tag to save an alternate checkpoint/manifest set.')
     parser.add_argument('--disable-multihorizon', action='store_true', help='Fallback to the old single-target training path.')
+    parser.add_argument('--num-workers', type=int, default=NUM_WORKERS)
+    parser.add_argument('--amp', dest='amp_enabled', action='store_true', default=AMP_ENABLED)
+    parser.add_argument('--no-amp', dest='amp_enabled', action='store_false')
+    parser.add_argument('--amp-dtype', default=AMP_DTYPE, choices=['bfloat16', 'float16', 'none'])
+    parser.add_argument('--torch-compile', dest='torch_compile', action='store_true', default=TORCH_COMPILE_ENABLED)
+    parser.add_argument('--no-torch-compile', dest='torch_compile', action='store_false')
     args = parser.parse_args()
 
     feature_path = FUSED_FEATURE_MATRIX_PATH
@@ -264,6 +317,8 @@ def main() -> int:
     train_years = parse_year_list(args.train_years, TRAIN_YEARS)
     val_years = parse_year_list(args.val_years, VAL_YEARS)
     test_years = parse_year_list(args.test_years, TEST_YEARS)
+    effective_amp_dtype = 'none' if not args.amp_enabled else str(args.amp_dtype).lower()
+    amp_enabled = bool(args.amp_enabled and effective_amp_dtype != 'none')
 
     if args.sample_limit > 0 and args.split_mode == 'year':
         raise ValueError('sample-limit with split-mode=year is not supported because it can invalidate year coverage. Use ratio splits for smoke runs.')
@@ -320,6 +375,10 @@ def main() -> int:
             sim_target_path=sim_target_path,
             sim_confidence_path=sim_confidence_path,
             sample_weight_path=sample_weight_path,
+            num_workers=args.num_workers,
+            pin_memory=PIN_MEMORY,
+            persistent_workers=PERSISTENT_WORKERS,
+            prefetch_factor=PREFETCH_FACTOR,
         )
     else:
         train_loader, val_loader, test_loader = build_loaders(
@@ -333,8 +392,17 @@ def main() -> int:
             sim_target_path=sim_target_path,
             sim_confidence_path=sim_confidence_path,
             sample_weight_path=sample_weight_path,
+            num_workers=args.num_workers,
+            pin_memory=PIN_MEMORY,
+            persistent_workers=PERSISTENT_WORKERS,
+            prefetch_factor=PREFETCH_FACTOR,
         )
     device = get_torch_device()
+    if hasattr(torch, 'set_float32_matmul_precision'):
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
 
     model_config = NexusTFTConfig(
         input_dim=int(np.load(feature_path, mmap_mode='r').shape[1]),
@@ -346,6 +414,11 @@ def main() -> int:
     model = NexusTFT(model_config).to(device)
     if LEGACY_TFT_CHECKPOINT_PATH.exists() and not args.skip_checkpoint:
         load_checkpoint_with_expansion(model, LEGACY_TFT_CHECKPOINT_PATH, new_input_dim=model_config.input_dim)
+    if args.torch_compile and hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model)  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     optimizer = build_optimizer(model, old_layers_lr=args.old_lr, new_layers_lr=args.new_lr)
     training_config = TrainingConfig(
@@ -368,8 +441,17 @@ def main() -> int:
             patience=training_config.patience,
             selection_metric=args.selection_metric,
             horizon_labels=horizon_labels,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
         )
-        val_metrics, val_targets, val_probabilities = evaluate_multihorizon_model(model, val_loader, device, horizon_labels=horizon_labels)
+        val_metrics, val_targets, val_probabilities = evaluate_multihorizon_model(
+            model,
+            val_loader,
+            device,
+            horizon_labels=horizon_labels,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
+        )
         threshold_selection = find_optimal_threshold(val_targets[:, 2], val_probabilities[:, 2], metric=args.metric)
         threshold = float(threshold_selection['threshold'])
         horizon_thresholds = [0.5, 0.5, threshold, threshold]
@@ -381,7 +463,15 @@ def main() -> int:
             threshold=threshold,
         )
         gate_probabilities_val = apply_precision_gate(val_probabilities, gate, context_features=gate_context_val)
-        test_metrics, test_targets, test_probabilities = evaluate_multihorizon_model(model, test_loader, device, thresholds=horizon_thresholds, horizon_labels=horizon_labels)
+        test_metrics, test_targets, test_probabilities = evaluate_multihorizon_model(
+            model,
+            test_loader,
+            device,
+            thresholds=horizon_thresholds,
+            horizon_labels=horizon_labels,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
+        )
         gate_probabilities_test = apply_precision_gate(test_probabilities, gate, context_features=gate_context_test)
         meta_gate = train_meta_gate(
             val_probabilities,
@@ -439,8 +529,16 @@ def main() -> int:
             epochs=training_config.epochs,
             patience=training_config.patience,
             selection_metric=args.selection_metric,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
         )
-        val_metrics, val_targets, val_probabilities = evaluate_binary_model(model, val_loader, device)
+        val_metrics, val_targets, val_probabilities = evaluate_binary_model(
+            model,
+            val_loader,
+            device,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
+        )
         threshold_selection = find_optimal_threshold(val_targets, val_probabilities, metric=args.metric)
         threshold = float(threshold_selection['threshold'])
         calibrated_val_metrics = collect_binary_metrics(val_targets, val_probabilities, threshold=threshold)
@@ -448,7 +546,14 @@ def main() -> int:
             'selection': threshold_selection,
             'validation_curve': build_calibration_report(val_targets, val_probabilities),
         }
-        test_metrics, test_targets, test_probabilities = evaluate_binary_model(model, test_loader, device, threshold=threshold)
+        test_metrics, test_targets, test_probabilities = evaluate_binary_model(
+            model,
+            test_loader,
+            device,
+            threshold=threshold,
+            amp_enabled=amp_enabled,
+            amp_dtype=effective_amp_dtype,
+        )
         calibration_report['test_curve'] = build_calibration_report(test_targets, test_probabilities)
         gate = None
         meta_gate = None
@@ -515,6 +620,13 @@ def main() -> int:
         'meta_gate_path': str(meta_gate_path) if meta_gate is not None and meta_gate.get('available', False) else '',
         'meta_gate_provider': meta_gate.get('provider', '') if meta_gate is not None else '',
         'gate_context_path': str(gate_context_path) if gate is not None and gate_context_path.exists() else '',
+        'num_workers': int(args.num_workers),
+        'pin_memory': bool(PIN_MEMORY),
+        'persistent_workers': bool(PERSISTENT_WORKERS),
+        'prefetch_factor': int(PREFETCH_FACTOR),
+        'amp_enabled': bool(amp_enabled),
+        'amp_dtype': effective_amp_dtype,
+        'torch_compile': bool(args.torch_compile),
     }
     metrics_report = {
         'validation': calibrated_val_metrics,
@@ -544,6 +656,13 @@ def main() -> int:
         'meta_gate_path': str(meta_gate_path) if meta_gate is not None and meta_gate.get('available', False) else '',
         'meta_gate_provider': meta_gate.get('provider', '') if meta_gate is not None else '',
         'gate_context_path': str(gate_context_path) if gate is not None and gate_context_path.exists() else '',
+        'num_workers': int(args.num_workers),
+        'pin_memory': bool(PIN_MEMORY),
+        'persistent_workers': bool(PERSISTENT_WORKERS),
+        'prefetch_factor': int(PREFETCH_FACTOR),
+        'amp_enabled': bool(amp_enabled),
+        'amp_dtype': effective_amp_dtype,
+        'torch_compile': bool(args.torch_compile),
         'run_tag': args.run_tag,
         'generated_at': datetime.now(timezone.utc).isoformat(),
     }
