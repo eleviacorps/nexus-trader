@@ -60,6 +60,11 @@ GATE_CONTEXT_COLUMNS = [
     "gate_ctx_route_bias",
     "gate_ctx_state_imbalance",
     "gate_ctx_chop_risk",
+    "gate_ctx_dynamics_confidence",
+    "gate_ctx_dynamics_trend",
+    "gate_ctx_dynamics_breakout",
+    "gate_ctx_dynamics_range",
+    "gate_ctx_dynamics_panic",
 ]
 
 
@@ -76,6 +81,20 @@ def load_price_frame(price_path: Path):
     else:
         frame = pandas.read_csv(price_path, index_col=0, parse_dates=True)
     return frame
+
+
+def merge_market_dynamics_features(price_frame, dynamics_frame):
+    pandas = _require_pandas()
+    if dynamics_frame is None or len(dynamics_frame) == 0:
+        return price_frame
+    merged = price_frame.copy()
+    aligned = dynamics_frame.copy()
+    aligned.index = pandas.to_datetime(aligned.index, errors="coerce")
+    merged.index = pandas.to_datetime(merged.index, errors="coerce")
+    for column in aligned.columns:
+        if str(column).startswith("market_dynamics_"):
+            merged[column] = aligned[column].reindex(merged.index).ffill().bfill()
+    return merged
 
 
 def extract_price_block(frame) -> np.ndarray:
@@ -168,6 +187,16 @@ def build_trade_target_artifacts(
     quant_route_prob_down = frame["quant_route_prob_down"].to_numpy(dtype=np.float32, copy=True) if "quant_route_prob_down" in frame.columns else np.zeros(len(frame), dtype=np.float32)
     quant_route_confidence = frame["quant_route_confidence"].to_numpy(dtype=np.float32, copy=True) if "quant_route_confidence" in frame.columns else quant_regime_strength.copy()
     quant_route_bias = np.clip(quant_route_prob_up - quant_route_prob_down, -1.0, 1.0).astype(np.float32)
+    dynamics_confidence = frame["market_dynamics_confidence"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_confidence" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_trend_up = frame["market_dynamics_prob_trend_up"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_trend_up" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_trend_down = frame["market_dynamics_prob_trend_down"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_trend_down" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_breakout = frame["market_dynamics_prob_breakout"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_breakout" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_range = frame["market_dynamics_prob_range"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_range" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_mean_reversion = frame["market_dynamics_prob_mean_reversion"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_mean_reversion" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_false_breakout = frame["market_dynamics_prob_false_breakout"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_false_breakout" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_panic = frame["market_dynamics_prob_panic_news_shock"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_panic_news_shock" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_high_vol = frame["market_dynamics_prob_high_volatility"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_high_volatility" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_low_vol = frame["market_dynamics_prob_low_volatility"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_low_volatility" in frame.columns else np.zeros(len(frame), dtype=np.float32)
     quant_quantized_hold = (
         (quant_transition_risk >= 0.68)
         | (quant_tail_risk >= 0.72)
@@ -210,9 +239,32 @@ def build_trade_target_artifacts(
     disagreement_ratio = disagreement.sum(axis=1) / np.maximum(1.0, non_hold.sum(axis=1))
 
     move_strength = np.abs(primary_returns) / np.maximum(primary_threshold, 1e-6)
+    directional_trend_support = np.where(primary_returns >= 0.0, dynamics_trend_up, dynamics_trend_down).astype(np.float32)
+    range_risk = np.clip(dynamics_range + dynamics_mean_reversion + 0.6 * dynamics_false_breakout, 0.0, 1.0).astype(np.float32)
+    panic_risk = np.clip(dynamics_panic + 0.5 * dynamics_high_vol, 0.0, 1.0).astype(np.float32)
+    dynamics_hold = (
+        (dynamics_confidence >= 0.55)
+        & (range_risk >= 0.55)
+        & (move_strength <= 1.10)
+    ) | (
+        (dynamics_confidence >= 0.60)
+        & (panic_risk >= 0.65)
+        & (agreement_ratio <= 0.45)
+    ) | (
+        (dynamics_low_vol >= 0.65)
+        & (move_strength <= 0.75)
+    )
+    primary_hold_mask = np.maximum(primary_hold_mask, dynamics_hold.astype(np.float32)).astype(np.float32)
     weights = 0.65 + 0.55 * np.clip(move_strength, 0.0, 3.0) + 0.90 * agreement_ratio - 0.45 * disagreement_ratio
     weights = np.where(primary_hold_mask > 0.5, hold_weight + 0.15 * agreement_ratio, weights)
     trend_alignment = ((np.sign(primary_returns) == np.sign(quant_trend_score)) & (np.abs(primary_returns) > primary_threshold)).astype(np.float32)
+    dynamics_alignment = (
+        0.32 * directional_trend_support
+        + 0.22 * dynamics_breakout
+        + 0.08 * dynamics_confidence
+        - 0.24 * range_risk
+        - 0.12 * panic_risk * (move_strength < 1.0).astype(np.float32)
+    )
     quant_bonus = (
         0.30 * quant_regime_strength
         + 0.12 * quant_regime_persistence
@@ -225,7 +277,7 @@ def build_trade_target_artifacts(
         - 0.10 * np.clip(np.abs(quant_fair_value_z) - 1.5, 0.0, 2.0)
         - 0.12 * np.clip(np.abs(quant_kalman_dislocation) * 80.0, 0.0, 1.0)
     )
-    weights = weights * np.clip(0.85 + quant_bonus, 0.30, 1.65)
+    weights = weights * np.clip(0.85 + quant_bonus + dynamics_alignment, 0.30, 1.75)
     weights = np.clip(weights, max(0.05, hold_weight), 4.0).astype(np.float32)
 
     summary = {
@@ -249,6 +301,11 @@ def build_trade_target_artifacts(
         "avg_quant_fair_value_z": float(np.mean(np.abs(quant_fair_value_z))) if len(quant_fair_value_z) else 0.0,
         "avg_quant_route_confidence": float(np.mean(quant_route_confidence)) if len(quant_route_confidence) else 0.0,
         "avg_quant_kalman_dislocation": float(np.mean(np.abs(quant_kalman_dislocation))) if len(quant_kalman_dislocation) else 0.0,
+        "avg_dynamics_confidence": float(np.mean(dynamics_confidence)) if len(dynamics_confidence) else 0.0,
+        "avg_dynamics_trend_support": float(np.mean(directional_trend_support)) if len(directional_trend_support) else 0.0,
+        "avg_dynamics_breakout": float(np.mean(dynamics_breakout)) if len(dynamics_breakout) else 0.0,
+        "avg_dynamics_range_risk": float(np.mean(range_risk)) if len(range_risk) else 0.0,
+        "avg_dynamics_panic_risk": float(np.mean(panic_risk)) if len(panic_risk) else 0.0,
         "hold_weight": float(hold_weight),
         "horizon_summary": horizon_summary,
     }
@@ -310,6 +367,26 @@ def build_gate_context_matrix(frame) -> np.ndarray:
     state_imbalance = np.clip(state_up - state_down, -1.0, 1.0).astype(np.float32)
     route_bias = np.clip(route_up - route_down, -1.0, 1.0).astype(np.float32)
     chop_risk = np.clip(state_chop + state_range, 0.0, 1.0).astype(np.float32)
+    dynamics_confidence = frame["market_dynamics_confidence"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_confidence" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_trend = np.clip(
+        (frame["market_dynamics_prob_trend_up"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_trend_up" in frame.columns else np.zeros(len(frame), dtype=np.float32))
+        + (frame["market_dynamics_prob_trend_down"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_trend_down" in frame.columns else np.zeros(len(frame), dtype=np.float32)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    dynamics_breakout = np.clip(frame["market_dynamics_prob_breakout"].to_numpy(dtype=np.float32, copy=True), 0.0, 1.0) if "market_dynamics_prob_breakout" in frame.columns else np.zeros(len(frame), dtype=np.float32)
+    dynamics_range = np.clip(
+        (frame["market_dynamics_prob_range"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_range" in frame.columns else np.zeros(len(frame), dtype=np.float32))
+        + (frame["market_dynamics_prob_mean_reversion"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_mean_reversion" in frame.columns else np.zeros(len(frame), dtype=np.float32)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    dynamics_panic = np.clip(
+        (frame["market_dynamics_prob_panic_news_shock"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_panic_news_shock" in frame.columns else np.zeros(len(frame), dtype=np.float32))
+        + 0.5 * (frame["market_dynamics_prob_high_volatility"].to_numpy(dtype=np.float32, copy=True) if "market_dynamics_prob_high_volatility" in frame.columns else np.zeros(len(frame), dtype=np.float32)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
 
     context = np.column_stack(
         [
@@ -330,6 +407,11 @@ def build_gate_context_matrix(frame) -> np.ndarray:
             route_bias,
             state_imbalance,
             chop_risk,
+            np.clip(dynamics_confidence, 0.0, 1.0).astype(np.float32),
+            dynamics_trend,
+            dynamics_breakout,
+            dynamics_range,
+            dynamics_panic,
         ]
     ).astype(np.float32, copy=False)
     return context

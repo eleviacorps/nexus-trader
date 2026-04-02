@@ -17,6 +17,10 @@ from config.project_config import (
     MODEL_MANIFEST_PATH,
     NUM_WORKERS,
     PIN_MEMORY,
+    LEGACY_PRICE_FEATURES_CSV,
+    LEGACY_PRICE_FEATURES_PARQUET,
+    PRICE_FEATURES_CSV_FALLBACK,
+    PRICE_FEATURES_PATH,
     PREFETCH_FACTOR,
     PRECISION_GATE_PATH,
     PERSISTENT_WORKERS,
@@ -26,8 +30,18 @@ from config.project_config import (
     TFT_MODEL_DIR,
     VAL_YEARS,
 )
+from src.backtest.engine import (
+    capital_backtest_from_unit_pnl as backtest_capital_backtest_from_unit_pnl,
+    confidence_from_probabilities as backtest_confidence_from_probabilities,
+    directional_backtest as run_directional_backtest,
+    fixed_risk_capital_backtest_from_unit_pnl as backtest_fixed_risk_capital_backtest_from_unit_pnl,
+)
+from src.backtest.event_engine import event_driven_directional_backtest
+from src.backtest.fees import FixedBpsFeeModel
+from src.backtest.slippage import VolatilityScaledSlippageModel
 from src.data.fused_dataset import DatasetSlice, FusedMultiHorizonSequenceDataset, FusedSequenceDataset
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
+from src.pipeline.fusion import load_price_frame
 from src.training.meta_gate import apply_meta_gate, combine_gate_scores, load_meta_gate
 from src.training.train_tft import (
     apply_precision_gate,
@@ -58,6 +72,179 @@ class FoldReport:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _resolve_price_feature_path() -> Path:
+    if PRICE_FEATURES_PATH.exists():
+        return PRICE_FEATURES_PATH
+    if PRICE_FEATURES_CSV_FALLBACK.exists():
+        return PRICE_FEATURES_CSV_FALLBACK
+    if LEGACY_PRICE_FEATURES_PARQUET.exists():
+        return LEGACY_PRICE_FEATURES_PARQUET
+    if LEGACY_PRICE_FEATURES_CSV.exists():
+        return LEGACY_PRICE_FEATURES_CSV
+    raise FileNotFoundError("Price feature artifact is required for event-driven evaluation.")
+
+
+def _normalize_price_frame(frame: Any) -> Any:
+    if "datetime" in frame.columns:
+        frame = frame.copy()
+        frame.index = frame["datetime"]
+    return frame
+
+
+def load_event_price_frame() -> Any:
+    frame = load_price_frame(_resolve_price_feature_path())
+    return _normalize_price_frame(frame)
+
+
+def _parse_horizon_minutes(label: str) -> int:
+    digits = "".join(character for character in str(label) if character.isdigit())
+    return max(1, int(digits or "1"))
+
+
+def _slice_event_bars(
+    price_frame: Any,
+    row_slice: DatasetSlice,
+    *,
+    sequence_len: int,
+    hold_bars: int,
+) -> dict[str, np.ndarray]:
+    start = int(row_slice.start + sequence_len - 1)
+    stop = int(row_slice.stop + sequence_len + max(1, hold_bars))
+    subset = price_frame.iloc[start:stop].copy()
+    if len(subset) < 2:
+        raise ValueError("Not enough price bars available for event-driven backtesting.")
+    timestamps = subset.index.astype(str).to_numpy()
+    payload = {
+        "open_prices": subset["open"].to_numpy(dtype=np.float32, copy=True),
+        "high_prices": subset["high"].to_numpy(dtype=np.float32, copy=True),
+        "low_prices": subset["low"].to_numpy(dtype=np.float32, copy=True),
+        "close_prices": subset["close"].to_numpy(dtype=np.float32, copy=True),
+        "volumes": subset["volume"].to_numpy(dtype=np.float32, copy=True) if "volume" in subset.columns else None,
+        "timestamps": np.asarray(timestamps),
+    }
+    if "atr_pct" in subset.columns:
+        payload["volatility_scale"] = np.clip(
+            np.abs(subset["atr_pct"].to_numpy(dtype=np.float32, copy=True)) * 100.0,
+            0.25,
+            4.0,
+        )
+    else:
+        payload["volatility_scale"] = None
+    return payload
+
+
+def build_event_driven_backtest(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    row_slice: DatasetSlice,
+    sequence_len: int,
+    hold_bars: int,
+    decision_threshold: float,
+    confidence_floor: float,
+    gate_scores: np.ndarray | None,
+    gate_threshold: float,
+    hold_probabilities: np.ndarray | None,
+    hold_threshold: float,
+    confidence_probabilities: np.ndarray | None,
+    price_frame: Any,
+) -> dict[str, Any]:
+    event_inputs = _slice_event_bars(price_frame, row_slice, sequence_len=sequence_len, hold_bars=hold_bars)
+    report = event_driven_directional_backtest(
+        targets,
+        probabilities,
+        open_prices=event_inputs["open_prices"],
+        high_prices=event_inputs["high_prices"],
+        low_prices=event_inputs["low_prices"],
+        close_prices=event_inputs["close_prices"],
+        decision_threshold=decision_threshold,
+        confidence_floor=confidence_floor,
+        gate_scores=gate_scores,
+        gate_threshold=gate_threshold,
+        hold_probabilities=hold_probabilities,
+        hold_threshold=hold_threshold,
+        confidence_probabilities=confidence_probabilities,
+        fee_model=FixedBpsFeeModel(entry_bps=2.0, exit_bps=2.0),
+        slippage_model=VolatilityScaledSlippageModel(base_bps=2.0, volatility_weight=1.0, confidence_weight=0.5),
+        volatility_scale=event_inputs.get("volatility_scale"),
+        timestamps=event_inputs["timestamps"],
+        volumes=event_inputs.get("volumes"),
+        hold_bars=hold_bars,
+        position_size=1.0,
+    )
+    report["order_count"] = int(len(report.get("orders", [])))
+    report["fill_count"] = int(len(report.get("fills", [])))
+    report["trade_record_count"] = int(len(report.get("trades", [])))
+    report.pop("orders", None)
+    report.pop("fills", None)
+    report.pop("trades", None)
+    return report
+
+
+def summarize_event_backtests(reports: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    if not reports:
+        return {"execution_mode": "event_driven", "trade_count": 0, "hold_count": 0, "participation_rate": 0.0, "win_rate": 0.0}
+
+    trade_count = int(sum(int(report.get("trade_count", 0)) for report in reports))
+    hold_count = int(sum(int(report.get("hold_count", 0)) for report in reports))
+    weights = np.asarray([max(1, int(report.get("trade_count", 0))) for report in reports], dtype=np.float32)
+
+    def _weighted_mean(key: str) -> float:
+        values = np.asarray([float(report.get(key, 0.0)) for report in reports], dtype=np.float32)
+        return round(float(np.average(values, weights=weights)), 6)
+
+    return {
+        "execution_mode": "event_driven",
+        "fold_count": int(len(reports)),
+        "trade_count": trade_count,
+        "hold_count": hold_count,
+        "participation_rate": round(float(np.mean([float(report.get("participation_rate", 0.0)) for report in reports])), 6),
+        "win_rate": _weighted_mean("win_rate"),
+        "loss_rate": _weighted_mean("loss_rate"),
+        "long_win_rate": _weighted_mean("long_win_rate"),
+        "short_win_rate": _weighted_mean("short_win_rate"),
+        "avg_unit_pnl": _weighted_mean("avg_unit_pnl"),
+        "gross_avg_unit_pnl": _weighted_mean("gross_avg_unit_pnl"),
+        "cumulative_unit_pnl": round(float(sum(float(report.get("cumulative_unit_pnl", 0.0)) for report in reports)), 6),
+        "gross_cumulative_unit_pnl": round(float(sum(float(report.get("gross_cumulative_unit_pnl", 0.0)) for report in reports)), 6),
+        "max_drawdown_units": round(float(max(float(report.get("max_drawdown_units", 0.0)) for report in reports)), 6),
+        "decision_threshold": float(reports[-1].get("decision_threshold", 0.0)),
+        "confidence_floor": float(reports[-1].get("confidence_floor", 0.0)),
+        "gate_threshold": float(reports[-1].get("gate_threshold", 0.0)),
+        "hold_threshold": float(reports[-1].get("hold_threshold", 0.0)),
+        "fee_model": str(reports[-1].get("fee_model", "")),
+        "slippage_model": str(reports[-1].get("slippage_model", "")),
+        "capital_backtests": {
+            key: {
+                "final_capital_mean": round(
+                    float(
+                        np.mean(
+                            [
+                                float(report.get("capital_backtests", {}).get(key, {}).get("final_capital", 0.0) or 0.0)
+                                for report in reports
+                            ]
+                        )
+                    ),
+                    6,
+                ),
+                "max_drawdown_pct_mean": round(
+                    float(
+                        np.mean(
+                            [
+                                float(report.get("capital_backtests", {}).get(key, {}).get("max_drawdown_pct", 0.0) or 0.0)
+                                for report in reports
+                            ]
+                        )
+                    ),
+                    6,
+                ),
+                "trade_count": trade_count,
+            }
+            for key in ("usd_10", "usd_1000", "usd_10_fixed_risk", "usd_1000_fixed_risk")
+        },
+    }
 
 
 def _resolve_checkpoint() -> Path:
@@ -211,7 +398,7 @@ def predict_for_slice(
         for features, labels in dataloader:
             features = features.to(device, non_blocking=True)
             with autocast_context(device, amp_enabled, amp_dtype):
-                outputs = model(features).detach().cpu().numpy().astype(np.float32)
+                outputs = model(features).detach().float().cpu().numpy().astype(np.float32)
             probabilities.append(outputs)
             targets.append(labels.detach().cpu().numpy().astype(np.float32))
     probs = np.concatenate(probabilities) if probabilities else np.empty(0, dtype=np.float32)
@@ -242,7 +429,7 @@ def predict_multihorizon_for_slice(
         for features, labels in dataloader:
             features = features.to(device, non_blocking=True)
             with autocast_context(device, amp_enabled, amp_dtype):
-                outputs = model(features).detach().cpu().numpy().astype(np.float32)
+                outputs = model(features).detach().float().cpu().numpy().astype(np.float32)
             probabilities.append(outputs)
             targets.append(labels.detach().cpu().numpy().astype(np.float32))
     probs = np.concatenate(probabilities) if probabilities else np.empty((0, 0), dtype=np.float32)
@@ -269,8 +456,7 @@ def apply_bucket_calibration(probabilities: np.ndarray, calibration_report: dict
 
 
 def confidence_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
-    values = np.asarray(probabilities, dtype=np.float32)
-    return np.clip(np.abs(values - 0.5) * 2.0, 0.0, 1.0)
+    return backtest_confidence_from_probabilities(probabilities)
 
 
 def strategic_view_from_multihorizon(targets: np.ndarray, probabilities: np.ndarray, horizon_labels: Sequence[str]) -> dict[str, np.ndarray]:
@@ -304,59 +490,17 @@ def directional_backtest(
     hold_threshold: float = 0.5,
     confidence_probabilities: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    targets = np.asarray(targets, dtype=np.float32)
-    probabilities = np.asarray(probabilities, dtype=np.float32)
-    confidence = confidence_from_probabilities(probabilities)
-    long_mask = (probabilities >= decision_threshold) & (confidence >= confidence_floor)
-    short_mask = (probabilities <= (1.0 - decision_threshold)) & (confidence >= confidence_floor)
-    if hold_probabilities is not None:
-        predicted_hold = np.asarray(hold_probabilities, dtype=np.float32) >= float(hold_threshold)
-        long_mask = long_mask & (~predicted_hold)
-        short_mask = short_mask & (~predicted_hold)
-    if confidence_probabilities is not None:
-        explicit_conf = np.asarray(confidence_probabilities, dtype=np.float32)
-        long_mask = long_mask & (explicit_conf >= confidence_floor)
-        short_mask = short_mask & (explicit_conf >= confidence_floor)
-    if gate_scores is not None:
-        gate_values = np.asarray(gate_scores, dtype=np.float32)
-        gate_mask = gate_values >= float(gate_threshold)
-        long_mask = long_mask & gate_mask
-        short_mask = short_mask & gate_mask
-    signals = np.zeros(len(probabilities), dtype=np.int8)
-    signals[long_mask] = 1
-    signals[short_mask] = -1
-    realized = np.where(targets >= 0.5, 1, -1)
-    pnl = np.where(signals == 0, 0.0, np.where(signals == realized, 1.0, -1.0))
-    cumulative = np.cumsum(pnl)
-    peak = np.maximum.accumulate(cumulative) if cumulative.size else np.empty(0, dtype=np.float32)
-    drawdown = peak - cumulative if cumulative.size else np.empty(0, dtype=np.float32)
-    trade_mask = signals != 0
-    wins = (pnl > 0) & trade_mask
-    losses = (pnl < 0) & trade_mask
-    long_trades = signals == 1
-    short_trades = signals == -1
-    return {
-        "trade_count": int(trade_mask.sum()),
-        "hold_count": int((signals == 0).sum()),
-        "participation_rate": round(float(trade_mask.mean()) if len(signals) else 0.0, 6),
-        "win_rate": round(float(wins.sum() / max(1, trade_mask.sum())), 6),
-        "loss_rate": round(float(losses.sum() / max(1, trade_mask.sum())), 6),
-        "long_win_rate": round(float(((pnl > 0) & long_trades).sum() / max(1, long_trades.sum())), 6),
-        "short_win_rate": round(float(((pnl > 0) & short_trades).sum() / max(1, short_trades.sum())), 6),
-        "avg_unit_pnl": round(float(pnl.mean()) if len(pnl) else 0.0, 6),
-        "cumulative_unit_pnl": round(float(cumulative[-1]) if len(cumulative) else 0.0, 6),
-        "max_drawdown_units": round(float(drawdown.max()) if len(drawdown) else 0.0, 6),
-        "decision_threshold": float(decision_threshold),
-        "confidence_floor": float(confidence_floor),
-        "gate_threshold": float(gate_threshold),
-        "hold_threshold": float(hold_threshold),
-        "capital_backtests": {
-            "usd_10": capital_backtest_from_unit_pnl(pnl, initial_capital=10.0, risk_fraction=0.02),
-            "usd_1000": capital_backtest_from_unit_pnl(pnl, initial_capital=1000.0, risk_fraction=0.02),
-            "usd_10_fixed_risk": fixed_risk_capital_backtest_from_unit_pnl(pnl, initial_capital=10.0, risk_fraction=0.02),
-            "usd_1000_fixed_risk": fixed_risk_capital_backtest_from_unit_pnl(pnl, initial_capital=1000.0, risk_fraction=0.02),
-        },
-    }
+    return run_directional_backtest(
+        targets,
+        probabilities,
+        decision_threshold=decision_threshold,
+        confidence_floor=confidence_floor,
+        gate_scores=gate_scores,
+        gate_threshold=gate_threshold,
+        hold_probabilities=hold_probabilities,
+        hold_threshold=hold_threshold,
+        confidence_probabilities=confidence_probabilities,
+    )
 
 
 def capital_backtest_from_unit_pnl(
@@ -365,65 +509,7 @@ def capital_backtest_from_unit_pnl(
     initial_capital: float,
     risk_fraction: float = 0.02,
 ) -> dict[str, Any]:
-    pnl = np.asarray(pnl, dtype=np.float32)
-    equity = float(initial_capital)
-    peak = equity
-    max_drawdown_pct = 0.0
-    winning_trades = 0
-    losing_trades = 0
-    trade_count = 0
-    overflowed = False
-    log10_equity = float(np.log10(max(initial_capital, 1e-12)))
-    for unit in pnl:
-        if float(unit) == 0.0:
-            peak = max(peak, equity)
-            drawdown_pct = 0.0 if peak <= 0 else (peak - equity) / peak
-            max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
-            continue
-        trade_count += 1
-        growth_factor = max(1e-12, 1.0 + float(risk_fraction) * float(unit))
-        log10_equity += float(np.log10(growth_factor))
-        if not overflowed:
-            equity *= growth_factor
-            if not np.isfinite(equity) or equity > 1e308:
-                overflowed = True
-        if unit > 0:
-            winning_trades += 1
-        else:
-            losing_trades += 1
-        if not overflowed:
-            peak = max(peak, equity)
-            drawdown_pct = 0.0 if peak <= 0 else (peak - equity) / peak
-            max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
-    if overflowed:
-        return {
-            "initial_capital": round(float(initial_capital), 6),
-            "mode": "compounding_r_multiple",
-            "risk_fraction": float(risk_fraction),
-            "final_capital": None,
-            "net_profit": None,
-            "return_pct": None,
-            "max_drawdown_pct": round(float(max_drawdown_pct * 100.0), 6),
-            "trade_count": int(trade_count),
-            "winning_trades": int(winning_trades),
-            "losing_trades": int(losing_trades),
-            "overflowed": True,
-            "log10_final_capital": round(float(log10_equity), 6),
-        }
-    return {
-        "initial_capital": round(float(initial_capital), 6),
-        "mode": "compounding_r_multiple",
-        "risk_fraction": float(risk_fraction),
-        "final_capital": round(float(equity), 6),
-        "net_profit": round(float(equity - initial_capital), 6),
-        "return_pct": round(float((equity / initial_capital - 1.0) * 100.0) if initial_capital > 0 else 0.0, 6),
-        "max_drawdown_pct": round(float(max_drawdown_pct * 100.0), 6),
-        "trade_count": int(trade_count),
-        "winning_trades": int(winning_trades),
-        "losing_trades": int(losing_trades),
-        "overflowed": False,
-        "log10_final_capital": round(float(np.log10(max(equity, 1e-12))), 6),
-    }
+    return backtest_capital_backtest_from_unit_pnl(pnl, initial_capital=initial_capital, risk_fraction=risk_fraction)
 
 
 def _loader_kwargs() -> dict[str, Any]:
@@ -444,42 +530,11 @@ def fixed_risk_capital_backtest_from_unit_pnl(
     initial_capital: float,
     risk_fraction: float = 0.02,
 ) -> dict[str, Any]:
-    pnl = np.asarray(pnl, dtype=np.float32)
-    stake = float(initial_capital) * float(risk_fraction)
-    equity = float(initial_capital)
-    equity_curve = []
-    winning_trades = 0
-    losing_trades = 0
-    trade_count = 0
-    for unit in pnl:
-        if float(unit) == 0.0:
-            equity_curve.append(equity)
-            continue
-        trade_count += 1
-        equity = max(0.0, equity + stake * float(unit))
-        if unit > 0:
-            winning_trades += 1
-        else:
-            losing_trades += 1
-        equity_curve.append(equity)
-    equity_array = np.asarray(equity_curve, dtype=np.float32) if equity_curve else np.asarray([initial_capital], dtype=np.float32)
-    final_capital = float(equity_array[-1]) if equity_array.size else float(initial_capital)
-    peak = np.maximum.accumulate(equity_array) if equity_array.size else np.asarray([initial_capital], dtype=np.float32)
-    drawdown = peak - equity_array if equity_array.size else np.asarray([0.0], dtype=np.float32)
-    drawdown_pct = np.divide(drawdown, np.maximum(peak, 1e-6)) if drawdown.size else np.asarray([0.0], dtype=np.float32)
-    return {
-        "initial_capital": round(float(initial_capital), 6),
-        "mode": "fixed_r_multiple",
-        "risk_fraction": float(risk_fraction),
-        "risk_amount": round(float(stake), 6),
-        "final_capital": round(final_capital, 6),
-        "net_profit": round(final_capital - float(initial_capital), 6),
-        "return_pct": round(float((final_capital / initial_capital - 1.0) * 100.0) if initial_capital > 0 else 0.0, 6),
-        "max_drawdown_pct": round(float(drawdown_pct.max() * 100.0), 6),
-        "trade_count": int(trade_count),
-        "winning_trades": int(winning_trades),
-        "losing_trades": int(losing_trades),
-    }
+    return backtest_fixed_risk_capital_backtest_from_unit_pnl(
+        pnl,
+        initial_capital=initial_capital,
+        risk_fraction=risk_fraction,
+    )
 
 
 def optimize_backtest_thresholds(
@@ -570,12 +625,18 @@ def _combined_gate_scores(
     *,
     context_features: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
-    precision_scores = (
-        apply_precision_gate(probabilities, precision_gate, context_features=context_features)
-        if precision_gate is not None
-        else None
-    )
-    meta_scores = apply_meta_gate(probabilities, meta_gate, context_features=context_features) if meta_gate is not None else None
+    try:
+        precision_scores = (
+            apply_precision_gate(probabilities, precision_gate, context_features=context_features)
+            if precision_gate is not None
+            else None
+        )
+    except Exception:
+        precision_scores = None
+    try:
+        meta_scores = apply_meta_gate(probabilities, meta_gate, context_features=context_features) if meta_gate is not None else None
+    except Exception:
+        meta_scores = None
     combined_scores = combine_gate_scores(precision_scores, meta_scores)
     return precision_scores, meta_scores, combined_scores
 
@@ -595,6 +656,7 @@ def run_walkforward_evaluation(
     manifest = load_manifest(manifest_path)
     sequence_len = int(manifest.get("sequence_len", 120))
     model, manifest, device = load_model(manifest_path=manifest_path)
+    price_frame = load_event_price_frame()
     timestamps = np.load(timestamps_path, mmap_mode="r")
     folds = yearly_slices(timestamps, sequence_len=sequence_len, years=years)
     if not folds:
@@ -606,7 +668,10 @@ def run_walkforward_evaluation(
     precision_gate_path = resolve_precision_gate_path(manifest)
     precision_gate = json.loads(precision_gate_path.read_text(encoding="utf-8")) if precision_gate_path is not None and precision_gate_path.exists() else None
     meta_gate_path = resolve_meta_gate_path(manifest)
-    meta_gate = load_meta_gate(meta_gate_path) if meta_gate_path is not None else None
+    try:
+        meta_gate = load_meta_gate(meta_gate_path) if meta_gate_path is not None else None
+    except Exception:
+        meta_gate = None
     gate_context_path = resolve_gate_context_path(manifest)
 
     reports: list[FoldReport] = []
@@ -617,6 +682,8 @@ def run_walkforward_evaluation(
     all_hold_probs: list[np.ndarray] = []
     all_conf_probs: list[np.ndarray] = []
     all_gate_scores: list[np.ndarray] = []
+    all_event_backtests: list[dict[str, Any]] = []
+    event_backtests_by_horizon: dict[str, list[dict[str, Any]]] = {}
     validation_years = manifest.get("split_report", {}).get("val_years", []) or list(VAL_YEARS)
     validation_folds = yearly_slices(timestamps, sequence_len=sequence_len, years=validation_years)
     if not validation_folds:
@@ -703,6 +770,14 @@ def run_walkforward_evaluation(
             strategic_view = strategic_view_from_multihorizon(targets_year, probabilities_year, horizon_labels)
             primary_targets_year = strategic_view["strategic_target"]
             primary_probabilities_year = strategic_view["strategic_probability"]
+            direction_targets_year, hold_targets_year, confidence_targets_year = split_multihorizon_heads_numpy(
+                targets_year,
+                len(horizon_labels),
+            )
+            direction_probabilities_year, hold_probabilities_year, confidence_probabilities_year = split_multihorizon_heads_numpy(
+                probabilities_year,
+                len(horizon_labels),
+            )
         else:
             targets_year, probabilities_year = predict_for_slice(
                 model,
@@ -715,6 +790,8 @@ def run_walkforward_evaluation(
             )
             primary_targets_year = targets_year
             primary_probabilities_year = probabilities_year
+            direction_targets_year = hold_targets_year = confidence_targets_year = None
+            direction_probabilities_year = hold_probabilities_year = confidence_probabilities_year = None
         calibrated_probabilities = apply_bucket_calibration(primary_probabilities_year, global_calibration)
         if multi_horizon:
             raw_metrics = collect_multihorizon_metrics(targets_year, probabilities_year, thresholds=[0.5, 0.5, threshold, threshold], horizon_labels=horizon_labels)
@@ -755,6 +832,48 @@ def run_walkforward_evaluation(
             hold_threshold=optimized_hold_threshold,
             confidence_probabilities=strategic_confidence_probability,
         )
+        event_backtest = build_event_driven_backtest(
+            primary_targets_year,
+            calibrated_probabilities,
+            row_slice=active_slice,
+            sequence_len=sequence_len,
+            hold_bars=max(1, _parse_horizon_minutes(horizon_labels[-1])) if multi_horizon else 1,
+            decision_threshold=decision_threshold,
+            confidence_floor=confidence_floor,
+            gate_scores=gate_scores,
+            gate_threshold=gate_threshold,
+            hold_probabilities=strategic_hold_probability,
+            hold_threshold=optimized_hold_threshold,
+            confidence_probabilities=strategic_confidence_probability,
+            price_frame=price_frame,
+        )
+        if multi_horizon and direction_targets_year is not None and direction_probabilities_year is not None:
+            event_by_horizon: dict[str, Any] = {}
+            for horizon_index, horizon_label in enumerate(horizon_labels):
+                horizon_probabilities = apply_bucket_calibration(
+                    direction_probabilities_year[:, horizon_index],
+                    global_calibration,
+                )
+                event_horizon_report = build_event_driven_backtest(
+                    direction_targets_year[:, horizon_index],
+                    horizon_probabilities,
+                    row_slice=active_slice,
+                    sequence_len=sequence_len,
+                    hold_bars=_parse_horizon_minutes(horizon_label),
+                    decision_threshold=decision_threshold,
+                    confidence_floor=confidence_floor,
+                    gate_scores=gate_scores,
+                    gate_threshold=gate_threshold,
+                    hold_probabilities=hold_probabilities_year[:, horizon_index],
+                    hold_threshold=optimized_hold_threshold,
+                    confidence_probabilities=confidence_probabilities_year[:, horizon_index],
+                    price_frame=price_frame,
+                )
+                event_by_horizon[horizon_label] = event_horizon_report
+                event_backtests_by_horizon.setdefault(horizon_label, []).append(event_horizon_report)
+            backtest["event_driven_by_horizon"] = event_by_horizon
+        backtest["event_driven"] = event_backtest
+        all_event_backtests.append(event_backtest)
         if gate_scores is not None:
             backtest["gate_positive_rate"] = round(float((gate_scores >= optimized_gate_threshold).mean()), 6)
         report = FoldReport(
@@ -797,6 +916,17 @@ def run_walkforward_evaluation(
             confidence_probabilities=np.concatenate(all_conf_probs) if multi_horizon and all_conf_probs else None,
         ),
     }
+    overall["event_driven_backtest"] = summarize_event_backtests(all_event_backtests)
+    if event_backtests_by_horizon:
+        overall["event_driven_by_horizon"] = {
+            horizon_label: {
+                "trade_count": int(sum(report.get("trade_count", 0) for report in reports_for_horizon)),
+                "participation_rate_mean": round(float(np.mean([report.get("participation_rate", 0.0) for report in reports_for_horizon])), 6),
+                "win_rate_mean": round(float(np.mean([report.get("win_rate", 0.0) for report in reports_for_horizon])), 6),
+                "avg_unit_pnl_mean": round(float(np.mean([report.get("avg_unit_pnl", 0.0) for report in reports_for_horizon])), 6),
+            }
+            for horizon_label, reports_for_horizon in event_backtests_by_horizon.items()
+        }
     if precision_gate is not None:
         overall["precision_gate"] = precision_gate
     if meta_gate is not None:

@@ -45,7 +45,12 @@ def main() -> int:
     )
     walkforward_path.parent.mkdir(parents=True, exist_ok=True)
     walkforward_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    backtest_path.write_text(json.dumps(report.get("overall", {}).get("backtest", {}), indent=2), encoding="utf-8")
+    backtest_payload = {
+        "backtest": report.get("overall", {}).get("backtest", {}),
+        "event_driven_backtest": report.get("overall", {}).get("event_driven_backtest", {}),
+        "event_driven_by_horizon": report.get("overall", {}).get("event_driven_by_horizon", {}),
+    }
+    backtest_path.write_text(json.dumps(backtest_payload, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0
 

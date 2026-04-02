@@ -148,8 +148,8 @@ class WalkforwardUtilityTests(unittest.TestCase):
             [direction_targets, hold_targets, confidence_targets],
             dtype=np.float32,
         ).reshape(3, 6, 4).transpose(1, 0, 2).reshape(6, 12)
-        safe_context = np.asarray([0.30, 0.25, 0.40, 1.0, 0.60, 0.55, 0.20, 0.20, 0.15, 0.80, 0.20, 0.15, 0.50, 0.70, 0.25, 0.30, 0.10], dtype=np.float32)
-        risky_context = np.asarray([0.60, 0.55, 0.35, 0.0, 0.10, 0.05, 0.92, 0.95, 0.90, 0.05, 1.40, 0.98, 0.10, 0.05, -0.02, 0.05, 0.98], dtype=np.float32)
+        safe_context = np.asarray([0.30, 0.25, 0.40, 1.0, 0.60, 0.55, 0.20, 0.20, 0.15, 0.80, 0.20, 0.15, 0.50, 0.70, 0.25, 0.30, 0.10, 0.75, 0.70, 0.65, 0.20, 0.10], dtype=np.float32)
+        risky_context = np.asarray([0.60, 0.55, 0.35, 0.0, 0.10, 0.05, 0.92, 0.95, 0.90, 0.05, 1.40, 0.98, 0.10, 0.05, -0.02, 0.05, 0.98, 0.85, 0.15, 0.10, 0.90, 0.95], dtype=np.float32)
         context_features = np.vstack([safe_context, safe_context, safe_context, risky_context, risky_context, risky_context]).astype(np.float32)
         self.assertEqual(context_features.shape[1], len(GATE_CONTEXT_COLUMNS))
         gate = train_precision_gate(probabilities, targets, context_features=context_features, threshold=0.5, epochs=50, lr=0.1)

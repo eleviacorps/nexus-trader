@@ -143,7 +143,16 @@ def train_meta_gate(
             "positive_rate": metadata["positive_rate"],
             "provider": "none",
         }
-    model, provider = _build_model()
+    try:
+        model, provider = _build_model()
+    except Exception:
+        return {
+            "available": False,
+            "feature_names": metadata["feature_names"],
+            "context_feature_names": metadata["context_feature_names"],
+            "positive_rate": metadata["positive_rate"],
+            "provider": "none",
+        }
     model.fit(features, labels)
     probabilities_out = np.clip(model.predict_proba(features)[:, 1], 0.0, 1.0).astype(np.float32)
     threshold_value = float(np.quantile(probabilities_out, 0.86)) if probabilities_out.size else 0.5

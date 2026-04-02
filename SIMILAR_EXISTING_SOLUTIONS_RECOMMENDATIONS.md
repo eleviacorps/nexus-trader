@@ -46,6 +46,25 @@ Lowest direct implementation value, but still useful as reference:
 - `awesome-systematic-trading-main`
 - `AI-Trader-main`
 
+## Current Implementation Status
+
+The first implementation wave from this recommendation set has started.
+
+Already added to Nexus:
+
+- reusable backtest abstractions under `src/backtest/`
+- fee and slippage model hooks
+- structured trade-record capable reporting
+- event-driven market bars / orders / fills
+- `scripts/lookahead_analysis.py`
+- `scripts/recursive_feature_analysis.py`
+- `scripts/model_artifact_leakage_analysis.py`
+- event-driven walk-forward reporting
+- TradeMaster-style market-dynamics label generation
+- dynamics-aware fused-artifact weighting and gate context
+
+So the repo has now moved from “review only” into actual adoption of the strongest open-source ideas.
+
 ## What To Borrow By Project
 
 ## `nautilus_trader-develop`
@@ -394,11 +413,22 @@ Do not turn Nexus into:
 
 Most valuable next work after this review:
 
-1. Build a proper event-driven backtest realism layer inspired by `nautilus_trader`, `zipline`, and `backtrader`.
-2. Add `freqtrade`-style lookahead and recursive bias checks to Nexus.
-3. Add `TradeMaster`-style market-dynamics labeling for branch-selector training.
+1. Feed the new market-dynamics labels into regime routing, selector training, and gate supervision.
+2. Treat event-driven backtests as the primary realism check, not only classic directional backtests.
+3. Extend tagged artifact audits to every major training run before trusting headline win-rate numbers.
 4. Build a `TradingAgents`-style structured GPT-OSS judge graph, but keep it as a sidecar.
 5. Add `pysystemtrade`-style ops scripts and diagnostics around the simulator.
+
+Current status of item 1:
+
+- partially implemented
+- market-dynamics labels now already affect:
+  - fused sample weights
+  - hold masks
+  - gate context
+- still next:
+  - direct selector supervision
+  - direct regime-router supervision
 
 ## Final Recommendation
 

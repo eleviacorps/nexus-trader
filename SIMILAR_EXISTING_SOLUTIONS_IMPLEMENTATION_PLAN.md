@@ -307,3 +307,82 @@ It needs:
 - better production diagnostics
 
 Those changes are more likely to improve the real simulator than simply retraining the current predictor again.
+
+## Implementation Status
+
+Started in the current repo:
+
+- `src/backtest/engine.py`
+- `src/backtest/fees.py`
+- `src/backtest/slippage.py`
+- `src/backtest/results.py`
+- `src/backtest/validation.py`
+- `scripts/lookahead_analysis.py`
+- `scripts/recursive_feature_analysis.py`
+
+This means the roadmap is no longer only theoretical.
+
+The first delivered pieces now cover:
+
+- reusable backtest abstractions
+- fee / slippage hooks
+- structured trade-record capable reporting
+- first-pass lookahead / leakage auditing
+- first-pass recursive window-consistency auditing
+
+Still next from this plan:
+
+- true event-driven fill semantics
+- richer slippage / commission realism
+- structured `BacktestResult` expansion with analyzers
+- market-dynamics label builder
+- ops / diagnostics / backup scripts
+
+Update after the second implementation wave:
+
+- `true event-driven fill semantics` is now started through:
+  - `src/backtest/events.py`
+  - `src/backtest/event_engine.py`
+- stronger artifact-level audit is now started through:
+  - `src/backtest/artifact_audit.py`
+  - `scripts/model_artifact_leakage_analysis.py`
+
+Still next from this plan now means:
+
+- deeper fill policies and order lifecycle realism
+- richer analyzers / result objects
+- market-dynamics label builder
+- ops / diagnostics / backup scripts
+
+Update after the third implementation wave:
+
+- the event-driven engine is now wired into `src/evaluation/walkforward.py`
+- tagged walk-forward reports now include:
+  - classic directional backtest
+  - event-driven backtest
+  - event-driven horizon summaries
+- the TradeMaster-inspired market-dynamics labeling path is now implemented through:
+  - `src/regime/labeling.py`
+  - `scripts/build_market_dynamics_labels.py`
+
+What this means:
+
+- Nexus now has the minimum pieces needed to make `v7` a more honest training/evaluation step
+- the next run should be trained against stronger regime supervision and judged with execution-aware reporting
+
+Update after the fourth implementation wave:
+
+- market-dynamics labels are now merged into fused-artifact generation
+- those labels now affect:
+  - hold-mask construction
+  - sample weights
+  - gate context
+- a local `v7_dynamics_smoke` run trained successfully with the new path
+
+What this means now:
+
+- the codebase is ready for a real cloud `v7` run
+- `v7` should be the first run judged primarily by:
+  - event-driven backtests
+  - market-dynamics-aware gating
+  - tagged artifact audits

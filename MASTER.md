@@ -2218,3 +2218,376 @@ The better next step is:
 See:
 
 - [SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md](C:/PersonalDrive/Programming/AiStudio/nexus-trader/SIMILAR_EXISTING_SOLUTIONS_IMPLEMENTATION_PLAN.md)
+
+## Latest Open-Source-Informed Implementation Pass
+
+The first real implementation wave from the open-source review is now in the repo.
+
+Implemented in this pass:
+
+- new reusable backtest package:
+  - `src/backtest/engine.py`
+  - `src/backtest/fees.py`
+  - `src/backtest/slippage.py`
+  - `src/backtest/results.py`
+  - `src/backtest/validation.py`
+- `src/evaluation/walkforward.py` now delegates the directional backtest and capital backtests through the extracted backtest engine instead of keeping all of that logic inline
+- first leakage / artifact-audit commands:
+  - `scripts/lookahead_analysis.py`
+  - `scripts/recursive_feature_analysis.py`
+- first dedicated tests for the new layer:
+  - `tests/test_backtest_engine.py`
+  - `tests/test_backtest_validation.py`
+
+What this gives Nexus now:
+
+- explicit fee and slippage abstractions instead of only raw unit-PnL assumptions
+- structured trade-record capable backtests
+- a place to grow toward event-driven fills and richer trade lifecycle semantics
+- a first real lookahead / leakage audit path over fused artifacts
+- a first recursive window-consistency audit path
+
+Current local validation for this pass:
+
+- `python -m unittest tests.test_backtest_engine tests.test_backtest_validation tests.test_walkforward -v`
+- all passing
+
+Current audit-script status:
+
+- `lookahead_analysis.py`
+  - runs successfully on current local fused artifacts
+  - current local report does not show suspicious raw feature-target correlations
+- `recursive_feature_analysis.py`
+  - currently skips cleanly on this machine because `data/features/fused_tensor.npy` is not present locally
+  - the command is ready once fused tensor artifacts are rebuilt locally or on the cloud
+
+Immediate next implementation step from this new base:
+
+- upgrade `src/backtest/` from cost-aware scoring to true event-driven fill simulation
+- add execution realism modules inspired by Zipline / Backtrader
+- deepen the audit scripts into full Freqtrade-style lookahead and recursive analysis over model artifacts and selector features
+
+## Latest Event-Driven Backtest And Artifact-Audit Pass
+
+The next open-source-informed wave is now also implemented.
+
+Added in this pass:
+
+- event-driven backtest primitives:
+  - `src/backtest/events.py`
+  - `src/backtest/event_engine.py`
+- stronger artifact audit layer:
+  - `src/backtest/artifact_audit.py`
+  - `scripts/model_artifact_leakage_analysis.py`
+- new tests:
+  - `tests/test_event_backtest.py`
+  - `tests/test_artifact_audit.py`
+
+What this adds beyond the first pass:
+
+- explicit market bars, simulated orders, and fill events
+- a true event-driven directional backtest path instead of only direct unit-PnL scoring
+- artifact-level auditing for:
+  - training summary vs walk-forward consistency
+  - gate participation problems
+  - gate context / timestamp alignment
+  - manifest / checkpoint traceability
+
+Current verified status:
+
+- `python -m unittest tests.test_event_backtest tests.test_artifact_audit tests.test_backtest_engine tests.test_backtest_validation tests.test_walkforward -v`
+- all passing
+
+Current local artifact-audit finding:
+
+- the default local `training_summary.json` / `walkforward_report.json` path still shows `gate_participation_near_zero`
+- that means the generic local default artifacts are still weaker / older than the stronger tagged cloud runs like `v5` and `v6`
+- this is useful because the new audit now catches that inconsistency directly
+
+Best next move from this new state:
+
+- wire the event-driven backtest mode into tagged walk-forward reports
+- add branch-selector and gate-artifact audits for specific tagged runs like `mh12_full_v6`
+- begin implementing market-dynamics labeling from the TradeMaster-inspired roadmap
+
+## Latest Event-Driven Walkforward Integration
+
+The next open-source-informed step is now implemented locally.
+
+What changed:
+
+- `src/evaluation/walkforward.py` now emits both:
+  - classic directional backtests
+  - event-driven execution-aware backtests
+- `scripts/run_walkforward_evaluation.py` now saves:
+  - `backtest`
+  - `event_driven_backtest`
+  - `event_driven_by_horizon`
+- event-driven evaluation uses real aligned OHLC rows from local `price_features.csv`
+- event-driven evaluation now applies non-zero costs:
+  - `FixedBpsFeeModel`
+  - `VolatilityScaledSlippageModel`
+- older local environments now degrade cleanly when:
+  - sklearn-backed meta gates are unavailable
+  - old precision-gate artifacts are feature-incompatible
+  - CPU evaluation sees `bfloat16` tensors
+
+Important honesty:
+
+- the event-driven execution-aware view is much harsher than the old unit-PnL summary
+- this is useful
+- it means the previous framework was still flattering the system more than real fill semantics do
+
+Local smoke result after the event-driven integration:
+
+- `run_tag`: `mh12_full_v6`
+- years: `2026`
+- capped windows: `256`
+- classic directional backtest:
+  - win rate: about `53.91%`
+  - avg unit pnl: about `0.0781`
+- event-driven strategic backtest:
+  - win rate: about `26.56%`
+  - avg unit pnl: about `-0.4704`
+- event-driven by horizon:
+  - `5m` win rate: about `20.86%`
+  - `10m` win rate: about `22.27%`
+  - `15m` win rate: about `23.23%`
+  - `30m` win rate: about `26.56%`
+
+Interpretation:
+
+- the selector/gate/model stack still looks much better in direction-only scoring than in cost-aware execution-aware replay
+- `30m` is still the least bad horizon in the event-driven smoke, which reinforces the longer-horizon product story
+- this is exactly why the event-driven backtest layer needed to be wired in before `v7`
+
+## Latest Tagged Artifact Audit
+
+The new tagged artifact audit has now also been applied to `mh12_full_v6`.
+
+Output:
+
+- `outputs/evaluation/model_artifact_leakage_report_mh12_full_v6.json`
+
+Key findings:
+
+- `precision_gate_has_high_train_accuracy_but_low_train_precision`
+- `gate_participation_near_zero`
+
+Interpretation:
+
+- the saved gate artifact still looks overfit / weakly tradeable on the local synced slice
+- the stronger filtered backtest regime from cloud runs should not be treated as sufficient proof by itself
+- the next training cycle needs better regime supervision and better selector training, not just more epochs
+
+## Latest Market-Dynamics Label Builder
+
+The TradeMaster-inspired market-dynamics labeling path is now implemented.
+
+Added:
+
+- `src/regime/__init__.py`
+- `src/regime/labeling.py`
+- `scripts/build_market_dynamics_labels.py`
+- `tests/test_market_dynamics_labeling.py`
+
+Current local label artifact:
+
+- `data/processed/market_dynamics_labels.csv`
+- `outputs/evaluation/market_dynamics_report.json`
+
+Current local dominant label distribution on the synced slice:
+
+- `breakout`: about `62.28%`
+- `low_volatility`: about `17.50%`
+- `range`: about `10.33%`
+- `high_volatility`: about `7.16%`
+
+Important note:
+
+- local parquet engines were unavailable in this environment
+- so the label builder falls back cleanly to CSV instead of failing
+
+## Current Best Next Step Toward V7
+
+The right next step is now clearer:
+
+1. fold `market_dynamics_labels` into the next training feature / supervision path
+2. use the event-driven backtest as a first-class report, not only the classic directional view
+3. retrain only after those labels are integrated into:
+   - regime routing
+   - selector scoring
+   - gate supervision
+4. then launch a true `v7` cloud run and judge it primarily on:
+   - event-driven `15m / 30m` behavior
+   - tagged artifact-audit health
+   - participation vs drawdown vs win rate
+
+## Latest V7 Prep Integration
+
+The next local step toward `v7` is now implemented and validated.
+
+What changed:
+
+- market-dynamics labels are now merged into fused-artifact generation
+- market-dynamics signals now directly influence:
+  - primary hold mask expansion
+  - sample-weight construction
+  - gate-context construction
+- the fused-artifact builder now records the dynamics source path in `fusion_report.json`
+- training summaries / manifests now also record the market-dynamics artifact path
+- local meta-gate training now degrades cleanly when boosted backends are unavailable instead of failing the whole run
+
+Files updated in this pass:
+
+- `src/pipeline/fusion.py`
+- `scripts/build_fused_artifacts.py`
+- `scripts/train_fused_tft.py`
+- `src/training/meta_gate.py`
+- `tests/test_fusion_pipeline.py`
+- `tests/test_walkforward.py`
+
+Latest local fused-artifact summary after the dynamics merge:
+
+- rows: `7611`
+- feature width: `100`
+- target hold rate: about `26.84%`
+- sample-weight mean: about `2.9408`
+- average dynamics confidence: about `0.5217`
+- average breakout probability: about `0.4265`
+- average range-risk proxy: about `0.1696`
+- average panic-risk proxy: about `0.1181`
+
+Latest local smoke training result:
+
+- run tag: `v7_dynamics_smoke`
+- output head: `12`
+- smoke checkpoint saved:
+  - `models/tft/final_tft_v7_dynamics_smoke.ckpt`
+- smoke manifest saved:
+  - `models/tft/model_manifest_v7_dynamics_smoke.json`
+- smoke precision gate saved:
+  - `models/tft/precision_gate_v7_dynamics_smoke.json`
+
+Important interpretation:
+
+- the new dynamics-aware path trains end to end locally
+- so `v7` is now technically ready to launch on the cloud
+- but the real success condition for `v7` should still be:
+  - better event-driven `15m / 30m` behavior
+  - healthier tagged artifact audits
+  - less divergence between classic directional backtests and event-driven backtests
+
+## Current Best Next Step
+
+The clean next move from this repo state is:
+
+1. rebuild market-dynamics labels on the cloud full dataset
+2. rebuild fused artifacts there with the new dynamics-aware weighting and gate context
+3. launch `mh12_full_v7`
+4. run walk-forward with the event-driven backtest path active
+5. compare `v7` against `v6` on:
+   - raw `15m / 30m` ROC-AUC
+   - classic directional backtest
+   - event-driven backtest
+   - tagged artifact-audit findings
+
+## Latest V7 Cloud Execution State
+
+The real `v7` cloud cycle is now launched from this repo state.
+
+What was uploaded to the Jupyter workspace for `v7`:
+
+- `scripts/remote_v7_train.py`
+- `scripts/launch_remote_v7_jupyter.py`
+- `scripts/check_remote_v7_status_jupyter.py`
+- `scripts/build_market_dynamics_labels.py`
+- `scripts/build_fused_artifacts.py`
+- `scripts/train_fused_tft.py`
+- `scripts/run_walkforward_evaluation.py`
+- `scripts/model_artifact_leakage_analysis.py`
+- `src/regime/*`
+- `src/backtest/*`
+- `src/pipeline/fusion.py`
+- `src/training/meta_gate.py`
+- `src/evaluation/walkforward.py`
+- updated tests required by the remote `unittest discover` stage
+
+Remote execution details:
+
+- Jupyter workspace root: `nexus/`
+- remote launcher script: `scripts/launch_remote_v7_jupyter.py`
+- remote pipeline script: `scripts/remote_v7_train.py`
+- remote pid file: `outputs/logs/remote_v7_pipeline.pid`
+- remote log: `outputs/logs/remote_v7_pipeline.log`
+- latest confirmed remote pid at launch: `823500`
+- latest confirmed remote log tail right after launch:
+  - `===== build_quant_context =====`
+
+The `v7` pipeline shape is:
+
+1. `build_quant_context`
+2. `build_persona_outputs`
+3. `build_market_dynamics_labels`
+4. `build_fused_artifacts`
+5. remote tests
+6. `train_mh12_full_v7`
+7. `walkforward_mh12_full_v7`
+8. `audit_mh12_full_v7`
+9. `train_mh12_recent_v7`
+10. `walkforward_mh12_recent_v7`
+11. `audit_mh12_recent_v7`
+
+This is the first cloud run where the intended comparison target is explicitly:
+
+- classic filtered backtest
+- event-driven execution-aware backtest
+- artifact-audit health
+
+and not only the older flattering directional summary.
+
+Local long-run monitoring is also active now:
+
+- watcher log:
+  - `outputs/logs/monitor_cloud_run_v7.out.log`
+- watcher errors:
+  - `outputs/logs/monitor_cloud_run_v7.err.log`
+- waiting summarizer log:
+  - `outputs/logs/summarize_v7_results_wait.out.log`
+- waiting summarizer errors:
+  - `outputs/logs/summarize_v7_results_wait.err.log`
+
+Local helper added for final `v7` reporting:
+
+- `scripts/summarize_v7_results.py`
+
+That summarizer is designed to generate:
+
+- `outputs/evaluation/v7_summary.json`
+- `outputs/evaluation/v7_summary.md`
+
+once both:
+
+- `mh12_full_v7`
+- `mh12_recent_v7`
+
+have synced down locally together with their:
+
+- training summaries
+- walk-forward reports
+- backtest reports
+- artifact-audit reports
+
+## Current V7 Success Criteria
+
+`v7` should be judged by these, in order:
+
+1. event-driven `15m / 30m` backtest quality
+2. trade count / participation vs drawdown
+3. tagged artifact-audit findings
+4. raw `15m / 30m` ROC-AUC
+
+Important honesty:
+
+- if `v7` only improves the classic directional summary while event-driven results stay poor, that is not a true win
+- if `v7` preserves or improves event-driven `15m / 30m` behavior with cleaner audit findings, that is a real step forward even if raw ROC-AUC is still only modestly improved

@@ -4,9 +4,11 @@ import numpy as np
 import pandas as pd
 
 from src.pipeline.fusion import (
+    build_gate_context_matrix,
     build_fused_feature_matrix,
     build_sequence_tensor,
     build_trade_target_artifacts,
+    merge_market_dynamics_features,
     normalize_binary_targets,
 )
 
@@ -59,6 +61,58 @@ class FusionPipelineTests(unittest.TestCase):
         hold_indices = np.flatnonzero(artifacts.primary_hold_mask > 0.5)
         self.assertGreater(len(hold_indices), 0)
         self.assertTrue(np.all(artifacts.sample_weights[hold_indices] <= 0.5))
+
+    def test_market_dynamics_features_merge_and_influence_context(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="min", tz="UTC")
+        price_frame = pd.DataFrame(
+            {
+                "close": np.array([100.0, 100.2, 100.1, 100.4], dtype=np.float32),
+                "atr_pct": np.full(4, 0.002, dtype=np.float32),
+                "bb_width": np.full(4, 0.01, dtype=np.float32),
+                "volume_ratio": np.full(4, 1.1, dtype=np.float32),
+                "session_overlap": np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32),
+            },
+            index=index,
+        )
+        dynamics_frame = pd.DataFrame(
+            {
+                "market_dynamics_confidence": np.array([0.2, 0.8, 0.7, 0.3], dtype=np.float32),
+                "market_dynamics_prob_trend_up": np.array([0.1, 0.7, 0.6, 0.2], dtype=np.float32),
+                "market_dynamics_prob_trend_down": np.array([0.2, 0.1, 0.1, 0.2], dtype=np.float32),
+                "market_dynamics_prob_breakout": np.array([0.3, 0.8, 0.7, 0.2], dtype=np.float32),
+                "market_dynamics_prob_range": np.array([0.6, 0.1, 0.2, 0.7], dtype=np.float32),
+                "market_dynamics_prob_mean_reversion": np.array([0.5, 0.1, 0.2, 0.6], dtype=np.float32),
+                "market_dynamics_prob_panic_news_shock": np.array([0.1, 0.2, 0.2, 0.4], dtype=np.float32),
+                "market_dynamics_prob_high_volatility": np.array([0.2, 0.4, 0.3, 0.5], dtype=np.float32),
+            },
+            index=index,
+        )
+        merged = merge_market_dynamics_features(price_frame, dynamics_frame)
+        self.assertIn("market_dynamics_confidence", merged.columns)
+        context = build_gate_context_matrix(merged)
+        self.assertEqual(context.shape[0], 4)
+        self.assertGreater(context[1, -4], context[0, -4])
+
+    def test_market_dynamics_can_raise_hold_mask(self):
+        frame = pd.DataFrame(
+            {
+                "close": np.array([100.0, 100.03, 100.02, 100.01, 100.00, 100.02], dtype=np.float32),
+                "atr_pct": np.full(6, 0.002, dtype=np.float32),
+                "market_dynamics_confidence": np.full(6, 0.8, dtype=np.float32),
+                "market_dynamics_prob_range": np.full(6, 0.75, dtype=np.float32),
+                "market_dynamics_prob_mean_reversion": np.full(6, 0.6, dtype=np.float32),
+                "market_dynamics_prob_false_breakout": np.full(6, 0.2, dtype=np.float32),
+                "market_dynamics_prob_breakout": np.full(6, 0.1, dtype=np.float32),
+                "market_dynamics_prob_panic_news_shock": np.full(6, 0.1, dtype=np.float32),
+                "market_dynamics_prob_high_volatility": np.full(6, 0.1, dtype=np.float32),
+                "market_dynamics_prob_low_volatility": np.full(6, 0.8, dtype=np.float32),
+                "market_dynamics_prob_trend_up": np.full(6, 0.1, dtype=np.float32),
+                "market_dynamics_prob_trend_down": np.full(6, 0.1, dtype=np.float32),
+            }
+        )
+        artifacts = build_trade_target_artifacts(frame, horizons=(1, 2), primary_horizon=1, min_abs_return=1e-4, hold_weight=0.25)
+        self.assertGreater(float(artifacts.primary_hold_mask.mean()), 0.0)
+        self.assertLessEqual(float(artifacts.sample_weights.max()), 0.5)
 
 
 if __name__ == "__main__":

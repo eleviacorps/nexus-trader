@@ -23,6 +23,7 @@ from config.project_config import (  # noqa: E402
     FUSED_TIMESTAMPS_PATH,
     GATE_CONTEXT_PATH,
     LEGACY_CROWD_EMBEDDINGS_NPY_PATH,
+    MARKET_DYNAMICS_LABELS_PATH,
     LEGACY_NEWS_EMBEDDINGS_NPY_PATH,
     LEGACY_NEWS_EMBEDDINGS_RAW_PATH,
     LEGACY_PRICE_FEATURES_CSV,
@@ -50,6 +51,7 @@ from src.pipeline.fusion import (  # noqa: E402
     build_fused_feature_matrix,
     extract_price_block,
     load_price_frame,
+    merge_market_dynamics_features,
     save_fusion_report,
     save_numpy_artifact,
 )
@@ -96,6 +98,17 @@ def main() -> int:
         if "timestamp" in quant_frame.columns:
             quant_frame = quant_frame.set_index(pd.to_datetime(quant_frame["timestamp"], errors="coerce")).drop(columns=["timestamp"])
         price_frame = merge_quant_features(price_frame, quant_frame)
+    dynamics_path = MARKET_DYNAMICS_LABELS_PATH if MARKET_DYNAMICS_LABELS_PATH.exists() else MARKET_DYNAMICS_LABELS_PATH.with_suffix(".csv") if MARKET_DYNAMICS_LABELS_PATH.with_suffix(".csv").exists() else None
+    if dynamics_path is not None:
+        if pd is None:
+            raise ImportError("pandas is required to merge market-dynamics labels into fused artifacts.")
+        if dynamics_path.suffix.lower() == ".parquet":
+            dynamics_frame = pd.read_parquet(dynamics_path)
+        else:
+            dynamics_frame = pd.read_csv(dynamics_path, index_col=0, parse_dates=True)
+        if "timestamp" in dynamics_frame.columns:
+            dynamics_frame = dynamics_frame.set_index(pd.to_datetime(dynamics_frame["timestamp"], errors="coerce")).drop(columns=["timestamp"])
+        price_frame = merge_market_dynamics_features(price_frame, dynamics_frame)
     price_block = extract_price_block(price_frame)
     target_artifacts = build_trade_target_artifacts(
         price_frame,
@@ -176,7 +189,10 @@ def main() -> int:
         sequence_rows=sequence_rows,
         sequence_len=SEQUENCE_LEN if args.materialize_sequences else 0,
         source_persona_path=str(PERSONA_OUTPUTS_PATH) if PERSONA_OUTPUTS_PATH.exists() else '',
-        target_summary=target_artifacts.summary,
+        target_summary={
+            **target_artifacts.summary,
+            "source_market_dynamics_path": str(dynamics_path) if dynamics_path is not None else "",
+        },
     )
     save_fusion_report(FUSION_REPORT_PATH, report)
     print(report)
