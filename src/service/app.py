@@ -70,6 +70,50 @@ def llm_numeric_prior(payload: dict[str, Any]) -> float:
     return max(0.0, min(1.0, 0.5 + 0.5 * weighted))
 
 
+def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
+    total = sum(max(0.0, float(value)) for value in weights.values()) or 1.0
+    return {key: round(max(0.0, float(value)) / total, 6) for key, value in weights.items()}
+
+
+def _infer_regime_weights(payload: dict[str, Any], model_prediction: dict[str, Any] | None) -> tuple[dict[str, float], dict[str, float]]:
+    current_row = payload.get("current_row", {}) if isinstance(payload, dict) else {}
+    aggregate = payload.get("bot_swarm", {}).get("aggregate", {}) if isinstance(payload, dict) else {}
+    model_diag = (model_prediction or {}).get("model_diagnostics", {}) if isinstance(model_prediction, dict) else {}
+    route_confidence = float(current_row.get("quant_route_confidence", 0.0) or 0.0)
+    transition_risk = float(current_row.get("quant_transition_risk", 0.0) or 0.0)
+    macro_shock = abs(float(current_row.get("macro_shock", 0.0) or 0.0))
+    route_bias = float(current_row.get("quant_route_prob_up", 0.5) or 0.5) - float(current_row.get("quant_route_prob_down", 0.5) or 0.5)
+    regime_affinity = aggregate.get("regime_affinity", {}) if isinstance(aggregate, dict) else {}
+    model_regime = model_diag.get("regime_probabilities", {}) if isinstance(model_diag, dict) else {}
+
+    trend_score = 0.35 * route_confidence + 0.30 * abs(route_bias) + 0.20 * float(regime_affinity.get("trend", 0.0) or 0.0) + 0.15 * float(model_regime.get("trend", 0.0) or 0.0)
+    reversal_score = 0.45 * float(regime_affinity.get("reversal", 0.0) or 0.0) + 0.20 * transition_risk + 0.20 * float(model_regime.get("reversal", 0.0) or 0.0) + 0.15 * float(regime_affinity.get("balanced", 0.0) or 0.0)
+    macro_score = 0.40 * macro_shock + 0.25 * float(regime_affinity.get("macro_shock", 0.0) or 0.0) + 0.20 * float(model_regime.get("macro_shock", 0.0) or 0.0) + 0.15 * abs(float(current_row.get("macro_bias", 0.0) or 0.0))
+    balanced_score = 0.40 * float(regime_affinity.get("balanced", 0.0) or 0.0) + 0.30 * max(0.0, 1.0 - abs(route_bias)) + 0.30 * float(model_regime.get("balanced", 0.0) or 0.0)
+
+    regime_scores = _normalize_weights(
+        {
+            "trend": trend_score,
+            "reversal": reversal_score,
+            "macro_shock": macro_score,
+            "balanced": balanced_score,
+        }
+    )
+
+    component_templates = {
+        "trend": {"branch": 0.26, "analog": 0.11, "model": 0.30, "bot_swarm": 0.25, "llm": 0.08},
+        "reversal": {"branch": 0.23, "analog": 0.18, "model": 0.20, "bot_swarm": 0.31, "llm": 0.08},
+        "macro_shock": {"branch": 0.22, "analog": 0.10, "model": 0.19, "bot_swarm": 0.17, "llm": 0.32},
+        "balanced": {"branch": 0.20, "analog": 0.20, "model": 0.22, "bot_swarm": 0.24, "llm": 0.14},
+    }
+    mixed_weights = {"branch": 0.0, "analog": 0.0, "model": 0.0, "bot_swarm": 0.0, "llm": 0.0}
+    for regime_name, regime_weight in regime_scores.items():
+        template = component_templates[regime_name]
+        for component, value in template.items():
+            mixed_weights[component] += regime_weight * value
+    return regime_scores, _normalize_weights(mixed_weights)
+
+
 def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
     branch_probability = float(payload.get('simulation', {}).get('mean_probability', 0.5) or 0.5)
     branch_consensus = float(payload.get('simulation', {}).get('consensus_score', 0.0) or 0.0)
@@ -80,20 +124,15 @@ def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[st
     bot_probability = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('bullish_probability', 0.5) or 0.5)
     bot_confidence = float(payload.get('bot_swarm', {}).get('aggregate', {}).get('confidence', 0.0) or 0.0)
     llm_probability = llm_numeric_prior(payload)
-
-    branch_weight = 0.31 + 0.14 * max(branch_consensus, branch_confidence)
-    analog_weight = 0.10 + 0.08 * analog_confidence
-    model_weight = 0.20 + 0.07 * (1.0 - abs(model_probability - 0.5))
-    bot_weight = 0.22 + 0.10 * bot_confidence
-    llm_weight = max(0.06, 1.0 - branch_weight - analog_weight - model_weight - bot_weight)
-    weight_sum = branch_weight + analog_weight + model_weight + bot_weight + llm_weight
-    weights = {
-        'branch': round(branch_weight / weight_sum, 6),
-        'analog': round(analog_weight / weight_sum, 6),
-        'model': round(model_weight / weight_sum, 6),
-        'bot_swarm': round(bot_weight / weight_sum, 6),
-        'llm': round(llm_weight / weight_sum, 6),
+    regime_mix, regime_weights = _infer_regime_weights(payload, model_prediction)
+    component_conf_boost = {
+        'branch': 0.82 + 0.28 * max(branch_consensus, branch_confidence),
+        'analog': 0.84 + 0.24 * analog_confidence,
+        'model': 0.88 + 0.18 * (1.0 - abs(model_probability - 0.5)),
+        'bot_swarm': 0.86 + 0.28 * bot_confidence,
+        'llm': 0.82 + 0.22 * abs(llm_probability - 0.5) * 2.0,
     }
+    weights = _normalize_weights({component: regime_weights[component] * component_conf_boost[component] for component in regime_weights})
     ensemble_probability = (
         (weights['branch'] * branch_probability)
         + (weights['analog'] * analog_probability)
@@ -124,6 +163,7 @@ def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[st
             'llm_probability': round(llm_probability, 6),
         },
         'weights': weights,
+        'regime_mix': regime_mix,
         'horizon_predictions': horizon_predictions,
     }
 
@@ -182,6 +222,9 @@ class ModelServer:
             lstm_layers=int(config_payload.get('lstm_layers', 2)),
             dropout=float(config_payload.get('dropout', 0.1)),
             output_dim=int(config_payload.get('output_dim', len(self.horizon_labels))),
+            regime_count=int(config_payload.get('regime_count', 4)),
+            router_hidden_dim=int(config_payload.get('router_hidden_dim', 64)),
+            router_temperature=float(config_payload.get('router_temperature', 1.0)),
         )
         self.model = NexusTFT(config).to(self.device)
         load_checkpoint_with_expansion(self.model, _resolve_checkpoint(), new_input_dim=config.input_dim)
@@ -191,7 +234,8 @@ class ModelServer:
         validate_sequence_shape(sequence, self.sequence_len, self.feature_dim)
         with torch.no_grad():
             tensor = torch.tensor([sequence], dtype=torch.float32, device=self.device)
-            raw_output = self.model(tensor).detach().cpu().numpy()
+            raw_output, diagnostics = self.model(tensor, return_diagnostics=True)
+            raw_output = raw_output.detach().cpu().numpy()
         if raw_output.ndim == 1:
             horizon_values = raw_output.astype(float).tolist()
         else:
@@ -218,17 +262,43 @@ class ModelServer:
         )
 
     def predict_dict(self, sequence: list[list[float]]) -> dict[str, Any]:
-        response = self.predict(sequence)
-        if hasattr(response, "model_dump"):
-            return response.model_dump()  # type: ignore[no-any-return]
+        validate_sequence_shape(sequence, self.sequence_len, self.feature_dim)
+        with torch.no_grad():
+            tensor = torch.tensor([sequence], dtype=torch.float32, device=self.device)
+            raw_output, diagnostics = self.model(tensor, return_diagnostics=True)
+            raw_output = raw_output.detach().cpu().numpy()
+        if raw_output.ndim == 1:
+            horizon_values = raw_output.astype(float).tolist()
+        else:
+            horizon_values = raw_output[0].astype(float).tolist()
+        output_map = {label: float(value) for label, value in zip(self.output_labels, horizon_values)}
+        if any(label.startswith('target_') for label in self.output_labels):
+            horizon_probabilities = {label.replace('target_', ''): value for label, value in output_map.items() if label.startswith('target_')}
+            hold_probabilities = {label.replace('hold_', ''): value for label, value in output_map.items() if label.startswith('hold_')}
+            confidence_outputs = {label.replace('confidence_', ''): value for label, value in output_map.items() if label.startswith('confidence_')}
+        else:
+            horizon_probabilities = {label: float(value) for label, value in zip(self.horizon_labels, horizon_values)}
+            hold_probabilities = {}
+            confidence_outputs = {}
+        primary_horizon = str(self.manifest.get('primary_horizon', self.horizon_labels[0] if self.horizon_labels else '5m'))
+        bullish_probability = float(horizon_probabilities.get(primary_horizon, next(iter(horizon_probabilities.values()), 0.5)))
+        regime_names = list(self.manifest.get('regime_labels', ['trend', 'reversal', 'macro_shock', 'balanced']))
+        regime_probs_tensor = diagnostics.get('regime_probabilities')
+        regime_probs = regime_probs_tensor[0].detach().cpu().numpy().astype(float).tolist() if regime_probs_tensor is not None else []
+        regime_probabilities = {name: round(value, 6) for name, value in zip(regime_names, regime_probs)}
         return {
-            "bullish_probability": float(response.bullish_probability),
-            "bearish_probability": float(response.bearish_probability),
-            "signal": str(response.signal),
-            "threshold": float(response.threshold),
-            "sequence_len": int(response.sequence_len),
-            "feature_dim": int(response.feature_dim),
-            "horizon_probabilities": dict(response.horizon_probabilities or {}),
+            "bullish_probability": float(bullish_probability),
+            "bearish_probability": float(1.0 - bullish_probability),
+            "signal": str(classify_probability(bullish_probability, self.threshold)),
+            "threshold": float(self.threshold),
+            "sequence_len": int(self.sequence_len),
+            "feature_dim": int(self.feature_dim),
+            "horizon_probabilities": {**horizon_probabilities, **{f'hold_{k}': v for k, v in hold_probabilities.items()}, **{f'confidence_{k}': v for k, v in confidence_outputs.items()}},
+            "model_diagnostics": {
+                "regime_probabilities": regime_probabilities,
+                "dominant_regime": max(regime_probabilities, key=regime_probabilities.get) if regime_probabilities else "unknown",
+                "regime_confidence": round(max(regime_probabilities.values()), 6) if regime_probabilities else 0.0,
+            },
         }
 
 

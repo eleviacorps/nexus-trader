@@ -124,6 +124,116 @@ Also important:
 - first local walk-forward smoke evaluation still lands around ~50.8% calibrated directional accuracy on a capped 2024-2025 sample
 - no honest claim of `90%+` predictive accuracy exists right now
 
+## Latest Update
+
+The completed cloud `v5` pass kept the stronger filtered-win-rate regime alive, while the new routed predictor only improved raw ranking quality slightly.
+
+Latest synced `v4` results:
+
+- `mh12_full_v4`
+  - strategic ROC-AUC: `0.5037`
+  - `15m` ROC-AUC: `0.5097`
+  - `30m` ROC-AUC: `0.5088`
+  - trades: `153,504`
+  - participation: `19.44%`
+  - win rate: `64.70%`
+- `mh12_recent_v4`
+  - strategic ROC-AUC: `0.5068`
+  - `15m` ROC-AUC: `0.4957`
+  - `30m` ROC-AUC: `0.5057`
+  - trades: `19,762`
+  - participation: `25.60%`
+  - win rate: `66.74%`
+
+Important interpretation:
+
+- the raw directional model is still only slightly better than random by ROC-AUC
+- the filtered simulator stack is now materially better than the old low-50s regime on win rate
+- the real edge is still coming from `selection + abstention + simulation structure`, not from a very strong standalone classifier
+
+Latest synced `v5` results:
+
+- `mh12_full_v5`
+  - strategic ROC-AUC: `0.5082`
+  - `15m` ROC-AUC: `0.5070`
+  - `30m` ROC-AUC: `0.5097`
+  - trades: `143,644`
+  - participation: `18.20%`
+  - win rate: `64.70%`
+  - `$1000 fixed-risk`: `845,400`
+  - max DD: `41.18%`
+- `mh12_recent_v5`
+  - strategic ROC-AUC: `0.5084`
+  - `15m` ROC-AUC: `0.5059`
+  - `30m` ROC-AUC: `0.5089`
+  - trades: `24,240`
+  - participation: `31.41%`
+  - win rate: `65.70%`
+  - `$1000 fixed-risk`: `153,240`
+  - max DD: `13.55%`
+
+Important `v5` interpretation:
+
+- the internal regime router did not create a dramatic raw-model jump
+- `30m` remains slightly stronger than `15m`
+- the recent-regime `v5` run is still the cleaner filtered profile because drawdown is materially lower
+- the strongest progress is still on `filtered win rate + participation control`, not raw standalone classifier strength
+
+## Current Local Architecture Upgrade
+
+After `v4`, the local code has now been pushed one step further toward a true routed predictor instead of only smarter filtering.
+
+New local upgrades after the synced `v4` run:
+
+- the TFT predictor now has an internal regime router plus expert heads
+- inference now exposes routed-regime diagnostics
+- ensemble weighting is now regime-aware instead of mostly static
+- specialist bots now emit structural style-bias and regime-affinity summaries
+- those bot regime/style summaries now feed directly into branch scoring and branch probability weighting
+- live simulation rows now carry bot-regime context, not just a single aggregate swarm bias
+
+This is the start of the intended `v5` direction:
+
+```text
+Quant / Regime State
+  -> Routed Predictor Heads
+  -> Specialist Bot Style Bias
+  -> Branch Scoring + Collapse
+  -> Regime-Aware Ensemble
+```
+
+GPT-OSS remains the sidecar / judge layer after these numeric builds. It is still not the raw forecaster.
+
+## Current Remote `v5` Status
+
+The routed-`v5` cloud cycle is now completed and synced locally.
+
+Remote execution details:
+
+- Jupyter workspace root: `nexus/`
+- remote launcher script: `scripts/remote_v5_train.py`
+- remote pid file: `outputs/logs/remote_v5_pipeline.pid`
+- remote log: `outputs/logs/remote_v5_pipeline.log`
+- final remote tail ended with: `===== v5 pipeline complete =====`
+
+Completed pipeline shape:
+
+1. `build_quant_context`
+2. `build_persona_outputs`
+3. `build_fused_artifacts`
+4. remote tests
+5. `train_mh12_full_v5`
+6. `walkforward_mh12_full_v5`
+7. `train_mh12_recent_v5`
+8. `walkforward_mh12_recent_v5`
+
+What `v5` proved:
+
+- the new internal regime router is compatible with cloud retraining, walk-forward evaluation, and filtered backtesting
+- regime-aware ensemble weighting preserved the stronger filtered win-rate regime
+- deeper specialist-bot integration into branch scoring did not break branch generation or the live simulator path
+- raw `15m/30m` ranking quality improved only marginally, so the next gains are still more likely to come from better targets, routing, and branch realism than from model size alone
+
 ## What Was Fixed Recently
 
 ### Live Price Feed
@@ -1913,6 +2023,7 @@ Nexus Trader is now a partially implemented live market simulator with:
 - local hosting
 - spot-calibrated XAU feed
 - branching and reverse-collapse primitives
+- routed `v5` predictor heads with regime diagnostics
 - timestamped predicted-vs-actual UI
 - GPT-OSS sidecar integration
 - manual technical-analysis panels
@@ -1924,6 +2035,12 @@ Nexus Trader is now a partially implemented live market simulator with:
 - preserved local model artifacts
 
 But it is still not the full MiroFish-style simulator the user originally wanted.
+
+Current honest performance summary:
+
+- raw ROC-AUC is still only around `0.50x`
+- filtered `15m/30m` simulator backtests are holding in roughly the mid-`60%` win-rate regime
+- the most credible edge still comes from abstention, branch selection, and regime-aware filtering
 
 The next serious step is not “bigger random model.”
 The next serious step is:

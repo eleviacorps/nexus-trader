@@ -143,6 +143,9 @@ def load_model(device: str | None = None, manifest_path: Path = MODEL_MANIFEST_P
             lstm_layers=int(config_payload.get("lstm_layers", 2)),
             dropout=float(config_payload.get("dropout", 0.1)),
             output_dim=int(config_payload.get("output_dim", 1)),
+            regime_count=int(config_payload.get("regime_count", 4)),
+            router_hidden_dim=int(config_payload.get("router_hidden_dim", 64)),
+            router_temperature=float(config_payload.get("router_temperature", 1.0)),
         )
     )
     target_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))

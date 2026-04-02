@@ -1441,6 +1441,20 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
         llm_content=llm_content,
     )
     latest["bot_swarm_bias"] = round((_safe_float(bot_swarm.get("aggregate", {}).get("bullish_probability"), 0.5) - 0.5) * 2.0, 4)
+    latest["bot_swarm_confidence"] = round(_safe_float(bot_swarm.get("aggregate", {}).get("confidence"), 0.0), 4)
+    latest["bot_swarm_disagreement"] = round(_safe_float(bot_swarm.get("aggregate", {}).get("disagreement"), 0.0), 4)
+    style_biases = bot_swarm.get("aggregate", {}).get("style_biases", {}) if isinstance(bot_swarm, Mapping) else {}
+    regime_affinity = bot_swarm.get("aggregate", {}).get("regime_affinity", {}) if isinstance(bot_swarm, Mapping) else {}
+    latest["bot_trend_bias"] = round(_safe_float(style_biases.get("trend", {}).get("bias"), 0.0), 4)
+    latest["bot_reversal_bias"] = round(_safe_float(style_biases.get("reversal", {}).get("bias"), 0.0), 4)
+    latest["bot_structure_bias"] = round(_safe_float(style_biases.get("structure", {}).get("bias"), 0.0), 4)
+    latest["bot_macro_bias"] = round(_safe_float(style_biases.get("macro", {}).get("bias"), 0.0), 4)
+    latest["bot_shock_bias"] = round(_safe_float(style_biases.get("shock", {}).get("bias"), 0.0), 4)
+    latest["bot_crowd_bias"] = round(_safe_float(style_biases.get("crowd", {}).get("bias"), 0.0), 4)
+    latest["bot_regime_trend"] = round(_safe_float(regime_affinity.get("trend"), 0.0), 4)
+    latest["bot_regime_reversal"] = round(_safe_float(regime_affinity.get("reversal"), 0.0), 4)
+    latest["bot_regime_macro_shock"] = round(_safe_float(regime_affinity.get("macro_shock"), 0.0), 4)
+    latest["bot_regime_balanced"] = round(_safe_float(regime_affinity.get("balanced"), 0.0), 4)
     payload = _branch_payload(live_frame, latest, symbol, personas=personas, llm_content=llm_content)
     payload["persona_weight_tilts"] = persona_weight_tilts
     payload["feeds"] = feeds

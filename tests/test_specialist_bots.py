@@ -41,7 +41,7 @@ class SpecialistBotsTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(payload["bots"]), 10)
-        self.assertEqual([item["minutes"] for item in payload["aggregate"]["horizon_predictions"]], [5, 10, 15])
+        self.assertEqual([item["minutes"] for item in payload["aggregate"]["horizon_predictions"]], [5, 10, 15, 30])
         self.assertIn("graph", payload)
         self.assertTrue(payload["graph"]["nodes"])
 

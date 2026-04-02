@@ -84,6 +84,16 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
     prior_route_up = float(current_row.get("quant_route_prob_up", 0.25) or 0.25)
     prior_route_down = float(current_row.get("quant_route_prob_down", 0.25) or 0.25)
     prior_route_confidence = float(current_row.get("quant_route_confidence", 0.5) or 0.5)
+    prior_bot_trend_bias = float(current_row.get("bot_trend_bias", 0.0) or 0.0)
+    prior_bot_reversal_bias = float(current_row.get("bot_reversal_bias", 0.0) or 0.0)
+    prior_bot_structure_bias = float(current_row.get("bot_structure_bias", 0.0) or 0.0)
+    prior_bot_macro_bias = float(current_row.get("bot_macro_bias", 0.0) or 0.0)
+    prior_bot_shock_bias = float(current_row.get("bot_shock_bias", 0.0) or 0.0)
+    prior_bot_crowd_bias = float(current_row.get("bot_crowd_bias", 0.0) or 0.0)
+    prior_bot_regime_trend = float(current_row.get("bot_regime_trend", 0.0) or 0.0)
+    prior_bot_regime_reversal = float(current_row.get("bot_regime_reversal", 0.0) or 0.0)
+    prior_bot_regime_macro_shock = float(current_row.get("bot_regime_macro_shock", 0.0) or 0.0)
+    prior_bot_regime_balanced = float(current_row.get("bot_regime_balanced", 0.0) or 0.0)
     current_trend_score = float(current_row.get("quant_trend_score", 0.0) or 0.0)
     next_trend_score = _clamp(0.72 * current_trend_score + 1.10 * displacement, -1.0, 1.0)
     next_vol_forecast = max(1e-6, 0.75 * prior_vol + 0.25 * abs(return_1))
@@ -98,6 +108,16 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
     route_up = route_up / route_balance if route_balance > 0.0 else 0.5
     route_down = route_down / route_balance if route_balance > 0.0 else 0.5
     route_confidence = _clamp(0.55 * prior_route_confidence + 0.45 * abs(route_up - route_down), 0.0, 1.0)
+    next_bot_trend_bias = _clamp(0.82 * prior_bot_trend_bias + 0.18 * np.tanh(next_trend_score), -1.0, 1.0)
+    next_bot_reversal_bias = _clamp(0.84 * prior_bot_reversal_bias - 0.16 * np.tanh(next_trend_score), -1.0, 1.0)
+    next_bot_structure_bias = _clamp(0.88 * prior_bot_structure_bias + 0.12 * np.tanh(displacement * 0.8), -1.0, 1.0)
+    next_bot_macro_bias = _clamp(0.86 * prior_bot_macro_bias + 0.14 * np.tanh(fair_value_z * 0.35), -1.0, 1.0)
+    next_bot_shock_bias = _clamp(0.84 * prior_bot_shock_bias + 0.16 * np.tanh(abs(displacement) - 0.6), -1.0, 1.0)
+    next_bot_crowd_bias = _clamp(0.86 * prior_bot_crowd_bias + 0.14 * np.tanh(-displacement), -1.0, 1.0)
+    next_bot_regime_trend = _clamp(0.72 * prior_bot_regime_trend + 0.28 * max(0.0, abs(next_trend_score) - transition_risk * 0.35), 0.0, 1.0)
+    next_bot_regime_reversal = _clamp(0.72 * prior_bot_regime_reversal + 0.28 * max(0.0, abs(next_bot_reversal_bias) - 0.25 * regime_strength), 0.0, 1.0)
+    next_bot_regime_macro_shock = _clamp(0.72 * prior_bot_regime_macro_shock + 0.28 * max(0.0, abs(next_bot_macro_bias) + abs(next_bot_shock_bias) - 0.25), 0.0, 1.0)
+    next_bot_regime_balanced = _clamp(0.72 * prior_bot_regime_balanced + 0.28 * max(0.0, 1.0 - abs(next_trend_score) - transition_risk), 0.0, 1.0)
 
     next_row.update(
         {
@@ -138,6 +158,16 @@ def _roll_forward_row(current_row: Mapping[str, float], state: SyntheticMarketSt
             "quant_route_prob_up": route_up,
             "quant_route_prob_down": route_down,
             "quant_route_confidence": route_confidence,
+            "bot_trend_bias": next_bot_trend_bias,
+            "bot_reversal_bias": next_bot_reversal_bias,
+            "bot_structure_bias": next_bot_structure_bias,
+            "bot_macro_bias": next_bot_macro_bias,
+            "bot_shock_bias": next_bot_shock_bias,
+            "bot_crowd_bias": next_bot_crowd_bias,
+            "bot_regime_trend": next_bot_regime_trend,
+            "bot_regime_reversal": next_bot_regime_reversal,
+            "bot_regime_macro_shock": next_bot_regime_macro_shock,
+            "bot_regime_balanced": next_bot_regime_balanced,
         }
     )
     return next_row
@@ -183,27 +213,54 @@ def score_state(state: SyntheticMarketState, current_row: Mapping[str, float]) -
     route_alignment = 1.0 - min(1.0, abs(quant_route_bias - float(state.directional_bias)) / 2.0)
     fair_value_penalty = min(1.0, quant_kalman_dislocation * 45.0)
     transition_bonus = 1.0 - min(1.0, quant_transition_risk)
+    bot_trend_bias = float(current_row.get("bot_trend_bias", 0.0) or 0.0)
+    bot_reversal_bias = float(current_row.get("bot_reversal_bias", 0.0) or 0.0)
+    bot_structure_bias = float(current_row.get("bot_structure_bias", 0.0) or 0.0)
+    bot_macro_bias = float(current_row.get("bot_macro_bias", 0.0) or 0.0)
+    bot_shock_bias = float(current_row.get("bot_shock_bias", 0.0) or 0.0)
+    bot_regime_trend = float(current_row.get("bot_regime_trend", 0.0) or 0.0)
+    bot_regime_reversal = float(current_row.get("bot_regime_reversal", 0.0) or 0.0)
+    bot_regime_macro_shock = float(current_row.get("bot_regime_macro_shock", 0.0) or 0.0)
+    bot_regime_balanced = float(current_row.get("bot_regime_balanced", 0.0) or 0.0)
+    bot_trend_alignment = 1.0 - min(1.0, abs(bot_trend_bias - float(state.directional_bias)) / 2.0)
+    bot_reversal_alignment = 1.0 - min(1.0, abs(bot_reversal_bias + float(state.directional_bias)) / 2.0)
+    bot_structure_alignment = 1.0 - min(1.0, abs(bot_structure_bias - float(state.directional_bias)) / 2.0)
+    bot_macro_alignment = 1.0 - min(1.0, abs(bot_macro_bias - float(state.directional_bias)) / 2.0)
+    regime_router_bonus = max(
+        bot_regime_trend * bot_trend_alignment,
+        bot_regime_reversal * bot_reversal_alignment,
+        bot_regime_macro_shock * bot_macro_alignment,
+        bot_regime_balanced * (0.5 + 0.5 * wick_balance),
+    )
+    shock_penalty = max(0.0, abs(bot_shock_bias) - quant_vol_realism)
     return max(
         0.0,
         min(
             1.0,
-            0.16 * vol_score
-            + 0.12 * body_score
-            + 0.08 * wick_balance
-            + 0.14 * directional_alignment
-            + 0.09 * macro_alignment
-            + 0.09 * narrative_alignment
-            + 0.05 * crowd_fade_bonus
-            + 0.05 * consensus_score
-            + 0.11 * analog_alignment
-            + 0.09 * analog_confidence
-            + 0.08 * quant_alignment
-            + 0.07 * route_alignment
-            + 0.05 * quant_route_confidence
-            + 0.06 * quant_regime_strength
-            + 0.07 * quant_vol_realism
-            + 0.06 * transition_bonus
-            - 0.05 * fair_value_penalty,
+            (
+                0.16 * vol_score
+                + 0.12 * body_score
+                + 0.08 * wick_balance
+                + 0.14 * directional_alignment
+                + 0.09 * macro_alignment
+                + 0.09 * narrative_alignment
+                + 0.05 * crowd_fade_bonus
+                + 0.05 * consensus_score
+                + 0.11 * analog_alignment
+                + 0.09 * analog_confidence
+                + 0.08 * quant_alignment
+                + 0.07 * route_alignment
+                + 0.05 * quant_route_confidence
+                + 0.06 * quant_regime_strength
+                + 0.07 * quant_vol_realism
+                + 0.06 * transition_bonus
+                + 0.05 * bot_trend_alignment
+                + 0.05 * bot_structure_alignment
+                + 0.04 * bot_macro_alignment
+                + 0.04 * regime_router_bonus
+                - 0.05 * fair_value_penalty
+                - 0.03 * shock_penalty
+            ),
         ),
     )
 
@@ -258,13 +315,22 @@ def expand_binary_tree(
             minority_guardrail = abs(float(next_row.get("crowd_bias", 0.0) or 0.0)) * (
                 1.0 if float(state.directional_bias) * float(next_row.get("crowd_bias", 0.0) or 0.0) < 0.0 else 0.35
             )
+            bot_support = max(
+                float(next_row.get("bot_regime_trend", 0.0) or 0.0)
+                * (1.0 - min(1.0, abs(float(next_row.get("bot_trend_bias", 0.0) or 0.0) - float(state.directional_bias)) / 2.0)),
+                float(next_row.get("bot_regime_reversal", 0.0) or 0.0)
+                * (1.0 - min(1.0, abs(float(next_row.get("bot_reversal_bias", 0.0) or 0.0) + float(state.directional_bias)) / 2.0)),
+                float(next_row.get("bot_regime_macro_shock", 0.0) or 0.0)
+                * (1.0 - min(1.0, abs(float(next_row.get("bot_macro_bias", 0.0) or 0.0) - float(state.directional_bias)) / 2.0)),
+                float(next_row.get("bot_regime_balanced", 0.0) or 0.0) * 0.5,
+            )
             analog_confidence = float(analog_result.confidence) if analog_result is not None else 0.0
             child = SimulationNode(
                 seed=seed,
                 depth=node.depth + 1,
                 probability_weight=node.probability_weight
                 * 0.5
-                * (0.42 + score / 1.75 + minority_guardrail * 0.08 + analog_confidence * 0.10),
+                * (0.40 + score / 1.8 + minority_guardrail * 0.08 + analog_confidence * 0.08 + bot_support * 0.10),
                 dominant_driver=_dominant_driver(state),
                 state=state,
                 path_prices=[*node.path_prices, state.close],

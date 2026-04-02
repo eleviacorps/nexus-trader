@@ -44,7 +44,7 @@ def _signal_from_score(score: float) -> tuple[str, float]:
 
 def _build_horizons(current_price: float, atr: float, score: float, confidence: float) -> list[dict[str, Any]]:
     horizons = []
-    for minutes, scale in [(5, 0.55), (10, 0.95), (15, 1.25)]:
+    for minutes, scale in [(5, 0.55), (10, 0.95), (15, 1.25), (30, 1.90)]:
         move = atr * scale * np.tanh(score) * (0.45 + 0.55 * confidence)
         target = current_price + move
         bullish_probability = _clamp(0.5 + 0.5 * np.tanh(score * scale))
@@ -342,7 +342,7 @@ def run_specialist_bots(
     signal = "bullish" if weighted_probability >= 0.53 else "bearish" if weighted_probability <= 0.47 else "neutral"
 
     horizon_predictions = []
-    for minutes in [5, 10, 15]:
+    for minutes in [5, 10, 15, 30]:
         horizon_probs = [next(item["bullish_probability"] for item in bot["horizons"] if item["minutes"] == minutes) for bot in results]
         horizon_targets = [next(item["target_price"] for item in bot["horizons"] if item["minutes"] == minutes) for bot in results]
         horizon_predictions.append(
@@ -352,6 +352,36 @@ def run_specialist_bots(
                 "target_price": round(float(np.mean(horizon_targets)), 5),
             }
         )
+
+    style_groups = {
+        "trend": {"trend_following", "breakout"},
+        "reversal": {"mean_reversion", "crowd_extremes", "skeptic_filter"},
+        "structure": {"order_block", "fair_value_gap", "liquidity_sweep"},
+        "macro": {"macro_regime", "news_shock"},
+        "shock": {"news_shock", "skeptic_filter"},
+        "crowd": {"crowd_extremes"},
+    }
+    style_biases: dict[str, dict[str, float]] = {}
+    for group_name, preferred_styles in style_groups.items():
+        members = [bot for bot in results if bot["style"] in preferred_styles]
+        if not members:
+            style_biases[group_name] = {"bullish_probability": 0.5, "confidence": 0.0, "bias": 0.0}
+            continue
+        member_weight = np.asarray([max(_safe_float(bot["confidence"], 0.0), 0.15) for bot in members], dtype=np.float32)
+        member_prob = np.asarray([_safe_float(bot["bullish_probability"], 0.5) for bot in members], dtype=np.float32)
+        weighted_member_prob = float(np.average(member_prob, weights=member_weight))
+        style_biases[group_name] = {
+            "bullish_probability": round(weighted_member_prob, 6),
+            "confidence": round(float(np.average(member_weight)), 6),
+            "bias": round(float((weighted_member_prob - 0.5) * 2.0), 6),
+        }
+
+    regime_affinity = {
+        "trend": round(float((0.50 * style_biases["trend"]["confidence"]) + (0.30 * abs(style_biases["trend"]["bias"])) + (0.20 * abs(style_biases["structure"]["bias"]))), 6),
+        "reversal": round(float((0.55 * style_biases["reversal"]["confidence"]) + (0.25 * abs(style_biases["reversal"]["bias"])) + (0.20 * style_biases["crowd"]["confidence"])), 6),
+        "macro_shock": round(float((0.55 * style_biases["macro"]["confidence"]) + (0.45 * style_biases["shock"]["confidence"])), 6),
+        "balanced": round(float(1.0 - min(1.0, abs(weighted_probability - 0.5) * 1.8 + disagreement)), 6),
+    }
 
     style_map = {
         "retail": {"trend_following", "breakout", "crowd_extremes", "news_shock"},
@@ -443,6 +473,8 @@ def run_specialist_bots(
             "confidence": round(float(max(0.0, min(1.0, (1.0 - min(disagreement / 0.25, 1.0)) * np.mean([bot["confidence"] for bot in results])))), 6),
             "disagreement": round(float(disagreement), 6),
             "horizon_predictions": horizon_predictions,
+            "style_biases": style_biases,
+            "regime_affinity": regime_affinity,
         },
         "persona_reactions": persona_reactions,
         "graph": {"nodes": graph_nodes, "edges": edges},

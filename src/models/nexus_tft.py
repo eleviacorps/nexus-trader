@@ -22,6 +22,9 @@ class NexusTFTConfig:
     lstm_layers: int = 2
     dropout: float = 0.1
     output_dim: int = 1
+    regime_count: int = 4
+    router_hidden_dim: int = 64
+    router_temperature: float = 1.0
 
 
 def expand_feature_vector(values: Sequence[float], new_dim: int, fill_value: float = 0.0) -> List[float]:
@@ -60,6 +63,25 @@ if nn is not None:
             return projected, weights
 
 
+    class ExpertHead(nn.Module):
+        def __init__(self, hidden_dim: int, output_dim: int, dropout: float):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, max(hidden_dim // 2, 32)),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(max(hidden_dim // 2, 32), output_dim),
+                nn.Sigmoid(),
+            )
+
+        def forward(self, x):
+            return self.net(x)
+
+
     class NexusTFT(nn.Module):
         def __init__(self, config: NexusTFTConfig | None = None):
             super().__init__()
@@ -77,7 +99,7 @@ if nn is not None:
                 nn.Tanh(),
                 nn.Linear(64, 1),
             )
-            self.head = nn.Sequential(
+            self.base_head = nn.Sequential(
                 nn.LayerNorm(self.config.hidden_dim),
                 nn.Linear(self.config.hidden_dim, 64),
                 nn.GELU(),
@@ -85,17 +107,71 @@ if nn is not None:
                 nn.Linear(64, self.config.output_dim),
                 nn.Sigmoid(),
             )
+            self.regime_router = nn.Sequential(
+                nn.LayerNorm(self.config.hidden_dim),
+                nn.Linear(self.config.hidden_dim, self.config.router_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(self.config.router_hidden_dim, self.config.regime_count),
+            )
+            self.regime_embeddings = nn.Embedding(self.config.regime_count, self.config.hidden_dim)
+            self.expert_heads = nn.ModuleList(
+                [
+                    ExpertHead(
+                        hidden_dim=self.config.hidden_dim,
+                        output_dim=self.config.output_dim,
+                        dropout=self.config.dropout,
+                    )
+                    for _ in range(self.config.regime_count)
+                ]
+            )
+            self.regime_residual = nn.Sequential(
+                nn.LayerNorm(self.config.hidden_dim),
+                nn.Linear(self.config.hidden_dim, self.config.hidden_dim),
+                nn.GELU(),
+                nn.Dropout(self.config.dropout),
+            )
 
-        def forward(self, x, return_feature_importance: bool = False):
+        def optimizer_groups(self, old_layers_lr: float, new_layers_lr: float):
+            inherited_params = list(self.vsn.parameters()) + list(self.encoder.parameters()) + list(self.attention.parameters())
+            new_params = list(self.base_head.parameters()) + list(self.regime_router.parameters()) + list(self.regime_embeddings.parameters()) + list(self.expert_heads.parameters()) + list(self.regime_residual.parameters())
+            return [
+                {"params": inherited_params, "lr": old_layers_lr},
+                {"params": new_params, "lr": new_layers_lr},
+            ]
+
+        def forward(self, x, return_feature_importance: bool = False, return_diagnostics: bool = False):
             encoded, importance = self.vsn(x)
             outputs, _ = self.encoder(encoded)
             weights = torch.softmax(self.attention(outputs), dim=1)
             context = (outputs * weights).sum(dim=1)
-            prediction = self.head(context)
+            router_logits = self.regime_router(context) / max(self.config.router_temperature, 1e-6)
+            regime_probabilities = torch.softmax(router_logits, dim=-1)
+            regime_context = regime_probabilities @ self.regime_embeddings.weight
+            mixed_context = context + self.regime_residual(regime_context)
+            expert_predictions = torch.stack([head(mixed_context) for head in self.expert_heads], dim=1)
+            routed_prediction = (expert_predictions * regime_probabilities.unsqueeze(-1)).sum(dim=1)
+            base_prediction = self.base_head(mixed_context)
+            regime_confidence = regime_probabilities.max(dim=-1).values.unsqueeze(-1)
+            blend_weight = 0.55 + (0.25 * regime_confidence)
+            prediction = (blend_weight * routed_prediction) + ((1.0 - blend_weight) * base_prediction)
             if self.config.output_dim == 1:
                 prediction = prediction.squeeze(-1)
+                routed_prediction = routed_prediction.squeeze(-1)
+                base_prediction = base_prediction.squeeze(-1)
+            diagnostics = {
+                "regime_probabilities": regime_probabilities,
+                "regime_confidence": regime_confidence.squeeze(-1),
+                "routed_prediction": routed_prediction,
+                "base_prediction": base_prediction,
+                "expert_predictions": expert_predictions.squeeze(-1) if self.config.output_dim == 1 else expert_predictions,
+            }
+            if return_feature_importance and return_diagnostics:
+                return prediction, importance.mean(dim=1), diagnostics
             if return_feature_importance:
                 return prediction, importance.mean(dim=1)
+            if return_diagnostics:
+                return prediction, diagnostics
             return prediction
 else:  # pragma: no cover
     class NexusTFT:  # type: ignore
