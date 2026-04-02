@@ -21,6 +21,7 @@ from config.project_config import (  # noqa: E402
     GATE_CONTEXT_PATH,
     LEGACY_TFT_CHECKPOINT_PATH,
     LOOKAHEAD,
+    META_GATE_PATH,
     MODEL_MANIFEST_PATH,
     PRECISION_GATE_PATH,
     SAMPLE_WEIGHTS_PATH,
@@ -450,6 +451,7 @@ def main() -> int:
         test_metrics, test_targets, test_probabilities = evaluate_binary_model(model, test_loader, device, threshold=threshold)
         calibration_report['test_curve'] = build_calibration_report(test_targets, test_probabilities)
         gate = None
+        meta_gate = None
         horizon_thresholds = [threshold]
 
     checkpoint_path = tagged_path(TFT_CHECKPOINT_PATH, args.run_tag)
@@ -551,6 +553,8 @@ def main() -> int:
     save_json_report(manifest_path, manifest)
     if gate is not None:
         save_json_report(precision_gate_path, gate)
+    if meta_gate is not None and meta_gate.get('available', False):
+        save_meta_gate(meta_gate_path, meta_gate)
     print(json.dumps(summary, indent=2))
     return 0
 

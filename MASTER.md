@@ -1793,9 +1793,11 @@ Planned `v4` cloud objective:
 Current remote `v4` execution status in this chat:
 
 - validated local `v4` files were synced to the Jupyter workspace root `nexus/`
-- a detached remote process was launched successfully
-- current remote pid file points to: `outputs/logs/remote_v4_pipeline.pid`
-- current remote main log is: `outputs/logs/remote_v4_pipeline.log`
+- an initial detached remote `v4` process was launched successfully but failed at `train_mh12_full_v4` because `scripts/train_fused_tft.py` was missing the `META_GATE_PATH` import
+- that trainer import mismatch was fixed locally, revalidated, and re-uploaded
+- the active remote process is now the resumed `v4` training pipeline
+- current remote pid file points to: `outputs/logs/remote_v4_resume.pid`
+- current remote main log is: `outputs/logs/remote_v4_resume.log`
 - a local monitor process is polling the remote run tags:
   - `mh12_full_v4`
   - `mh12_recent_v4`
