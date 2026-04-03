@@ -2578,6 +2578,68 @@ have synced down locally together with their:
 - backtest reports
 - artifact-audit reports
 
+## Latest V7 Failure And Resume State
+
+The first `v7` cloud attempt did not finish cleanly.
+
+What failed:
+
+- `build_quant_context`: completed
+- `build_persona_outputs`: completed
+- `build_market_dynamics_labels`: completed
+- `build_fused_artifacts`: completed
+- remote tests: completed
+- `train_mh12_full_v7`: completed far enough to move on
+- `walkforward_mh12_full_v7`: failed
+
+Failure cause:
+
+- `src/evaluation/walkforward.py` only resolved event-driven price artifacts from:
+  - `data/features/price_features.parquet`
+  - `data/features/price_features.csv`
+- the cloud run was actually using the processed legacy artifact under:
+  - `data_store/processed/XAUUSD_1m_features.parquet`
+- so event-driven evaluation raised:
+  - `FileNotFoundError: Price feature artifact is required for event-driven evaluation.`
+
+What was fixed:
+
+- `src/evaluation/walkforward.py`
+  - event-driven price resolution now also falls back to:
+    - `LEGACY_PRICE_FEATURES_PARQUET`
+    - `LEGACY_PRICE_FEATURES_CSV`
+
+To avoid wasting GPU / compute time, the pipeline was resumed from the failed stage only instead of restarting from the top.
+
+New resume helpers added:
+
+- `scripts/remote_v7_resume.py`
+- `scripts/launch_remote_v7_resume_jupyter.py`
+- `scripts/check_remote_v7_resume_status_jupyter.py`
+
+Resume state at the latest confirmed check:
+
+- remote resume pid: `832630`
+- remote resume log:
+  - `outputs/logs/remote_v7_resume.log`
+- latest confirmed resume tail:
+  - `===== walkforward_mh12_full_v7 =====`
+- resume process status:
+  - `running`
+
+Resume pipeline shape:
+
+1. `walkforward_mh12_full_v7`
+2. `audit_mh12_full_v7`
+3. `train_mh12_recent_v7`
+4. `walkforward_mh12_recent_v7`
+5. `audit_mh12_recent_v7`
+
+Important note:
+
+- the original watcher was still waiting because it only watches for completed JSON artifacts
+- direct Jupyter status checks are the source of truth for remote failure / resume state
+
 ## Current V7 Success Criteria
 
 `v7` should be judged by these, in order:
@@ -2591,3 +2653,203 @@ Important honesty:
 
 - if `v7` only improves the classic directional summary while event-driven results stay poor, that is not a true win
 - if `v7` preserves or improves event-driven `15m / 30m` behavior with cleaner audit findings, that is a real step forward even if raw ROC-AUC is still only modestly improved
+
+## Final V7 Results
+
+`v7` is now completed and synced locally.
+
+Final summary artifacts:
+
+- `outputs/evaluation/v7_summary.json`
+- `outputs/evaluation/v7_summary.md`
+- `outputs/evaluation/training_summary_mh12_full_v7.json`
+- `outputs/evaluation/walkforward_report_mh12_full_v7.json`
+- `outputs/evaluation/backtest_report_mh12_full_v7.json`
+- `outputs/evaluation/model_artifact_leakage_report_mh12_full_v7.json`
+- `outputs/evaluation/training_summary_mh12_recent_v7.json`
+- `outputs/evaluation/walkforward_report_mh12_recent_v7.json`
+- `outputs/evaluation/backtest_report_mh12_recent_v7.json`
+- `outputs/evaluation/model_artifact_leakage_report_mh12_recent_v7.json`
+
+`mh12_full_v7`
+
+- strategic ROC-AUC: `0.5079`
+- strategic accuracy: `0.6439`
+- `15m` ROC-AUC: `0.5142`
+- `30m` ROC-AUC: `0.5135`
+- classic filtered backtest:
+  - trades: `110,037`
+  - participation: `13.94%`
+  - win rate: `56.83%`
+  - avg unit pnl: `0.0190`
+- event-driven backtest:
+  - trades: `110,037`
+  - participation: `14.53%`
+  - win rate: `45.37%`
+  - avg unit pnl: `-0.0128`
+- event-driven by horizon:
+  - `5m`: win rate `34.03%`, avg unit pnl `-0.0504`
+  - `10m`: win rate `44.97%`, avg unit pnl `-0.0141`
+  - `15m`: win rate `51.68%`, avg unit pnl `0.0047`
+  - `30m`: win rate `46.00%`, avg unit pnl `-0.0114`
+- audit findings:
+  - `precision_gate_has_high_train_accuracy_but_low_train_precision`
+
+`mh12_recent_v7`
+
+- strategic ROC-AUC: `0.4988`
+- strategic accuracy: `0.6436`
+- `15m` ROC-AUC: `0.5051`
+- `30m` ROC-AUC: `0.5063`
+- classic filtered backtest:
+  - trades: `8,462`
+  - participation: `10.96%`
+  - win rate: `57.94%`
+  - avg unit pnl: `0.0174`
+- event-driven backtest:
+  - trades: `8,462`
+  - participation: `10.96%`
+  - win rate: `47.65%`
+  - avg unit pnl: `-0.0053`
+- event-driven by horizon:
+  - `5m`: win rate `32.64%`, avg unit pnl `-0.0388`
+  - `10m`: win rate `45.82%`, avg unit pnl `-0.0095`
+  - `15m`: win rate `53.48%`, avg unit pnl `0.0076`
+  - `30m`: win rate `47.57%`, avg unit pnl `-0.0054`
+- audit findings:
+  - none
+
+Important final `v7` interpretation:
+
+- the raw predictor is still weak by ROC-AUC and remains near the `0.50x` regime
+- the classic filtered backtest still looks materially better than the execution-aware one
+- the event-driven path is the real bar now, and on that bar:
+  - `15m` is the only clearly positive horizon in both full and recent `v7`
+  - `30m` did not hold up as well as hoped once execution realism was applied
+- this is still a simulator-first system, but `v7` strongly suggests the best current product story is:
+  - selective `15m` future simulation
+  - strict abstention elsewhere
+
+Best post-`v7` direction:
+
+1. optimize explicitly for event-driven `15m` quality rather than broad strategic accuracy
+2. improve branch-selector realism and tradeability supervision
+3. continue using GPT-OSS as sidecar / judge, not numeric forecaster
+4. treat classic filtered backtests as secondary to execution-aware reports
+
+## Current V8 Architecture Direction
+
+`v8` is the first version where the project is being pushed toward a formal `generator -> selector` stack instead of only refining the generator and then filtering its outputs afterward.
+
+The intended `v8` architecture is:
+
+```text
+Current Market State
+  -> Formal Regime Features
+  -> Volatility Envelope / Plausibility Features
+  -> Fair-Value / Dislocation Features
+  -> Historical Analog Retrieval
+  -> TFT Generates Candidate Futures
+  -> Branch Archive Builder
+  -> Learned Branch Selector
+  -> Final Future Path + Rejection Rationale
+```
+
+The major `v8` additions in local code are:
+
+- `src/v8/hmm_regime.py`
+- `src/v8/garch_volatility.py`
+- `src/v8/fair_value.py`
+- `src/v8/analog_retrieval.py`
+- `src/v8/branch_selector_v8.py`
+
+Supporting `v8` scripts now exist for:
+
+- quant-stack building
+- branch-archive construction
+- branch-selector training
+- selector evaluation
+- final `v8` summary generation
+
+Important design intent:
+
+- TFT is treated as the imagination engine
+- the new selector stack is being trained to decide which candidate future is most realistic
+- `15m` remains the primary horizon of interest
+- event-driven evaluation remains the real benchmark
+
+## Current V8 Cloud Run Status
+
+`v8` is not finished yet, but the cloud run is healthy and actively training.
+
+Current remote run:
+
+- remote pipeline script: `scripts/remote_v8_train.py`
+- remote launcher script: `scripts/launch_remote_v8_jupyter.py`
+- remote status helper: `scripts/check_remote_v8_status_jupyter.py`
+- remote runtime helper: `scripts/check_remote_v8_runtime_jupyter.py`
+- latest confirmed remote pid: `949242`
+- latest confirmed active stage: `train_mh12_full_v8`
+
+What has already completed remotely in this `v8` cycle:
+
+1. `build_quant_context`
+2. `build_persona_outputs`
+3. `build_market_dynamics_labels`
+4. `build_fused_artifacts`
+5. `build_v8_quant_stack`
+6. remote tests
+
+Current runtime truth from the cloud box:
+
+- parent process is alive
+- child training workers are active
+- GPU utilization is now high instead of the old underfed state
+- latest confirmed ROCm snapshot during `mh12_full_v8` training:
+  - GPU use: `96%`
+  - power draw: about `296W`
+  - VRAM allocated: about `91%`
+
+Important systems interpretation:
+
+- the old complaint about `15% - 30%` GPU usage does not describe the current `v8` run
+- the current `v8` training is saturating the MI300X much better
+- the persistent `91% VRAM` reading is still mostly allocator reservation behavior and is not by itself a problem
+- the quiet remote log does not mean the run is idle; the runtime helper confirms active compute
+
+Current local `v8` artifacts already present:
+
+- `outputs/evaluation/v8_quant_stack_report.json`
+- `outputs/evaluation/v8_branch_archive_report_v8_smoke.json`
+- `outputs/evaluation/v8_branch_selector_report_v8_smoke.json`
+- `outputs/evaluation/v8_evaluation_report_v8_smoke.json`
+
+Current local interpretation:
+
+- the `v8` stack works locally in smoke mode
+- the full cloud result still needs to finish before any honest `v8` performance summary can be made
+
+## Expected V8 Finish Line
+
+The cloud `v8` run should eventually produce:
+
+- `outputs/evaluation/training_summary_mh12_full_v8.json`
+- `outputs/evaluation/walkforward_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_branch_archive_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_branch_selector_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_evaluation_report_mh12_full_v8.json`
+- `outputs/evaluation/training_summary_mh12_recent_v8.json`
+- `outputs/evaluation/walkforward_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_branch_archive_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_branch_selector_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_evaluation_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_summary.json`
+- `outputs/evaluation/v8_summary.md`
+
+The real `v8` success criteria are:
+
+1. selector beats generator baseline on branch choice
+2. event-driven `15m` improves versus `v7`
+3. top-3 containment is materially better than top-1 random baseline
+4. analog / regime / fair-value features show real importance in the selector
+5. the final chosen path is more realistic than the older probability-only collapse
