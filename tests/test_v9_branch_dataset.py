@@ -88,6 +88,16 @@ class V9BranchDatasetTests(unittest.TestCase):
         self.assertGreaterEqual(report.top3_containment, 0.0)
         self.assertLessEqual(report.top3_containment, 1.0)
 
+    def test_train_torch_selector_with_variable_branch_counts(self) -> None:
+        frame = self._sample_frame()
+        trimmed = frame.loc[~((frame["sample_id"] == 0) & (frame["branch_id"] == 3))].copy()
+        expanded = pd.concat([trimmed, frame.loc[(frame["sample_id"] == 1) & (frame["branch_id"] == 3)].assign(sample_id=4, branch_id=1)], ignore_index=True)
+        labeled = build_branch_labels(expanded)
+        features = build_branch_features(labeled)
+        _, report = train_selector_torch(features, epochs=1, batch_size=2, validation_fraction=0.25)
+        self.assertGreaterEqual(report.top1_accuracy, 0.0)
+        self.assertLessEqual(report.top1_accuracy, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

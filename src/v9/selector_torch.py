@@ -50,11 +50,10 @@ def _resolve_device(device: str | None = None) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _build_group_tensors(frame, feature_names: Sequence[str], target_col: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _build_group_tensors(frame, feature_names: Sequence[str], target_col: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     sorted_frame = frame.sort_values(["sample_id", "branch_id"]).reset_index(drop=True)
-    groups = []
-    targets = []
-    event_wins = []
+    sample_groups = []
+    max_branches = 0
     for _, sample in sorted_frame.groupby("sample_id", sort=False):
         group_features = sample[list(feature_names)].to_numpy(dtype=np.float32)
         group_targets = sample[target_col].to_numpy(dtype=np.float32)
@@ -63,15 +62,34 @@ def _build_group_tensors(frame, feature_names: Sequence[str], target_col: str) -
         if float(group_targets.sum()) <= 0.0:
             group_targets = np.ones_like(group_targets, dtype=np.float32)
         group_targets = group_targets / max(float(group_targets.sum()), 1e-6)
-        groups.append(group_features)
-        targets.append(group_targets)
-        event_wins.append(
+        group_event_wins = (
             (np.sign(sample["actual_final_return"].to_numpy(dtype=np.float32)) == np.sign(sample["branch_direction"].to_numpy(dtype=np.float32))).astype(np.float32)
         )
+        sample_groups.append((group_features, group_targets, group_event_wins))
+        max_branches = max(max_branches, group_features.shape[0])
+    groups = []
+    targets = []
+    event_wins = []
+    masks = []
+    for group_features, group_targets, group_event_wins in sample_groups:
+        branch_count = group_features.shape[0]
+        feature_pad = np.zeros((max_branches, len(feature_names)), dtype=np.float32)
+        target_pad = np.zeros(max_branches, dtype=np.float32)
+        event_pad = np.zeros(max_branches, dtype=np.float32)
+        mask = np.zeros(max_branches, dtype=np.float32)
+        feature_pad[:branch_count] = group_features
+        target_pad[:branch_count] = group_targets
+        event_pad[:branch_count] = group_event_wins
+        mask[:branch_count] = 1.0
+        groups.append(feature_pad)
+        targets.append(target_pad)
+        event_wins.append(event_pad)
+        masks.append(mask)
     return (
         np.stack(groups).astype(np.float32),
         np.stack(targets).astype(np.float32),
         np.stack(event_wins).astype(np.float32),
+        np.stack(masks).astype(np.float32),
     )
 
 
@@ -83,12 +101,15 @@ def _split_train_validation(group_count: int, validation_fraction: float) -> tup
     return indices[:split_point], indices[split_point:]
 
 
-def _evaluate_predictions(scores: np.ndarray, targets: np.ndarray, event_wins: np.ndarray) -> tuple[float, float, float]:
+def _evaluate_predictions(scores: np.ndarray, targets: np.ndarray, event_wins: np.ndarray, masks: np.ndarray) -> tuple[float, float, float]:
     top1 = []
     top3 = []
     event_win = []
-    for group_scores, group_targets, group_event in zip(scores, targets, event_wins, strict=False):
-        ranking = np.argsort(group_scores)[::-1]
+    for group_scores, group_targets, group_event, group_mask in zip(scores, targets, event_wins, masks, strict=False):
+        valid = np.flatnonzero(group_mask > 0.0)
+        if valid.size == 0:
+            continue
+        ranking = valid[np.argsort(group_scores[valid])[::-1]]
         best_index = int(np.argmax(group_targets))
         top1.append(float(ranking[0] == best_index))
         top3.append(float(best_index in set(ranking[:3].tolist())))
@@ -112,7 +133,7 @@ def train_selector_torch(
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    x_groups, y_groups, event_groups = _build_group_tensors(frame, feature_names=feature_names, target_col=target_col)
+    x_groups, y_groups, event_groups, mask_groups = _build_group_tensors(frame, feature_names=feature_names, target_col=target_col)
     train_idx, valid_idx = _split_train_validation(len(x_groups), validation_fraction)
     torch_device = _resolve_device(device)
 
@@ -121,8 +142,10 @@ def train_selector_torch(
 
     train_x = torch.from_numpy(x_groups[train_idx]).to(torch_device)
     train_y = torch.from_numpy(y_groups[train_idx]).to(torch_device)
+    train_mask = torch.from_numpy(mask_groups[train_idx]).to(torch_device)
     valid_x = torch.from_numpy(x_groups[valid_idx]).to(torch_device)
     valid_y = torch.from_numpy(y_groups[valid_idx]).to(torch_device)
+    valid_mask = torch.from_numpy(mask_groups[valid_idx]).to(torch_device)
 
     final_train_loss = 0.0
     final_valid_loss = 0.0
@@ -134,7 +157,8 @@ def train_selector_torch(
             batch_index = order[start : start + batch_size]
             batch_x = train_x[batch_index]
             batch_y = train_y[batch_index]
-            logits = model(batch_x)
+            batch_mask = train_mask[batch_index]
+            logits = model(batch_x).masked_fill(batch_mask <= 0.0, -1e9)
             log_probs = torch.log_softmax(logits, dim=1)
             loss = -(batch_y * log_probs).sum(dim=1).mean()
             optimizer.zero_grad(set_to_none=True)
@@ -145,16 +169,17 @@ def train_selector_torch(
 
         model.eval()
         with torch.no_grad():
-            valid_logits = model(valid_x)
+            valid_logits = model(valid_x).masked_fill(valid_mask <= 0.0, -1e9)
             final_valid_loss = float((-(valid_y * torch.log_softmax(valid_logits, dim=1)).sum(dim=1).mean()).detach().cpu())
 
     model.eval()
     with torch.no_grad():
-        valid_scores = model(valid_x).detach().cpu().numpy().astype(np.float32)
+        valid_scores = model(valid_x).masked_fill(valid_mask <= 0.0, -1e9).detach().cpu().numpy().astype(np.float32)
     top1_accuracy, top3_containment, event_win_rate = _evaluate_predictions(
         valid_scores,
         y_groups[valid_idx],
         event_groups[valid_idx],
+        mask_groups[valid_idx],
     )
     report = SelectorTorchReport(
         device=str(torch_device),

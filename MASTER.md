@@ -3311,3 +3311,303 @@ Best next `v9` move from here:
 2. preserve the stronger held-out selector evaluation harness that now exists
 3. keep memory bank and contradiction logic in the live path, but treat them as support signals until they show measurable held-out lift
 4. make cone containment and minority-branch usefulness first-class targets in the next archive / generator upgrade
+
+## V10 Local Generator-First Pass
+
+What was completed locally for the first full `v10` pass:
+
+- implemented a new `src/v10` package for:
+  - diversity audit
+  - regime-conditioned temperature scheduling
+  - diversity-regularized branch scoring
+  - minority branch guarantee
+  - cone supervision
+  - archive diversification / regeneration
+- added local scripts for:
+  - `scripts/audit_branch_diversity.py`
+  - `scripts/regenerate_branch_archive_v10.py`
+  - `scripts/retrain_selector_from_v10_archive.py`
+- extended `config/project_config.py` with `v10` artifact paths
+- upgraded the local torch selector path so it can train on variable branch counts with padding + masks
+
+Important `v10` local artifacts now present:
+
+- `outputs/v10/branch_diversity_recent_baseline.json`
+- `outputs/v10/branch_diversity_full_baseline.json`
+- `outputs/v10/branch_archive_v10_recent.parquet`
+- `outputs/v10/branch_archive_v10_recent.report.json`
+- `outputs/v10/branch_archive_v10_full.parquet`
+- `outputs/v10/branch_archive_v10_full.report.json`
+- `outputs/v10/branch_labels_v10_full.parquet`
+- `outputs/v10/branch_features_v10_full.parquet`
+- `outputs/v10/selector_torch_v10_full.pt`
+- `outputs/v10/selector_experiment_results_v10_full.json`
+- `outputs/v10/selector_experiment_results_v10_full.md`
+
+### V10 Phase 0
+
+Prerequisite artifacts were verified locally before the generator-first pass:
+
+- `outputs/v9/branch_features_v9_enriched.parquet`
+- `outputs/v9/branch_features_recent_v8_enriched.parquet`
+- `outputs/v9/selector_experiment_results_full_heldout.json`
+- `checkpoints/v9/memory_bank/encoder.pt`
+- `checkpoints/v9/memory_bank/index.npz`
+- `models/tft/final_tft.ckpt`
+- `data/features/fused_features.npy`
+
+### V10 Phase 1 Baseline Diversity Audit
+
+Recent baseline audit from `outputs/v8/branch_archive_mh12_recent_v8.parquet`:
+
+- mean consensus strength: about `0.99999999`
+- mean minority share: `0.0`
+- mean direction std: `0.0`
+- cone containment rate: about `0.0238`
+- full-path containment rate: `0.0`
+
+Full baseline audit from `outputs/v8/branch_archive_mh12_full_v8.parquet`:
+
+- mean consensus strength: about `0.99997076`
+- mean minority share: about `0.000029`
+- mean direction std: about `0.000108`
+- cone containment rate: about `0.02675`
+- full-path containment rate: `0.0`
+
+This is the clearest local confirmation yet that the pre-`v10` generator was still collapsing into nearly one-sided cones.
+
+### V10 Phases 2-6 Regenerated Archive Result
+
+Recent regenerated `v10` archive result:
+
+- source archive:
+  - `6,000` samples
+  - `384,000` branch rows
+- regenerated archive:
+  - `57,919` branch rows
+- regenerated mean consensus strength: about `0.6879`
+- regenerated mean minority share: about `0.3121`
+- regenerated mean direction std: about `0.8941`
+- regenerated cone containment rate: about `0.3993`
+- regenerated full-path containment rate: about `0.2630`
+
+Full regenerated `v10` archive result:
+
+- source archive:
+  - `8,000` samples
+  - `512,000` branch rows
+- regenerated archive:
+  - `77,817` branch rows
+- regenerated mean consensus strength: about `0.6928`
+- regenerated mean minority share: about `0.3072`
+- regenerated mean direction std: about `0.8904`
+- regenerated cone containment rate: about `0.3979`
+- regenerated full-path containment rate: about `0.2610`
+
+Best honest reading of these regeneration numbers:
+
+- `v10` materially fixed the fake-thin cone problem at the archive level
+- the generator is now producing branch sets with real directional spread instead of near-total consensus
+- cone containment improved by roughly an order of magnitude versus the pre-`v10` archive baseline
+- the system now carries a genuine minority branch in aggregate rather than almost none
+
+### V10 Phase 7+ Selector Follow-Through
+
+The local selector was retrained on the regenerated full `v10` archive using the existing `v9` label / feature stack, now with variable branch-count support in the torch trainer.
+
+Important local `v10` selector read from `outputs/v10/selector_experiment_results_v10_full.json`:
+
+- held-out validation samples: `1,600`
+- strongest current `top-3` selector:
+  - `selector_e`
+  - top-1 branch accuracy: `0.441875`
+  - top-3 branch containment: `0.86875`
+  - event-driven `15m` win rate: `0.480625`
+- torch selector on the new variable-width archive:
+  - device: `cuda`
+  - top-1 branch accuracy: `0.19375`
+  - top-3 containment: `0.413125`
+  - event-driven `15m` win rate: `0.486875`
+
+Important interpretation:
+
+- after `v10`, branch ranking still works and top-3 containment is now very strong on the regenerated archive
+- the generator-side diversity problem is materially improved
+- but event-style `15m` tradeability is still not convincingly positive yet
+- so `v10` appears to be fixing the correct bottleneck first, but it has not yet converted that improvement into strong execution quality
+
+Current best honest `v10` state:
+
+- `phase 0` through `phase 7+` have now been executed locally in the first real `v10` archive cycle
+- the generator-side diversity thesis was validated strongly
+- the next step should not be to abandon `v10`
+- the next step should be to keep the regenerated archive path and push the supervision toward:
+  - tradeability
+  - realized event outcomes
+  - regime-specific execution quality
+
+Important local verification for this pass:
+
+- `tests.test_v10_generator`: passes
+- `tests.test_v9_branch_dataset`: passes
+- `tests.test_mcts`: passes
+
+## V11 Execution-Translation Pass
+
+What was implemented locally for the first `v11` research cycle:
+
+- `SETL` in:
+  - `src/v11/setl.py`
+- `PCOP` in:
+  - `src/v11/path_conditioned_outcome.py`
+- `CESM` in:
+  - `src/v11/crowd_state_machine.py`
+- `PMWM` in:
+  - `src/v11/persistent_world_model.py`
+- integrated research backtest pipeline in:
+  - `src/v11/research_backtest.py`
+  - `scripts/run_v11_research_backtest.py`
+
+Support changes added:
+
+- `config/project_config.py` now contains `v11` artifact paths
+- `src/v9/selector_torch.py` already supports variable branch counts from the `v10` archive, which remains important for `v11`
+- `tests/test_v11_research.py` now covers the `v11` research layer
+
+Important `v11` artifacts now present:
+
+- `outputs/v11/research_backtest_full.json`
+- `outputs/v11/research_backtest_full.md`
+- `checkpoints/v11/selector_ranker.pkl`
+- `checkpoints/v11/pcop_stage5.pkl`
+- `checkpoints/v11/pcop_stage10.pkl`
+- `checkpoints/v11/setl_regressor.pkl`
+
+### What Each V11 Component Does
+
+`SETL`:
+
+- trains a second-stage expected-PnL model on selected branches
+- predicts whether the selected branch is actually worth trading after costs
+- converts branch realism into execution quality
+
+`PCOP`:
+
+- scores branch survival after the first `5m` or `10m` of actual path is known
+- reweights branches by path consistency instead of leaving the original cone frozen
+- supports delayed entry after confirmation
+
+`CESM`:
+
+- maps each sample into a crowd-emotional state
+- current state space used locally:
+  - `disbelief`
+  - `greed`
+  - `euphoria`
+  - `panic`
+  - `relief`
+- the current local held-out fold only surfaced `disbelief` and `panic` strongly
+
+`PMWM`:
+
+- rolls a persistent world state across chronologically ordered samples
+- carries forward:
+  - institutional positioning estimate
+  - retail sentiment momentum
+  - structural memory strength
+  - regime persistence
+  - smart-money fingerprint
+  - narrative age
+
+### V11 Local Backtest Result
+
+Input artifact used:
+
+- `outputs/v10/branch_features_v10_full.parquet`
+
+Split used:
+
+- train samples: `6,400`
+- validation samples: `1,600`
+- chronological held-out validation fraction: `0.20`
+
+Optimized `SETL` threshold learned on train:
+
+- threshold: about `0.192485`
+- train participation target found: about `0.35`
+
+Held-out `v11` variant results:
+
+`selector_only_open`:
+
+- participation: `1.0000`
+- win rate: `0.483125`
+- avg unit pnl: `-0.030309`
+- cumulative unit pnl: `-48.494495`
+
+`setl_open`:
+
+- participation: `0.360625`
+- win rate: `0.641248`
+- avg unit pnl: `0.286758`
+- cumulative unit pnl: `165.459625`
+
+`pcop_5m_setl`:
+
+- participation: `0.256875`
+- win rate: `0.535280`
+- avg unit pnl: `0.072040`
+- cumulative unit pnl: `29.608454`
+
+`pcop_10m_setl`:
+
+- participation: `0.264375`
+- win rate: `0.529551`
+- avg unit pnl: `0.060515`
+- cumulative unit pnl: `25.597652`
+
+`full_v11` staged policy:
+
+- participation: `0.555000`
+- win rate: `0.609234`
+- avg unit pnl: `0.220903`
+- cumulative unit pnl: `196.162125`
+- stage usage on held-out set:
+  - open: `712`
+  - `pcop_5m`: `449`
+  - `pcop_10m`: `439`
+
+Best honest interpretation:
+
+- this is the first local cycle where Nexus meaningfully separated:
+  - plausible future
+  - tradeable setup
+- `SETL` appears to solve the immediate execution-translation gap much better than raw selector choice alone
+- `PCOP` adds real value as a delayed-confirmation mechanism, though in this first local pass it is weaker than pure `SETL` at bar zero when used alone
+- the strongest held-out local policy is the staged `full_v11` policy that lets `SETL` choose between:
+  - immediate execution
+  - `5m` confirmation
+  - `10m` confirmation
+
+### Important Honesty About V11
+
+These `v11` numbers are promising, but they are **not yet final market-truth claims**.
+
+Why:
+
+- the backtest is archive-based, not a raw-bar end-to-end live simulation replay
+- the cost model is still simplified / synthetic
+- `PCOP` uses actual revealed `5m` / `10m` bars, which is valid for delayed entry logic, but still evaluated inside the branch-archive framework
+- `SETL`, `PCOP`, `CESM`, and `PMWM` are trained and validated on the regenerated `v10` archive features, not yet on a broader raw execution log
+
+So the current correct phrasing is:
+
+- `v11` strongly improves the local research backtest
+- `v11` plausibly bridges the execution gap
+- `v11` still needs stricter end-to-end walk-forward or live-style confirmation before any production-strength claim
+
+Important local verification for this pass:
+
+- `tests.test_v11_research`: passes
+- `tests.test_walkforward`: passes
+- `tests.test_v9_runtime`: passes
