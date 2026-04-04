@@ -3110,3 +3110,204 @@ Operational meaning:
 - this local terminal is now running `V8 only` for manual desk usage
 - external gate veto is not being used in this local operating mode
 - the user is expected to take trades manually from the projected path / final judge / structure view rather than allow auto-filtered execution
+
+## Current Local V9 Bootstrap Status
+
+Date:
+
+- `2026-04-04`
+
+What has now been implemented locally for `v9`:
+
+- `src/v9/branch_labels.py`
+- `src/v9/branch_features_v9.py`
+- `src/v9/selector_torch.py`
+- `src/v9/persona_calibration.py`
+- `src/v9/memory_bank.py`
+- `src/v9/contradiction_detector.py`
+- `src/v9/regret_gate.py`
+- `src/v9/selector_experiments.py`
+- `scripts/build_v9_branch_dataset.py`
+- `scripts/train_v9_selector_torch.py`
+- `scripts/train_v9_memory_bank.py`
+- `scripts/run_v9_selector_experiments.py`
+
+What has been wired into the live / evaluation stack already:
+
+- local Python environment now uses `torch 2.11.0+cu128`
+- local runtime now sees:
+  - `NVIDIA GeForce RTX 4070`
+- `src/service/live_data.py` now exposes:
+  - persisted `persona_weights`
+  - memory-bank context if encoder/index artifacts exist
+  - contradiction classification
+- `src/evaluation/walkforward.py` and `src/training/meta_gate.py` now accept a `v9` regret-aware gate score in the combined gate path
+
+Current local `v9` artifacts produced:
+
+- `outputs/v9/branch_labels.parquet`
+- `outputs/v9/branch_features_v9.parquet`
+- `outputs/v9/branch_features_v9.report.json`
+- `outputs/v9/branch_labels_recent_v8.parquet`
+- `outputs/v9/branch_features_recent_v8.parquet`
+- `outputs/v9/branch_features_recent_v8.report.json`
+- `outputs/v9/selector_torch_recent.json`
+- `outputs/v9/selector_experiment_results_recent.json`
+- `outputs/v9/selector_experiment_results_recent.md`
+- `outputs/v9/memory_bank_report.json`
+- `checkpoints/v9/memory_bank/encoder.pt`
+- `checkpoints/v9/memory_bank/index.npz`
+
+Important local verification:
+
+- `tests.test_v9_branch_dataset`: passes
+- `tests.test_v9_runtime`: passes
+- `tests.test_v8_stack`: passes
+- `tests.test_walkforward`: passes
+
+Important local `v9` bootstrap findings:
+
+- the `v8` branch archive converts cleanly into the new `v9` label / feature artifacts
+- local branch consensus is still extremely concentrated:
+  - `outputs/v9/branch_features_v9.report.json`
+  - mean consensus strength is about `0.99997`
+- cone containment from the current archive-derived `v9` labels is still effectively `0.0`
+- minority rescue remains nearly absent on the current archive
+- this strongly supports the earlier diagnosis that branch diversity is still too weak before any honest cone-quality claim can be made
+
+Current local memory-bank bootstrap:
+
+- local CUDA smoke training completed successfully
+- report:
+  - device: `cuda`
+  - window size: `60`
+  - sample count: `504`
+  - embedding dim: `64`
+  - epochs: `2`
+  - validation accuracy: about `0.5248`
+
+Important honesty about the current local selector-experiment results:
+
+- the newly generated `outputs/v9/selector_experiment_results_recent.json` numbers are **local bootstrap experiment numbers**
+- they are useful for architecture plumbing and feature separability checks
+- they are **not** yet the final honest `v9` benchmark
+- they are mostly in-sample on the local recent archive feature frame, so they must not be compared directly to the final walk-forward `v8` headline numbers as if they were equivalent
+
+What the local selector bootstrap did show:
+
+- simple tree-based selectors can rank the current recent archive very aggressively on the local frame
+- the torch selector path now trains and runs on CUDA successfully
+- despite strong local ranking numbers on some experiment variants, event-style selected-branch quality remains close to flat on this bootstrap frame
+- this again suggests the main bottleneck is still branch realism / diversity and not just selector capacity
+
+Current best `v9` interpretation:
+
+- the `v9` architecture pass is now genuinely underway locally
+- the runtime scaffolding for:
+  - persona calibration
+  - memory bank
+  - contradiction detection
+  - regret-aware gating
+  - selector experiments
+  is now present in the repo
+- but `v9` is **not** complete yet
+- the current state is best described as:
+  - `full local V9 architecture bootstrap in progress`
+
+Immediate next `v9` priorities from this state:
+
+1. train a denser local memory bank on a larger fused slice and feed its confidence back into selector experiments
+2. improve selector evaluation so top-3 / event-driven / cone metrics are measured on stricter held-out folds
+3. connect contradiction and persona-calibration outputs more explicitly into the live branch ranking story
+4. decide whether the branch archive itself must be regenerated with stronger diversity before further selector optimization is worth more time
+
+## Latest Local V9 Follow-Through
+
+What was completed after the first `v9` bootstrap:
+
+- trained a denser local CUDA memory bank again
+- added `scripts/enrich_v9_features_with_memory_bank.py`
+- generated memory-bank-enriched branch feature artifacts for:
+  - recent `v8` archive
+  - full `v8` archive
+- rewrote `v9` selector experiments to use a stricter held-out split by `sample_id`
+  - train: first `80%`
+  - validation: last `20%`
+- upgraded the live branch-ranking path so `v9` runtime context now influences ranking more directly through:
+  - memory-bank alignment
+  - contradiction-aware confidence scaling
+  - persona-weight alignment
+
+New `v9` artifacts now present:
+
+- `outputs/v9/branch_features_recent_v8_enriched.parquet`
+- `outputs/v9/branch_features_v9_enriched.parquet`
+- `outputs/v9/selector_experiment_results_recent_heldout.json`
+- `outputs/v9/selector_experiment_results_recent_heldout.md`
+- `outputs/v9/selector_experiment_results_full_heldout.json`
+- `outputs/v9/selector_experiment_results_full_heldout.md`
+- `outputs/v9/selector_experiment_results_full_heldout_enriched.json`
+- `outputs/v9/selector_experiment_results_full_heldout_enriched.md`
+
+Important local held-out `v9` result:
+
+- these numbers are now materially more honest than the earlier local in-frame bootstrap because they are evaluated on a held-out chronological `sample_id` slice
+- they are still local archive experiments, not the final end-to-end walk-forward `v9` benchmark
+
+Recent held-out `v9` selector read:
+
+- validation samples: `1,200`
+- strongest current recent held-out selector:
+  - `selector_d`
+  - top-1 branch accuracy: `0.7200`
+  - top-3 containment: `0.7200`
+  - event-driven `15m` win rate: `0.5000`
+  - event-driven `15m` avg unit pnl: about `-0.00003`
+
+Full held-out `v9` selector read:
+
+- validation samples: `1,600`
+- strongest current full held-out selector:
+  - `selector_d`
+  - top-1 branch accuracy: `0.756875`
+  - top-3 containment: `0.756875`
+  - event-driven `15m` win rate: `0.50875`
+  - event-driven `15m` avg unit pnl: about `0.000037`
+
+Important interpretation of these held-out results:
+
+- held-out branch ranking quality is now genuinely stronger than the old weak local bootstrap numbers
+- recent held-out `top-1/top-3` now sits near the lower edge of the intended `v9` target zone
+- full held-out `top-1/top-3` is stronger still and reaches the mid-`0.75x` range
+- but the execution-style `15m` result remains effectively flat
+- this is the most important current truth:
+  - selector ranking is improving
+  - tradeable branch realism is **not** improving in proportion
+
+What memory-bank enrichment showed:
+
+- adding memory-bank-enriched branch features did **not** materially improve the strongest tree-based held-out selectors yet
+- the analog-heavy selector remains weaker than the full feature selectors
+- the torch selector path is now reproducible and materially healthier than before, but it still does not beat the stronger tree-based held-out selectors
+- conclusion:
+  - memory bank is now architecturally integrated
+  - but it is not yet producing a clear measurable lift on held-out branch selection
+
+Current best honest `v9` interpretation after the held-out pass:
+
+- `v9` is making real progress on selector architecture and evaluation honesty
+- `v9` is **not yet** solving the deeper product problem
+- the dominant bottleneck still appears to be:
+  - branch diversity
+  - cone realism
+  - tradeability supervision
+- the current archive still behaves like a system where:
+  - branches can often be ranked
+  - but the ranked branches are still too similar and too weakly tradeable
+
+Best next `v9` move from here:
+
+1. regenerate or diversify the branch archive rather than spending too much more time squeezing the current selector
+2. preserve the stronger held-out selector evaluation harness that now exists
+3. keep memory bank and contradiction logic in the live path, but treat them as support signals until they show measurable held-out lift
+4. make cone containment and minority-branch usefulness first-class targets in the next archive / generator upgrade

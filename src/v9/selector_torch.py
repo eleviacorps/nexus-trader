@@ -106,7 +106,12 @@ def train_selector_torch(
     learning_rate: float = 1e-3,
     validation_fraction: float = 0.2,
     device: str | None = None,
+    seed: int = 42,
 ) -> tuple[BranchSelectorTorch, SelectorTorchReport]:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     x_groups, y_groups, event_groups = _build_group_tensors(frame, feature_names=feature_names, target_col=target_col)
     train_idx, valid_idx = _split_train_validation(len(x_groups), validation_fraction)
     torch_device = _resolve_device(device)
@@ -188,7 +193,7 @@ def load_selector_torch(path: Path, device: str | None = None) -> tuple[BranchSe
 def score_selector_torch(model: BranchSelectorTorch, frame, feature_names: Sequence[str], device: str | None = None) -> np.ndarray:
     torch_device = _resolve_device(device)
     model = model.to(torch_device)
-    inputs = torch.from_numpy(frame[list(feature_names)].to_numpy(dtype=np.float32)).to(torch_device)
+    inputs = torch.from_numpy(np.array(frame[list(feature_names)].to_numpy(dtype=np.float32), copy=True)).to(torch_device)
     with torch.no_grad():
         scores = model(inputs.unsqueeze(1)).squeeze(1).squeeze(-1)
     return scores.detach().cpu().numpy().astype(np.float32)

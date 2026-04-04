@@ -194,19 +194,30 @@ def apply_meta_gate(
 def combine_gate_scores(
     precision_scores: np.ndarray | None,
     meta_scores: np.ndarray | None,
+    regret_scores: np.ndarray | None = None,
 ) -> np.ndarray | None:
-    if precision_scores is None and meta_scores is None:
+    if precision_scores is None and meta_scores is None and regret_scores is None:
         return None
-    if precision_scores is None:
-        return np.asarray(meta_scores, dtype=np.float32)
-    if meta_scores is None:
-        return np.asarray(precision_scores, dtype=np.float32)
-    precision = np.asarray(precision_scores, dtype=np.float32)
-    meta = np.asarray(meta_scores, dtype=np.float32)
-    geometric = np.sqrt(np.clip(precision, 0.0, 1.0) * np.clip(meta, 0.0, 1.0))
-    arithmetic = 0.5 * (precision + meta)
-    softened_floor = np.maximum(0.65 * np.minimum(precision, meta), 0.0)
-    return np.clip((0.25 * geometric) + (0.45 * arithmetic) + (0.20 * precision) + (0.10 * softened_floor), 0.0, 1.0).astype(np.float32)
+    available = [
+        np.asarray(values, dtype=np.float32)
+        for values in (precision_scores, meta_scores, regret_scores)
+        if values is not None
+    ]
+    if len(available) == 1:
+        return available[0]
+    precision = np.asarray(precision_scores, dtype=np.float32) if precision_scores is not None else None
+    meta = np.asarray(meta_scores, dtype=np.float32) if meta_scores is not None else None
+    regret = np.asarray(regret_scores, dtype=np.float32) if regret_scores is not None else None
+    if precision is None:
+        precision = 0.5 * available[0] + 0.5 * available[-1]
+    if meta is None:
+        meta = 0.5 * available[0] + 0.5 * available[-1]
+    if regret is None:
+        regret = 0.5 * available[0] + 0.5 * available[-1]
+    geometric = np.cbrt(np.clip(precision, 0.0, 1.0) * np.clip(meta, 0.0, 1.0) * np.clip(regret, 0.0, 1.0))
+    arithmetic = (precision + meta + regret) / 3.0
+    softened_floor = np.maximum(0.55 * np.minimum(np.minimum(precision, meta), regret), 0.0)
+    return np.clip((0.20 * geometric) + (0.40 * arithmetic) + (0.20 * precision) + (0.10 * meta) + (0.10 * softened_floor), 0.0, 1.0).astype(np.float32)
 
 
 def save_meta_gate(path: Path, meta_gate: Mapping[str, Any]) -> None:

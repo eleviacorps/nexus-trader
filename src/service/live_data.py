@@ -22,6 +22,9 @@ from config.project_config import (
     NEWS_EVENTS_PATH,
     PRICE_FEATURE_COLUMNS,
     SEQUENCE_LEN,
+    V9_MEMORY_BANK_ENCODER_PATH,
+    V9_MEMORY_BANK_INDEX_PATH,
+    V9_PERSONA_CALIBRATION_HISTORY_PATH,
 )
 from src.service.llm_sidecar import request_market_context, request_swarm_judgment
 from src.service.specialist_bots import run_specialist_bots
@@ -33,6 +36,7 @@ from src.quant.hybrid import build_quant_features, merge_quant_features
 from src.simulation.abm import persona_vote_breakdown, simulate_one_step
 from src.simulation.personas import default_personas
 from src.v6 import build_volatility_envelopes, detect_regime, get_historical_path_retriever, rank_branches_with_selector
+from src.v9 import classify_contradiction, load_latest_persona_state, load_memory_bank, query_memory_bank
 
 USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
 
@@ -792,6 +796,43 @@ def _build_persona_snapshot(decisions: dict[str, dict[str, float]]) -> dict[str,
     return {name: round(float(values.get("impact", 0.0)), 4) for name, values in decisions.items()}
 
 
+def _current_persona_weights(personas: Mapping[str, Any]) -> dict[str, float]:
+    state = load_latest_persona_state(V9_PERSONA_CALIBRATION_HISTORY_PATH, personas)
+    return {name: round(float(weight), 6) for name, weight in state.capital_weights.items()}
+
+
+def _memory_bank_context(sequence: np.ndarray) -> dict[str, Any]:
+    encoder, bank = load_memory_bank(V9_MEMORY_BANK_ENCODER_PATH, V9_MEMORY_BANK_INDEX_PATH)
+    if encoder is None or bank is None or sequence.shape[0] < 60:
+        return {"analog_confidence": 0.0, "bullish_probability": 0.5, "mean_distance": 0.0, "top_k_indices": []}
+    window_size = int(np.asarray(bank.get("window_size", 60)).reshape(-1)[0]) if "window_size" in bank else 60
+    window = np.asarray(sequence[-window_size:], dtype=np.float32)
+    result = query_memory_bank(encoder, bank, window)
+    return {
+        "analog_confidence": round(float(result.analog_confidence), 6),
+        "bullish_probability": round(float(result.bullish_probability), 6),
+        "mean_distance": round(float(result.mean_distance), 6),
+        "top_k_indices": result.top_k_indices,
+    }
+
+
+def _alignment_score(probability: float, branch_direction: float) -> float:
+    prob = float(np.clip(probability, 0.0, 1.0))
+    return float(prob if branch_direction >= 0.0 else (1.0 - prob))
+
+
+def _weighted_persona_bias(persona_snapshot: Mapping[str, float], persona_weights: Mapping[str, float]) -> float:
+    total_weight = 0.0
+    weighted_bias = 0.0
+    for name, impact in persona_snapshot.items():
+        weight = float(persona_weights.get(name, 0.0))
+        weighted_bias += float(impact) * weight
+        total_weight += abs(weight)
+    if total_weight <= 0.0:
+        return 0.0
+    return float(np.clip(weighted_bias / total_weight, -1.0, 1.0))
+
+
 def _llm_content(llm_context: Mapping[str, Any] | None) -> dict[str, Any]:
     if not llm_context:
         return {}
@@ -1208,8 +1249,20 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
     }
 
 
-def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symbol: str, personas: dict[str, Any], llm_content: Mapping[str, Any]) -> dict[str, Any]:
+def _branch_payload(
+    price_frame: pd.DataFrame,
+    current_row: dict[str, Any],
+    symbol: str,
+    personas: dict[str, Any],
+    llm_content: Mapping[str, Any],
+    *,
+    persona_weights: Mapping[str, float] | None = None,
+    memory_bank_context: Mapping[str, Any] | None = None,
+    contradiction_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     seed_state = simulate_one_step(current_row=current_row, personas=personas, seed=42)
+    persona_snapshot = _build_persona_snapshot(persona_vote_breakdown(seed_state))
+    weighted_persona_bias = _weighted_persona_bias(persona_snapshot, persona_weights or {})
     analog_scorer = get_historical_analog_scorer()
     analog_history = (
         price_frame[PRICE_FEATURE_COLUMNS]
@@ -1265,18 +1318,45 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
     selector_result = rank_branches_with_selector(branches, current_row, regime, envelopes, retrieval)
     selector_score_map = {entry["path_id"]: entry["selector_score"] for entry in selector_result.rationale}
     selector_rationale_map = {entry["path_id"]: entry["top_drivers"] for entry in selector_result.rationale}
+    contradiction_type = str((contradiction_context or {}).get("type", "none"))
+    contradiction_conf = _safe_float((contradiction_context or {}).get("confidence"), 0.0)
+    contradiction_long_prob = _safe_float((contradiction_context or {}).get("long_bias_probability"), 0.5)
+    contradiction_scale_map = {
+        "agreement_bull": 1.02,
+        "agreement_bear": 1.02,
+        "short_term_contrary": 0.96,
+        "long_term_contrary": 0.95,
+        "full_disagreement": 0.86,
+    }
     for branch in branches:
         path_id = branch.get("path_id")
         branch["selector_score"] = round(float(selector_score_map.get(path_id, 0.0)), 6)
         branch["selector_rationale"] = selector_rationale_map.get(path_id, [])
+        branch_direction = 1.0 if _safe_float(branch.get("predicted_prices", [last_price])[-1], last_price) >= last_price else -1.0
+        memory_alignment = _alignment_score(_safe_float((memory_bank_context or {}).get("bullish_probability"), 0.5), branch_direction)
+        persona_alignment = _alignment_score(0.5 + 0.5 * weighted_persona_bias, branch_direction)
+        contradiction_alignment = _alignment_score(contradiction_long_prob, branch_direction)
+        branch["memory_bank_alignment"] = round(float(memory_alignment), 6)
+        branch["persona_alignment"] = round(float(persona_alignment), 6)
+        branch["contradiction_alignment"] = round(float(contradiction_alignment), 6)
+        branch["v9_live_score"] = round(
+            float(
+                (
+                    0.42 * _safe_float(branch.get("selector_score"), 0.0)
+                    + 0.23 * _safe_float(branch.get("probability"), 0.0)
+                    + 0.15 * _safe_float(branch.get("branch_fitness"), 0.0)
+                    + 0.06 * _safe_float(branch.get("minority_guardrail"), 0.0)
+                    + 0.08 * memory_alignment
+                    + 0.04 * persona_alignment
+                    + 0.02 * contradiction_alignment
+                )
+                * contradiction_scale_map.get(contradiction_type, 1.0)
+            ),
+            6,
+        )
     branches = sorted(
         branches,
-        key=lambda branch: (
-            _safe_float(branch.get("selector_score"), 0.0) * 0.50
-            + _safe_float(branch.get("probability"), 0.0) * 0.30
-            + _safe_float(branch.get("branch_fitness"), 0.0) * 0.15
-            + _safe_float(branch.get("minority_guardrail"), 0.0) * 0.05
-        ),
+        key=lambda branch: _safe_float(branch.get("v9_live_score"), 0.0),
         reverse=True,
     )
 
@@ -1304,6 +1384,15 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             * collapse.consensus_score,
         ),
     )
+    overall_confidence = float(
+        np.clip(
+            overall_confidence
+            * contradiction_scale_map.get(contradiction_type, 1.0)
+            * (0.92 + 0.08 * _safe_float((memory_bank_context or {}).get("analog_confidence"), 0.0)),
+            0.0,
+            0.94,
+        )
+    )
     price_change = last_price - float(price_frame.iloc[-2]["close"]) if len(price_frame) > 1 else 0.0
     branch_conversation = _build_branch_conversation(branches, llm_content, {"scenario_bias": "bullish" if predicted_center >= last_price else "bearish"})
     return {
@@ -1327,6 +1416,8 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "analog_bias": round(float(analog_snapshot.directional_bias), 6),
             "analog_confidence": round(float(analog_snapshot.confidence), 6),
             "analog_support": int(analog_snapshot.support),
+            "memory_bank_bias": round(_safe_float(current_row.get("memory_bank_bias"), 0.0), 6),
+            "memory_bank_confidence": round(_safe_float(current_row.get("memory_bank_confidence"), 0.0), 6),
             "branch_count": len(branches),
             "detected_regime": regime.dominant_regime,
             "regime_confidence": round(float(regime.dominant_confidence), 6),
@@ -1334,7 +1425,7 @@ def _branch_payload(price_frame: pd.DataFrame, current_row: dict[str, Any], symb
             "selector_top_branch_id": selector_result.selected_branch_id,
             "selector_top_score": round(float(selector_result.selected_score), 6),
         },
-        "personas": _build_persona_snapshot(persona_vote_breakdown(seed_state)),
+        "personas": persona_snapshot,
         "branches": branches,
         "cone": cone_points,
         "branch_conversation": branch_conversation,
@@ -1380,6 +1471,7 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
         raise ValueError(f"Not enough live rows to build a sequence of length {sequence_len}. Only found {min_rows}.")
 
     fused = np.concatenate([price_block[:min_rows], news_matrix[:min_rows], crowd_matrix[:min_rows]], axis=1).astype(np.float32, copy=False)
+    memory_bank_context = _memory_bank_context(fused)
     live_frame = price_frame.iloc[:min_rows].copy()
     latest = live_frame.iloc[-1].to_dict()
     latest["macro_bias"] = macro["macro_bias"]
@@ -1401,6 +1493,8 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     latest["analog_bias"] = round(float(analog_snapshot.directional_bias), 4)
     latest["analog_confidence"] = round(float(analog_snapshot.confidence), 4)
     latest["analog_support"] = int(analog_snapshot.support)
+    latest["memory_bank_bias"] = round((float(memory_bank_context["bullish_probability"]) - 0.5) * 2.0, 4)
+    latest["memory_bank_confidence"] = round(float(memory_bank_context["analog_confidence"]), 4)
     llm_context_input = {
         "symbol": symbol,
         "market": {
@@ -1456,6 +1550,7 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     latest["llm_noise_bias"] = round(0.15 * latest["llm_retail_bias"], 4)
 
     personas = default_personas()
+    persona_weights = _current_persona_weights(personas)
     persona_weight_tilts = _apply_llm_persona_tilts(personas, llm_content)
     feeds = {
         "news": news_items,
@@ -1485,12 +1580,51 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     latest["bot_regime_reversal"] = round(_safe_float(regime_affinity.get("reversal"), 0.0), 4)
     latest["bot_regime_macro_shock"] = round(_safe_float(regime_affinity.get("macro_shock"), 0.0), 4)
     latest["bot_regime_balanced"] = round(_safe_float(regime_affinity.get("balanced"), 0.0), 4)
-    payload = _branch_payload(live_frame, latest, symbol, personas=personas, llm_content=llm_content)
+    horizon_predictions = {int(item.get("minutes", 0)): item for item in bot_swarm.get("aggregate", {}).get("horizon_predictions", [])}
+    contradiction = classify_contradiction(
+        prob_5m=_safe_float(horizon_predictions.get(5, {}).get("bullish_probability"), 0.5),
+        prob_15m=_safe_float(horizon_predictions.get(15, {}).get("bullish_probability"), 0.5),
+        prob_30m=_safe_float(horizon_predictions.get(30, {}).get("bullish_probability"), 0.5),
+        conf_5m=_safe_float(bot_swarm.get("aggregate", {}).get("confidence"), 0.0),
+        conf_15m=_safe_float(bot_swarm.get("aggregate", {}).get("confidence"), 0.0),
+        conf_30m=_safe_float(bot_swarm.get("aggregate", {}).get("confidence"), 0.0),
+    )
+    contradiction_payload = {
+        "type": contradiction.contradiction_type.value,
+        "confidence": round(float(contradiction.confidence), 6),
+        "cone_treatment": contradiction.cone_treatment,
+        "long_bias_probability": round(
+            float(
+                0.5
+                * _safe_float(horizon_predictions.get(15, {}).get("bullish_probability"), 0.5)
+                + 0.5
+                * _safe_float(horizon_predictions.get(30, {}).get("bullish_probability"), 0.5)
+            ),
+            6,
+        ),
+    }
+    payload = _branch_payload(
+        live_frame,
+        latest,
+        symbol,
+        personas=personas,
+        llm_content=llm_content,
+        persona_weights=persona_weights,
+        memory_bank_context=memory_bank_context,
+        contradiction_context=contradiction_payload,
+    )
     payload["persona_weight_tilts"] = persona_weight_tilts
+    payload["persona_weights"] = persona_weights
     payload["feeds"] = feeds
     payload["bot_swarm"] = bot_swarm
     payload["llm_context"] = llm_context
     payload["current_row"] = latest
+    payload["memory_bank_context"] = memory_bank_context
+    payload["contradiction"] = contradiction_payload
+    if isinstance(payload.get("simulation"), dict):
+        payload["simulation"]["contradiction_type"] = contradiction.contradiction_type.value
+        payload["simulation"]["contradiction_confidence"] = round(float(contradiction.confidence), 6)
+        payload["simulation"]["cone_treatment"] = contradiction.cone_treatment
     payload["technical_analysis"] = technical_analysis
     payload["analog_context"] = analog_snapshot.to_dict()
     payload["branch_graph"] = _build_branch_graph(

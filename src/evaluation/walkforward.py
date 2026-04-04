@@ -51,6 +51,7 @@ from src.training.train_tft import (
     collect_multihorizon_metrics,
     split_multihorizon_heads_numpy,
 )
+from src.v9.regret_gate import regret_gate_scores
 
 try:
     import torch  # type: ignore
@@ -627,7 +628,7 @@ def _combined_gate_scores(
     meta_gate: dict[str, Any] | None,
     *,
     context_features: np.ndarray | None = None,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     try:
         precision_scores = (
             apply_precision_gate(probabilities, precision_gate, context_features=context_features)
@@ -640,8 +641,26 @@ def _combined_gate_scores(
         meta_scores = apply_meta_gate(probabilities, meta_gate, context_features=context_features) if meta_gate is not None else None
     except Exception:
         meta_scores = None
-    combined_scores = combine_gate_scores(precision_scores, meta_scores)
-    return precision_scores, meta_scores, combined_scores
+    regret_scores = None
+    try:
+        probability_array = np.asarray(probabilities, dtype=np.float32)
+        confidence_probabilities = None
+        if probability_array.ndim == 2 and probability_array.shape[1] > 8:
+            horizon_count = probability_array.shape[1] // 3
+            direction_probabilities, _, confidence_parts = split_multihorizon_heads_numpy(probability_array, horizon_count)
+            confidence_probabilities = confidence_parts[:, -1] if confidence_parts.shape[1] else None
+            base_probabilities = direction_probabilities[:, -1]
+        else:
+            base_probabilities = probability_array.reshape(-1)
+        regret_scores = regret_gate_scores(
+            base_probabilities,
+            confidence_probabilities=confidence_probabilities,
+            context_features=context_features,
+        )
+    except Exception:
+        regret_scores = None
+    combined_scores = combine_gate_scores(precision_scores, meta_scores, regret_scores)
+    return precision_scores, meta_scores, regret_scores, combined_scores
 
 
 def run_walkforward_evaluation(
@@ -718,7 +737,7 @@ def run_walkforward_evaluation(
             calibration_probabilities.append(strategic_val["strategic_probability"])
             calibration_hold_probabilities.append(strategic_val["strategic_hold_probability"])
             calibration_conf_probabilities.append(strategic_val["strategic_confidence_probability"])
-            _, _, combined_gate = _combined_gate_scores(
+            _, _, _, combined_gate = _combined_gate_scores(
                 probabilities_val,
                 precision_gate,
                 meta_gate,
@@ -812,7 +831,7 @@ def run_walkforward_evaluation(
         gate_scores = None
         gate_threshold = 0.5
         if multi_horizon:
-            _, _, gate_scores = _combined_gate_scores(
+            _, _, _, gate_scores = _combined_gate_scores(
                 probabilities_year,
                 precision_gate,
                 meta_gate,
