@@ -11,7 +11,7 @@ from src.evaluation.walkforward import (
     optimize_backtest_thresholds,
 )
 from src.pipeline.fusion import GATE_CONTEXT_COLUMNS
-from src.training.train_tft import apply_precision_gate, train_precision_gate
+from src.training.train_tft import apply_precision_gate, quant_tradeability_score, train_precision_gate
 
 
 class WalkforwardUtilityTests(unittest.TestCase):
@@ -158,6 +158,33 @@ class WalkforwardUtilityTests(unittest.TestCase):
         self.assertTrue(np.all(scores >= 0.0))
         self.assertTrue(np.all(scores <= 1.0))
         self.assertEqual(gate["context_feature_names"], list(GATE_CONTEXT_COLUMNS))
+        self.assertGreater(gate["threshold"], 0.0)
+        self.assertLess(gate["threshold"], 1.0)
+        self.assertGreater(gate["train_participation"], 0.0)
+
+    def test_quant_tradeability_score_prefers_stable_context(self):
+        stable = np.asarray([[0.30, 0.25, 0.40, 1.0, 0.60, 0.55, 0.20, 0.20, 0.15, 0.80, 0.20, 0.15, 0.50, 0.70, 0.25, 0.30, 0.10, 0.75, 0.70, 0.65, 0.20, 0.10]], dtype=np.float32)
+        unstable = np.asarray([[0.60, 0.55, 0.35, 0.0, 0.10, 0.05, 0.92, 0.95, 0.90, 0.05, 1.40, 0.98, 0.10, 0.05, -0.02, 0.05, 0.98, 0.15, 0.10, 0.10, 0.90, 0.95]], dtype=np.float32)
+        scores = quant_tradeability_score(np.vstack([stable, unstable]), GATE_CONTEXT_COLUMNS)
+        self.assertEqual(scores.shape, (2,))
+        self.assertGreater(float(scores[0]), float(scores[1]))
+
+    def test_optimize_backtest_thresholds_can_use_low_gate_quantiles(self):
+        targets = np.asarray([1, 0, 1, 0, 1, 0, 1, 0, 1, 0], dtype=np.float32)
+        probabilities = np.asarray([0.61, 0.41, 0.59, 0.38, 0.62, 0.36, 0.58, 0.42, 0.60, 0.39], dtype=np.float32)
+        confidence = np.asarray([0.8] * 10, dtype=np.float32)
+        hold = np.asarray([0.2] * 10, dtype=np.float32)
+        gate_scores = np.asarray([0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17], dtype=np.float32)
+        result = optimize_backtest_thresholds(
+            targets,
+            probabilities,
+            hold_probabilities=hold,
+            confidence_probabilities=confidence,
+            gate_scores=gate_scores,
+            gate_threshold=0.2,
+        )
+        self.assertLess(result["gate_threshold"], 0.2)
+        self.assertGreaterEqual(result["gate_threshold"], float(gate_scores.min()))
 
 
 if __name__ == "__main__":

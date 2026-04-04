@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,102 @@ def build_ensemble_prediction(payload: dict[str, Any], model_prediction: dict[st
     }
 
 
+def _model_horizon_probabilities(model_prediction: dict[str, Any] | None) -> dict[int, float]:
+    horizon_probabilities = ((model_prediction or {}).get("horizon_probabilities") or {}) if isinstance(model_prediction, dict) else {}
+    mapping: dict[int, float] = {}
+    for key, value in horizon_probabilities.items():
+        if str(key).startswith("hold_") or str(key).startswith("confidence_"):
+            continue
+        digits = "".join(ch for ch in str(key) if ch.isdigit())
+        if not digits:
+            continue
+        mapping[int(digits)] = float(value)
+    return mapping
+
+
+def build_v8_direct_prediction(payload: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    current_price = float(market.get("current_price", 0.0) or 0.0)
+    horizon_probabilities = _model_horizon_probabilities(model_prediction)
+    raw_horizons = ((model_prediction or {}).get("horizon_probabilities") or {}) if isinstance(model_prediction, dict) else {}
+    primary_probability = float(horizon_probabilities.get(15, (model_prediction or {}).get("bullish_probability", 0.5) or 0.5))
+    confidence_value = float(raw_horizons.get("confidence_15m", raw_horizons.get("confidence_30m", 0.0)) or 0.0)
+    signal = "bullish" if primary_probability >= float((model_prediction or {}).get("threshold", 0.5) or 0.5) else "bearish"
+    horizon_predictions = []
+    atr = max(float(payload.get("current_row", {}).get("atr_14", current_price * 0.0015) or current_price * 0.0015), 0.25)
+    scale_map = {5: 0.22, 10: 0.36, 15: 0.52, 30: 1.00}
+    for minutes in [5, 10, 15, 30]:
+        probability = float(horizon_probabilities.get(minutes, primary_probability))
+        bias = (probability - 0.5) * 2.0
+        target_price = current_price + (atr * scale_map.get(minutes, 0.36) * bias)
+        horizon_predictions.append(
+            {
+                "minutes": minutes,
+                "target_price": round(float(target_price), 5),
+                "probability": round(probability, 6),
+                "confidence": round(confidence_value, 6),
+            }
+        )
+    return {
+        "mode": "v8_direct",
+        "bullish_probability": round(primary_probability, 6),
+        "bearish_probability": round(1.0 - primary_probability, 6),
+        "signal": signal,
+        "confidence": round(confidence_value, 6),
+        "components": {
+            "model_probability": round(primary_probability, 6),
+        },
+        "weights": {"model": 1.0},
+        "regime_mix": {},
+        "horizon_predictions": horizon_predictions,
+    }
+
+
+def build_v8_direct_forecast(payload: dict[str, Any], model_prediction: dict[str, Any] | None) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    current_price = float(market.get("current_price", 0.0) or 0.0)
+    atr = max(float(payload.get("current_row", {}).get("atr_14", current_price * 0.0015) or current_price * 0.0015), 0.25)
+    cone = list(payload.get("cone", []) if isinstance(payload, dict) else [])
+    cone_by_minutes = {
+        int(float(point.get("horizon", 0.0) or 0.0) * 5): point
+        for point in cone
+        if point.get("horizon") is not None
+    }
+    horizon_probabilities = _model_horizon_probabilities(model_prediction)
+    primary_probability = float(horizon_probabilities.get(15, (model_prediction or {}).get("bullish_probability", 0.5) or 0.5))
+    scale_map = {5: 0.22, 10: 0.36, 15: 0.52, 30: 1.00}
+    points = []
+    for minutes in [5, 10, 15, 30]:
+        probability = float(horizon_probabilities.get(minutes, primary_probability))
+        bias = (probability - 0.5) * 2.0
+        final_price = current_price + (atr * scale_map.get(minutes, 0.36) * bias)
+        anchor = cone_by_minutes.get(minutes, {})
+        points.append(
+            {
+                "minutes": minutes,
+                "timestamp": anchor.get("timestamp"),
+                "branch_center": round(float(anchor.get("center_price", current_price) or current_price), 5),
+                "bot_target": round(current_price, 5),
+                "llm_target": round(current_price, 5),
+                "final_price": round(float(final_price), 5),
+            }
+        )
+    return {
+        "mode": "v8_direct",
+        "points": points,
+        "horizon_table": [
+            {
+                "minutes": item["minutes"],
+                "final_price": item["final_price"],
+                "branch_center": item["branch_center"],
+                "bot_target": item["bot_target"],
+                "llm_target": item["llm_target"],
+            }
+            for item in points
+        ],
+    }
+
+
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
     if len(sequence) != sequence_len:
         raise ValueError(f'Expected sequence length {sequence_len}, got {len(sequence)}')
@@ -308,6 +405,7 @@ def create_app() -> Any:
 
     server = ModelServer()
     app = FastAPI(title='Nexus Trader Inference API', version='0.2.0')
+    default_stack_mode = os.getenv("NEXUS_STACK_MODE", "hybrid").strip().lower() or "hybrid"
 
     @app.get('/health')
     def health():
@@ -328,7 +426,7 @@ def create_app() -> Any:
         return load_json_artifact(FUTURE_BRANCHES_PATH) if FUTURE_BRANCHES_PATH.exists() else []
 
     @app.get('/api/simulate-live')
-    def simulate_live(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio'):
+    def simulate_live(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio', stack_mode: str | None = None):
         payload = build_live_simulation(symbol, sequence_len=server.sequence_len, llm_provider=llm_provider)
         sequence = payload.pop('sequence', None)
         if sequence:
@@ -338,14 +436,21 @@ def create_app() -> Any:
                 payload['model_prediction'] = {'error': str(exc)}
         else:
             payload['model_prediction'] = None
-        payload['final_forecast'] = _build_final_forecast(
-            payload,
-            payload.get('bot_swarm', {}),
-            ((payload.get('llm_context') or {}).get('content') or {}),
-            payload.get('model_prediction'),
-        )
-        payload['ensemble_prediction'] = build_ensemble_prediction(payload, payload.get('model_prediction'))
+        active_stack_mode = (stack_mode or default_stack_mode).strip().lower() or "hybrid"
+        if active_stack_mode == "v8_direct":
+            payload['final_forecast'] = build_v8_direct_forecast(payload, payload.get('model_prediction'))
+            payload['ensemble_prediction'] = build_v8_direct_prediction(payload, payload.get('model_prediction'))
+        else:
+            payload['final_forecast'] = _build_final_forecast(
+                payload,
+                payload.get('bot_swarm', {}),
+                ((payload.get('llm_context') or {}).get('content') or {}),
+                payload.get('model_prediction'),
+            )
+            payload['ensemble_prediction'] = build_ensemble_prediction(payload, payload.get('model_prediction'))
         payload['history_entry'] = record_simulation_history(payload, payload.get('model_prediction'))
+        payload['stack_mode'] = active_stack_mode
+        payload['manual_trading_mode'] = active_stack_mode == "v8_direct"
         return payload
 
     @app.get('/api/live-monitor')

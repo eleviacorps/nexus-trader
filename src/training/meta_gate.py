@@ -203,8 +203,10 @@ def combine_gate_scores(
         return np.asarray(precision_scores, dtype=np.float32)
     precision = np.asarray(precision_scores, dtype=np.float32)
     meta = np.asarray(meta_scores, dtype=np.float32)
-    combined = np.sqrt(np.clip(precision, 0.0, 1.0) * np.clip(meta, 0.0, 1.0))
-    return np.clip((0.55 * combined) + (0.25 * precision) + (0.20 * meta), 0.0, 1.0).astype(np.float32)
+    geometric = np.sqrt(np.clip(precision, 0.0, 1.0) * np.clip(meta, 0.0, 1.0))
+    arithmetic = 0.5 * (precision + meta)
+    softened_floor = np.maximum(0.65 * np.minimum(precision, meta), 0.0)
+    return np.clip((0.25 * geometric) + (0.45 * arithmetic) + (0.20 * precision) + (0.10 * softened_floor), 0.0, 1.0).astype(np.float32)
 
 
 def save_meta_gate(path: Path, meta_gate: Mapping[str, Any]) -> None:

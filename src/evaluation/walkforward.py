@@ -553,12 +553,12 @@ def optimize_backtest_thresholds(
         "gate_threshold": float(gate_threshold) if gate_threshold is not None else 0.5,
         "score": 0.0,
     }
-    target_participation = 0.14
+    target_participation = 0.18
     hold_candidates = np.linspace(0.55, 0.85, 7) if hold_probabilities is not None else [0.5]
     gate_candidates: list[float]
     if gate_scores is not None:
         gate_values = np.asarray(gate_scores, dtype=np.float32)
-        quantile_points = [0.40, 0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.99]
+        quantile_points = [0.08, 0.12, 0.16, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.88, 0.94, 0.98]
         gate_candidates = sorted({float(np.quantile(gate_values, q)) for q in quantile_points})
         if gate_threshold is not None:
             gate_candidates.append(float(gate_threshold))
@@ -583,14 +583,17 @@ def optimize_backtest_thresholds(
                         confidence_probabilities=confidence_probabilities,
                     )
                     participation = float(report["participation_rate"])
-                    participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / target_participation)
+                    participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / max(1e-6, target_participation))
+                    nonzero_trade_reward = 1.0 if float(report["trade_count"]) > 0 else 0.0
+                    drawdown_penalty = min(1.0, float(report.get("max_drawdown_units", 0.0)) / max(1.0, float(report["trade_count"])))
                     score = (
-                        float(report["win_rate"]) * 0.55
-                        + float(report["avg_unit_pnl"]) * 0.25
-                        + participation_reward * 0.15
-                        + (1.0 - min(1.0, participation / 0.35)) * 0.05
+                        float(report["win_rate"]) * 0.42
+                        + float(report["avg_unit_pnl"]) * 0.28
+                        + participation_reward * 0.18
+                        + nonzero_trade_reward * 0.08
+                        + (1.0 - drawdown_penalty) * 0.04
                     )
-                    if 0.01 <= participation <= 0.35 and score > best["score"]:
+                    if 0.02 <= participation <= 0.45 and score > best["score"]:
                         best = {
                             "decision_threshold": float(threshold),
                             "confidence_floor": float(floor),

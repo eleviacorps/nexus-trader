@@ -412,6 +412,83 @@ def _sigmoid(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-values))
 
 
+def _soft_clip(values: np.ndarray, lower: float, upper: float) -> np.ndarray:
+    span = max(1e-6, float(upper - lower))
+    return np.clip((np.asarray(values, dtype=np.float32) - float(lower)) / span, 0.0, 1.0).astype(np.float32)
+
+
+def quant_tradeability_score(
+    context_features: np.ndarray | None,
+    context_feature_names: Sequence[str] | None = None,
+) -> np.ndarray | None:
+    if context_features is None:
+        return None
+    context = np.asarray(context_features, dtype=np.float32)
+    if context.ndim != 2:
+        raise ValueError("context_features must be a 2D array.")
+    names = list(context_feature_names or GATE_CONTEXT_COLUMNS)
+    if context.shape[1] != len(names):
+        raise ValueError("context_feature_names must align to context_features.")
+    idx = {name: position for position, name in enumerate(names)}
+
+    transition_good = 1.0 - _soft_clip(context[:, idx["gate_ctx_transition_risk"]], 0.20, 0.95)
+    tail_good = 1.0 - _soft_clip(context[:, idx["gate_ctx_tail_risk"]], 0.20, 0.98)
+    vol_good = _soft_clip(context[:, idx["gate_ctx_vol_realism"]], 0.05, 0.65)
+    fair_good = 1.0 - _soft_clip(context[:, idx["gate_ctx_fair_value_abs"]], 0.35, 1.40)
+    route_good = _soft_clip(context[:, idx["gate_ctx_route_confidence"]], 0.06, 0.66)
+    regime_good = _soft_clip(context[:, idx["gate_ctx_regime_strength"]], 0.08, 0.60)
+    persistence_good = _soft_clip(context[:, idx["gate_ctx_regime_persistence"]], 0.04, 0.45)
+    chop_good = 1.0 - _soft_clip(context[:, idx["gate_ctx_chop_risk"]], 0.40, 1.15)
+    dynamics_good = 0.55 + (0.45 * _soft_clip(context[:, idx["gate_ctx_dynamics_confidence"]], 0.10, 0.85))
+    trend_structure = 0.60 + (0.40 * np.maximum(
+        _soft_clip(context[:, idx["gate_ctx_dynamics_trend"]], 0.10, 0.85),
+        _soft_clip(context[:, idx["gate_ctx_dynamics_breakout"]], 0.10, 0.85),
+    ))
+    route_bias_penalty = 1.0 - (0.35 * np.clip(np.abs(context[:, idx["gate_ctx_route_bias"]]), 0.0, 1.0))
+    state_balance = 1.0 - (0.30 * np.clip(context[:, idx["gate_ctx_state_imbalance"]], 0.0, 1.0))
+    kalman_good = 1.0 - _soft_clip(context[:, idx["gate_ctx_kalman_dislocation_abs"]], 0.25, 1.35)
+
+    components = np.stack(
+        [
+            transition_good,
+            tail_good,
+            vol_good,
+            fair_good,
+            route_good,
+            regime_good,
+            persistence_good,
+            chop_good,
+            dynamics_good,
+            trend_structure,
+            route_bias_penalty,
+            state_balance,
+            kalman_good,
+        ],
+        axis=1,
+    ).astype(np.float32)
+    weights = np.asarray(
+        [1.15, 1.05, 1.10, 0.90, 1.00, 1.00, 0.85, 0.80, 0.95, 0.85, 0.55, 0.55, 0.75],
+        dtype=np.float32,
+    )
+    score = (components * weights).sum(axis=1) / max(1e-6, float(weights.sum()))
+    return np.clip(score, 0.0, 1.0).astype(np.float32)
+
+
+def blend_gate_scores_with_quant_context(
+    scores: np.ndarray,
+    context_features: np.ndarray | None,
+    context_feature_names: Sequence[str] | None = None,
+    *,
+    score_weight: float = 0.70,
+    quant_weight: float = 0.30,
+) -> np.ndarray:
+    base_scores = np.asarray(scores, dtype=np.float32)
+    if context_features is None:
+        return np.clip(base_scores, 0.0, 1.0).astype(np.float32)
+    quant_scores = quant_tradeability_score(context_features, context_feature_names)
+    return np.clip((float(score_weight) * base_scores) + (float(quant_weight) * quant_scores), 0.0, 1.0).astype(np.float32)
+
+
 def train_precision_gate(
     probabilities: np.ndarray,
     targets: np.ndarray,
@@ -444,26 +521,29 @@ def train_precision_gate(
         target_hold_any = strategic_hold_target.copy()
 
     minority_risk_target = np.maximum(1.0 - target_direction_agreement, target_hold_any).astype(np.float32)
-    tradeable_target = (
-        (strategic_hold_target < 0.45)
-        & (strategic_conf_target >= 0.40)
-        & (target_direction_agreement >= 0.5)
-        & (minority_risk_target < 0.5)
+    hold_room = 1.0 - _soft_clip(strategic_hold_target, 0.18, 0.80)
+    confidence_room = _soft_clip(strategic_conf_target, 0.22, 0.82)
+    minority_room = 1.0 - np.clip(minority_risk_target, 0.0, 1.0)
+    agreement_room = np.clip(target_direction_agreement, 0.0, 1.0)
+    base_tradeable = (
+        (0.30 * hold_room)
+        + (0.30 * confidence_room)
+        + (0.25 * minority_room)
+        + (0.15 * agreement_room)
     ).astype(np.float32)
+    context_tradeability = None
     if context_features is not None and len(context_feature_names) == np.asarray(context_features).shape[1]:
-        context = np.asarray(context_features, dtype=np.float32)
-        idx = {name: position for position, name in enumerate(context_feature_names)}
-        stable_context = (
-            (context[:, idx["gate_ctx_transition_risk"]] < 0.62)
-            & (context[:, idx["gate_ctx_tail_risk"]] < 0.70)
-            & (context[:, idx["gate_ctx_vol_realism"]] > 0.20)
-            & (context[:, idx["gate_ctx_fair_value_abs"]] < 0.92)
-            & (context[:, idx["gate_ctx_regime_strength"]] > 0.25)
-            & (context[:, idx["gate_ctx_regime_persistence"]] > 0.18)
-            & (context[:, idx["gate_ctx_chop_risk"]] < 0.92)
-        ).astype(np.float32)
-        tradeable_target = (tradeable_target * stable_context).astype(np.float32)
-    labels = (tradeable_target * (strategic_dir_pred == strategic_dir_target).astype(np.float32)).astype(np.float32)
+        context_tradeability = quant_tradeability_score(context_features, context_feature_names)
+    if context_tradeability is None:
+        tradeable_target = base_tradeable
+    else:
+        tradeable_target = ((0.55 * base_tradeable) + (0.45 * context_tradeability)).astype(np.float32)
+    direction_correct = (strategic_dir_pred == strategic_dir_target).astype(np.float32)
+    labels = np.clip(
+        direction_correct * tradeable_target,
+        0.0,
+        1.0,
+    ).astype(np.float32)
     if len(np.unique(labels)) < 2:
         return {
             "feature_names": feature_names,
@@ -485,24 +565,40 @@ def train_precision_gate(
         grad_b = float(error.mean())
         weights -= lr * grad_w
         bias -= lr * grad_b
-    final_probs = _sigmoid(features @ weights + bias)
-    best_threshold = float(np.quantile(final_probs, 0.82)) if final_probs.size else 0.5
+    final_probs = blend_gate_scores_with_quant_context(
+        _sigmoid(features @ weights + bias),
+        context_features,
+        context_feature_names,
+    )
+    best_threshold = float(np.quantile(final_probs, 0.74)) if final_probs.size else 0.5
     best_score = float("-inf")
-    target_participation = 0.14
-    for threshold_candidate in np.linspace(0.25, 0.85, 25):
+    target_participation = 0.18
+    threshold_candidates = sorted(
+        {
+            float(candidate)
+            for candidate in np.concatenate(
+                [
+                    np.linspace(0.15, 0.75, 25, dtype=np.float32),
+                    np.quantile(final_probs, np.asarray([0.35, 0.45, 0.55, 0.65, 0.72, 0.78, 0.84, 0.90], dtype=np.float32)),
+                ]
+            )
+        }
+    )
+    for threshold_candidate in threshold_candidates:
         active = final_probs >= float(threshold_candidate)
         participation = float(active.mean()) if active.size else 0.0
-        if participation < 0.01 or participation > 0.40:
+        if participation < 0.02 or participation > 0.55:
             continue
         precision = float(labels[active].mean()) if active.any() else 0.0
         abstain_quality = 1.0 - (float(labels[~active].mean()) if np.any(~active) else 0.0)
+        recall = float(active[labels >= 0.55].mean()) if np.any(labels >= 0.55) else 0.0
         participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / target_participation)
-        score = (0.62 * precision) + (0.18 * abstain_quality) + (0.20 * participation_reward)
+        score = (0.46 * precision) + (0.20 * recall) + (0.12 * abstain_quality) + (0.22 * participation_reward)
         if score > best_score:
             best_score = score
             best_threshold = float(threshold_candidate)
     if final_probs.size and np.mean(final_probs >= best_threshold) < 0.005:
-        best_threshold = float(np.quantile(final_probs, max(0.60, 1.0 - target_participation)))
+        best_threshold = float(np.quantile(final_probs, max(0.52, 1.0 - target_participation)))
     return {
         "feature_names": feature_names,
         "weights": [float(value) for value in weights],
@@ -513,6 +609,7 @@ def train_precision_gate(
         "train_precision": float(labels[final_probs >= best_threshold].mean()) if np.any(final_probs >= best_threshold) else 0.0,
         "positive_rate": float(labels.mean()) if labels.size else 0.0,
         "tradeable_rate": float(tradeable_target.mean()) if labels.size else 0.0,
+        "quant_tradeability_mean": float(context_tradeability.mean()) if context_tradeability is not None and context_tradeability.size else None,
         "context_feature_names": context_feature_names,
     }
 
@@ -531,7 +628,12 @@ def apply_precision_gate(
             features = base_features
         else:
             raise ValueError("Precision gate weight dimension does not match expected feature count.")
-    return _sigmoid(features @ weights + bias).astype(np.float32)
+    context_names = gate.get("context_feature_names") or list(GATE_CONTEXT_COLUMNS)
+    return blend_gate_scores_with_quant_context(
+        _sigmoid(features @ weights + bias),
+        context_features,
+        context_names,
+    )
 
 
 def evaluate_binary_model(

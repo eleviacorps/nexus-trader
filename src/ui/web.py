@@ -10,212 +10,448 @@ def render_web_app_html() -> str:
   <title>Nexus Trader Simulator</title>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
     :root {
-      --bg: #071018;
-      --panel: rgba(10, 22, 34, 0.92);
-      --panel-alt: rgba(16, 31, 47, 0.95);
-      --text: #eef5fb;
-      --muted: #92a8b8;
-      --border: rgba(255,255,255,0.08);
-      --bull: #2ecc71;
-      --bear: #ff5a5f;
-      --accent: #4da3ff;
-      --cone: rgba(46, 204, 113, 0.18);
-      --shadow: 0 16px 40px rgba(0,0,0,0.28);
+      --bg-black: #050505;
+      --bg-deep: #080808;
+      --bg-soft: #0b0b0b;
+      --card-black: rgba(24, 24, 24, 0.55);
+      --card-elevated: rgba(32, 32, 32, 0.46);
+      --card-dense: rgba(18, 18, 18, 0.72);
+      --soft-highlight: rgba(255, 255, 255, 0.08);
+      --text: #ffffff;
+      --text-secondary: rgba(255, 255, 255, 0.72);
+      --text-muted: rgba(255, 255, 255, 0.45);
+      --muted: rgba(255, 255, 255, 0.45);
+      --border: rgba(255, 255, 255, 0.06);
+      --accent-green: #00e38c;
+      --accent-red: #ff4d57;
+      --accent-blue: #5ba7ff;
+      --accent-amber: #ffc857;
+      --bull: #00e38c;
+      --bear: #ff4d57;
+      --accent: #5ba7ff;
+      --deep-wine: #2a0008;
+      --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      --shadow-soft: 18px 18px 36px rgba(0, 0, 0, 0.36), -8px -8px 18px rgba(255, 255, 255, 0.02);
     }
     * { box-sizing: border-box; }
+    html { color-scheme: dark; }
     body {
       margin: 0;
       min-height: 100vh;
       color: var(--text);
-      font-family: "Segoe UI", system-ui, sans-serif;
+      font-family: "Inter", system-ui, sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(77,163,255,0.10), transparent 26%),
-        radial-gradient(circle at top right, rgba(46,204,113,0.12), transparent 28%),
-        linear-gradient(160deg, #04090e, #071018 46%, #091722);
+        radial-gradient(circle at top left, rgba(120, 0, 0, 0.18), transparent 40%),
+        radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.03), transparent 35%),
+        radial-gradient(circle at 12% 14%, rgba(86, 0, 15, 0.18), transparent 18%),
+        radial-gradient(circle at 88% 18%, rgba(255, 77, 87, 0.06), transparent 20%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 45%),
+        #050505;
+      position: relative;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at center, transparent 60%, rgba(0, 0, 0, 0.38) 100%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 3px);
+      opacity: 0.55;
+      mix-blend-mode: screen;
     }
     .shell {
-      max-width: 1780px;
+      position: relative;
+      z-index: 1;
+      max-width: 1880px;
       margin: 0 auto;
-      padding: 22px;
+      padding: 28px 26px 36px;
       display: grid;
       gap: 18px;
     }
-    .hero {
+    .status-header {
       display: flex;
       justify-content: space-between;
-      align-items: end;
-      gap: 16px;
+      align-items: flex-start;
+      gap: 18px;
       flex-wrap: wrap;
     }
-    .hero h1 {
-      margin: 0;
-      font-size: clamp(28px, 4vw, 44px);
-      letter-spacing: 0.02em;
+    .header-time {
+      display: grid;
+      gap: 6px;
     }
-    .hero p {
-      margin: 8px 0 0;
-      max-width: 920px;
-      color: var(--muted);
-      line-height: 1.55;
+    .header-time-value {
+      font-family: "JetBrains Mono", monospace;
+      font-size: clamp(56px, 7vw, 72px);
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      text-shadow: 0 8px 32px rgba(255, 77, 87, 0.12);
+    }
+    .header-time-subtitle {
+      color: var(--text-secondary);
+      font-size: 14px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .header-copy {
+      color: var(--text-muted);
+      max-width: 720px;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+    .header-pills {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: 860px;
     }
     .pill {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: rgba(255,255,255,0.04);
-      font-size: 12px;
-      color: var(--text);
-    }
-    .panel, .card, .controls {
-      border-radius: 18px;
-      border: 1px solid var(--border);
-      background: linear-gradient(180deg, var(--panel-alt), var(--panel));
-      box-shadow: var(--shadow);
-    }
-    .controls {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      padding: 14px;
-    }
-    .control {
-      display: grid;
-      gap: 6px;
-    }
-    label {
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-    }
-    select, button, input[type="checkbox"] {
-      accent-color: var(--bull);
-    }
-    select, button {
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(255,255,255,0.06);
-      color: var(--text);
+      min-height: 38px;
       padding: 10px 14px;
-      font-size: 14px;
-    }
-    button {
-      cursor: pointer;
-      font-weight: 700;
-      background: linear-gradient(135deg, #1d9b61, #156d45);
-    }
-    button:hover { filter: brightness(1.08); }
-    .toggle {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 22px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .status {
-      margin-left: auto;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(10, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .card {
-      padding: 16px;
-      min-height: 110px;
-    }
-    .label {
-      color: var(--muted);
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(24, 24, 24, 0.42);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.22);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      color: var(--text-secondary);
       font-size: 12px;
       text-transform: uppercase;
-      letter-spacing: 0.14em;
+      letter-spacing: 0.12em;
+      font-family: "JetBrains Mono", monospace;
     }
-    .value {
-      margin-top: 10px;
-      font-size: clamp(22px, 2vw, 32px);
-      font-weight: 700;
-    }
-    .sub {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .main-grid, .analysis-grid, .intel-grid, .graph-grid, .footer-grid {
+    .hero-grid,
+    .grid,
+    .main-grid,
+    .analysis-grid,
+    .intel-grid,
+    .graph-grid,
+    .footer-grid {
       display: grid;
       gap: 18px;
-      align-items: start;
+      align-items: stretch;
     }
-    .main-grid {
-      grid-template-columns: minmax(0, 1.35fr) minmax(0, 1.35fr) minmax(340px, 0.9fr);
+    .hero-grid {
+      grid-template-columns: 1.2fr 1.1fr;
     }
-    .analysis-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-    .intel-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-    .graph-grid {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(360px, 0.95fr);
-    }
-    .footer-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .panel {
-      padding: 16px;
+    .panel,
+    .card,
+    .controls,
+    .hero-card {
       position: relative;
+      min-width: 0;
       overflow: hidden;
+      border-radius: 28px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(28, 28, 28, 0.42);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
+      box-shadow: var(--shadow-lg), var(--shadow-soft);
     }
-    .panel::before {
+    .panel::before,
+    .card::before,
+    .controls::before,
+    .hero-card::before {
       content: "";
       position: absolute;
       inset: 0;
       pointer-events: none;
       background:
-        linear-gradient(180deg, rgba(46, 204, 113, 0.02), transparent 28%),
-        linear-gradient(90deg, rgba(77, 163, 255, 0.03), transparent 32%);
+        linear-gradient(135deg, rgba(255,255,255,0.06), transparent 32%),
+        radial-gradient(circle at top right, rgba(255, 77, 87, 0.08), transparent 36%);
     }
-    .panel h2 {
-      margin: 0 0 10px;
-      color: var(--muted);
+    .hero-card {
+      padding: 24px;
+      min-height: 240px;
+      display: grid;
+      gap: 18px;
+    }
+    .hero-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .hero-copy {
+      margin-top: 10px;
+      color: var(--text-muted);
       font-size: 13px;
+      line-height: 1.55;
+      max-width: 42ch;
+    }
+    .hero-card h1,
+    .hero-card h2,
+    .panel h2 {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 12px;
+      letter-spacing: 0.18em;
       text-transform: uppercase;
-      letter-spacing: 0.16em;
-      font-family: Consolas, "IBM Plex Mono", monospace;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .hero-signal {
+      font-size: clamp(34px, 4vw, 54px);
+      line-height: 0.95;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .hero-metric {
+      display: grid;
+      gap: 6px;
+    }
+    .hero-metric .value {
+      margin: 0;
+      font-size: clamp(38px, 4vw, 58px);
+      line-height: 0.94;
+      letter-spacing: -0.05em;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .hero-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .hero-chip {
+      padding: 14px 16px;
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+      box-shadow: inset 6px 6px 14px rgba(0,0,0,0.22), inset -4px -4px 12px rgba(255,255,255,0.02);
+    }
+    .controls {
+      display: flex;
+      align-items: flex-end;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 18px;
+      position: sticky;
+      top: 10px;
+      z-index: 10;
+    }
+    .control {
+      display: grid;
+      gap: 8px;
+      min-width: 142px;
+    }
+    label {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-family: "JetBrains Mono", monospace;
+    }
+    select, button, input[type="checkbox"] {
+      accent-color: var(--accent-green);
+    }
+    select, button {
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      background:
+        linear-gradient(145deg, rgba(37,37,37,0.78), rgba(20,20,20,0.72));
+      color: var(--text);
+      padding: 13px 16px;
+      font-size: 14px;
+      box-shadow: inset 1px 1px 0 rgba(255,255,255,0.05), inset -8px -8px 16px rgba(0,0,0,0.26);
+      font-family: "Inter", sans-serif;
+    }
+    select:focus,
+    button:focus {
+      outline: 0;
+      border-color: rgba(91,167,255,0.34);
+      box-shadow: 0 0 0 1px rgba(91,167,255,0.18), 0 12px 28px rgba(91,167,255,0.08);
+    }
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      min-width: 220px;
+      background:
+        linear-gradient(145deg, rgba(255, 77, 87, 0.16), rgba(18,18,18,0.78)),
+        linear-gradient(135deg, rgba(0,227,140,0.18), rgba(91,167,255,0.08));
+    }
+    button:hover { filter: brightness(1.08); }
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      margin-bottom: 2px;
+    }
+    .status {
+      margin-left: auto;
+      min-width: 280px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.45;
+      text-align: right;
+    }
+    .grid {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+    .card {
+      padding: 18px;
+      min-height: 136px;
+    }
+    .label {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .value {
+      margin-top: 12px;
+      font-size: clamp(24px, 2vw, 36px);
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .sub {
+      margin-top: 10px;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .main-grid {
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.2fr) minmax(360px, 0.95fr);
+    }
+    .analysis-grid {
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-auto-rows: minmax(320px, auto);
+    }
+    .intel-grid {
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-auto-rows: minmax(280px, auto);
+    }
+    .graph-grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(360px, 0.9fr);
+    }
+    .footer-grid {
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-auto-rows: minmax(230px, auto);
+    }
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
     }
     .panel .caption {
-      margin-bottom: 8px;
-      color: var(--muted);
+      margin: 8px 0 14px;
+      color: var(--text-muted);
       font-size: 12px;
+      line-height: 1.55;
+      max-width: 90%;
     }
     #live-chart, #compare-chart {
-      height: 680px;
+      height: 640px;
       width: 100%;
     }
     #swarm-graph, #branch-graph-view, #tradingview-frame {
       height: 420px;
       width: 100%;
     }
-    .list {
+    #tradingview-frame {
+      height: 640px;
+      flex: 1 1 auto;
+    }
+    .list,
+    .persona-list,
+    .macro,
+    .history-list,
+    .conversation-list,
+    .tilt-list,
+    .ta-grid,
+    .bot-list,
+    .reaction-list {
       display: grid;
       gap: 10px;
-      max-height: 320px;
+    }
+    .list {
+      max-height: 340px;
       overflow: auto;
       padding-right: 4px;
     }
-    .list-item {
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.06);
-      background: rgba(255,255,255,0.03);
-      padding: 12px;
+    #swarm-judge,
+    #conversation,
+    #specialist-bots,
+    #public-reaction,
+    #technical-structure,
+    #forecast-ladder,
+    #order-blocks,
+    #fair-value-gaps,
+    #news,
+    #crowd,
+    #personas,
+    #tilts,
+    #macro,
+    #history {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    #technical-structure,
+    #forecast-ladder,
+    #order-blocks,
+    #fair-value-gaps,
+    #personas,
+    #tilts,
+    #macro,
+    #history {
+      max-height: 100%;
+    }
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.24) rgba(255,255,255,0.04);
+    }
+    *::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+    *::-webkit-scrollbar-track {
+      background: rgba(255,255,255,0.04);
+      border-radius: 999px;
+    }
+    *::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,77,87,0.22));
+      border-radius: 999px;
+      border: 2px solid rgba(5,5,5,0.3);
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(255,255,255,0.30), rgba(255,77,87,0.34));
+    }
+    .list-item,
+    .history-item,
+    .bot-item,
+    .hero-chip {
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+    .list-item,
+    .history-item,
+    .bot-item {
+      padding: 13px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.025);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), inset 0 -12px 20px rgba(0,0,0,0.14);
+      font-size: 12px;
     }
     .list-item a {
       color: var(--text);
@@ -223,23 +459,21 @@ def render_web_app_html() -> str:
       font-weight: 600;
     }
     .meta {
-      margin-top: 6px;
-      color: var(--muted);
+      margin-top: 7px;
+      color: var(--text-muted);
       font-size: 12px;
-      line-height: 1.4;
-    }
-    .persona-list, .macro, .history-list, .conversation-list, .tilt-list, .ta-grid, .bot-list, .reaction-list {
-      display: grid;
-      gap: 10px;
+      line-height: 1.45;
     }
     .judge-banner {
       display: grid;
-      gap: 10px;
-      border-radius: 16px;
-      border: 1px solid rgba(77,163,255,0.18);
-      background: linear-gradient(135deg, rgba(8,24,33,0.96), rgba(10,36,31,0.96));
-      padding: 14px;
-      box-shadow: inset 0 0 0 1px rgba(46,204,113,0.06);
+      gap: 12px;
+      padding: 16px;
+      border-radius: 24px;
+      border: 1px solid rgba(255,255,255,0.07);
+      background:
+        linear-gradient(145deg, rgba(42, 0, 8, 0.38), rgba(18, 18, 18, 0.84)),
+        rgba(28,28,28,0.42);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 18px 36px rgba(0,0,0,0.22);
     }
     .judge-headline {
       display: flex;
@@ -254,12 +488,12 @@ def render_web_app_html() -> str:
       gap: 8px;
       padding: 8px 12px;
       border-radius: 999px;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.14em;
       border: 1px solid rgba(255,255,255,0.08);
-      font-family: Consolas, "IBM Plex Mono", monospace;
+      font-family: "JetBrains Mono", monospace;
     }
     .mini-grid {
       display: grid;
@@ -267,25 +501,88 @@ def render_web_app_html() -> str:
       gap: 10px;
     }
     .mono {
-      font-family: Consolas, "IBM Plex Mono", monospace;
+      font-family: "JetBrains Mono", monospace;
     }
     .tv-frame {
       border: 0;
-      border-radius: 14px;
-      background: #071018;
+      border-radius: 22px;
+      background: rgba(9,9,9,0.92);
       width: 100%;
       height: 420px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
     }
-    .bot-item {
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.06);
+    .workspace-shell {
+      min-height: 620px;
+    }
+    .workspace-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .workspace-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .workspace-tab {
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px;
+      padding: 8px 12px;
       background: rgba(255,255,255,0.03);
-      padding: 12px;
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.45;
+      color: var(--text-secondary);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-family: "JetBrains Mono", monospace;
+      cursor: pointer;
+      user-select: none;
     }
-    .bot-item strong {
+    .workspace-tab.active {
+      background: linear-gradient(135deg, rgba(255,77,87,0.18), rgba(91,167,255,0.14));
+      color: var(--text);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 8px 18px rgba(0,0,0,0.22);
+    }
+    .workspace-body {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .workspace-panel {
+      display: none;
+      height: 100%;
+      min-height: 0;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .workspace-panel.active {
+      display: flex;
+    }
+    .workspace-panel > h3 {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .workspace-panel > .caption {
+      margin: 0 0 8px;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .workspace-panel .plot-host,
+    .workspace-panel .content-host {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .bot-item strong,
+    .history-item strong {
       color: var(--text);
     }
     .persona-row {
@@ -300,57 +597,163 @@ def render_web_app_html() -> str:
       border-radius: 999px;
       overflow: hidden;
       background: rgba(255,255,255,0.07);
+      box-shadow: inset 0 0 8px rgba(0,0,0,0.34);
     }
     .bar > span {
       display: block;
       height: 100%;
       border-radius: 999px;
-    }
-    .history-item {
-      border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.06);
-      background: rgba(255,255,255,0.03);
-      padding: 12px;
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.5;
-    }
-    .history-item strong {
-      color: var(--text);
+      box-shadow: 0 0 20px rgba(0, 227, 140, 0.16);
     }
     .js-plotly-plot .plotly .modebar {
-      background: rgba(8, 16, 24, 0.78) !important;
-      border-radius: 10px;
-      padding: 2px;
+      background: rgba(18, 18, 18, 0.78) !important;
+      backdrop-filter: blur(14px);
+      border-radius: 14px;
+      padding: 4px;
+      border: 1px solid rgba(255,255,255,0.06);
     }
     .js-plotly-plot .plotly .modebar-btn svg {
-      fill: #c8d8e5 !important;
+      fill: #f5f5f5 !important;
     }
     .js-plotly-plot .plotly .hoverlayer .hovertext rect {
-      fill: #0d1b26 !important;
-      stroke: rgba(255,255,255,0.14) !important;
+      fill: #101010 !important;
+      stroke: rgba(255,255,255,0.12) !important;
     }
     .js-plotly-plot .plotly .hoverlayer .hovertext text {
-      fill: #eef5fb !important;
+      fill: #f3f3f3 !important;
     }
-    @media (max-width: 1440px) {
-      .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-      .main-grid, .analysis-grid, .intel-grid, .graph-grid, .footer-grid { grid-template-columns: 1fr; }
-      #live-chart, #compare-chart { height: 560px; }
+    @media (max-width: 1600px) {
+      .grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+      .hero-grid,
+      .main-grid,
+      .analysis-grid,
+      .intel-grid,
+      .graph-grid,
+      .footer-grid,
+      .workspace-grid {
+        grid-template-columns: 1fr;
+      }
+      #live-chart,
+      #compare-chart {
+        height: 560px;
+      }
+      .status {
+        margin-left: 0;
+        text-align: left;
+      }
     }
-    @media (max-width: 900px) {
-      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 960px) {
+      .shell {
+        padding: 18px 14px 24px;
+      }
+      .grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+      .hero-strip,
+      .mini-grid {
+        grid-template-columns: 1fr;
+      }
+      .header-pills {
+        justify-content: flex-start;
+      }
+      .controls {
+        padding: 16px;
+        position: static;
+      }
+      .workspace-shell {
+        min-height: 540px;
+      }
+    }
+    @media (max-width: 680px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .header-time-value {
+        font-size: 48px;
+      }
+      .status-header {
+        gap: 12px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <section class="hero">
-      <div>
-        <h1>Nexus Trader Market Simulator</h1>
-        <p>This console is for simulation quality, not execution. The left chart keeps updating with live market candles. The right chart freezes the predicted 5 minute future from the moment you press simulate and then overlays the real candles that arrive afterward so we can see whether the market tracks the scenario.</p>
+    <section class="status-header">
+      <div class="header-time">
+        <div id="header-time" class="header-time-value">--:--</div>
+        <div id="header-date" class="header-time-subtitle">Loading local trading desk</div>
+        <div class="header-copy">Dark glass manual-trading terminal. V8 runs as the direct simulator path generator here, LM Studio remains available as the local narrative sidecar, and the operator decides execution manually from the projected path.</div>
       </div>
-      <div class="pill">Dark mode - live market vs predicted future</div>
+      <div class="header-pills">
+        <div id="header-session" class="pill">Session: --</div>
+        <div id="header-market-status" class="pill">Market: --</div>
+        <div id="header-model" class="pill">Model: V8 Direct</div>
+        <div id="header-latency" class="pill">Latency: --</div>
+        <div id="header-live-mode" class="pill">Mode: Manual</div>
+        <div id="header-llm" class="pill">LLM: LM Studio</div>
+      </div>
+    </section>
+
+    <section class="hero-grid">
+      <article class="hero-card">
+        <div class="hero-card-head">
+          <div>
+            <h2>Portfolio Summary</h2>
+            <div class="hero-copy">Manual operator view for projected futures, recent signal quality, and live regime context.</div>
+          </div>
+          <div class="pill">Local Terminal</div>
+        </div>
+        <div class="hero-metric">
+          <div class="label">Current XAUUSD</div>
+          <div id="metric-price" class="value">-</div>
+          <div id="metric-price-change" class="sub">-</div>
+        </div>
+        <div class="hero-strip">
+          <div class="hero-chip">
+            <div class="label">Filtered Hit Rate</div>
+            <div id="metric-hit-rate" class="value">-</div>
+            <div id="metric-direction-match" class="sub">Waiting for realized candles</div>
+          </div>
+          <div class="hero-chip">
+            <div class="label">Simulation Confidence</div>
+            <div id="metric-confidence" class="value">-</div>
+            <div id="metric-live-time" class="sub">-</div>
+          </div>
+          <div class="hero-chip">
+            <div class="label">Timestamp</div>
+            <div id="metric-times" class="value">-</div>
+            <div class="sub">Last frozen future</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="hero-card">
+        <div class="hero-card-head">
+          <div>
+            <h2>AI Signal Status</h2>
+            <div class="hero-copy">Direct V8 output without external gate enforcement. This panel is for manual action judgment, not auto-execution.</div>
+          </div>
+          <div id="stack-badge" class="pill">V8 Direct</div>
+        </div>
+        <div id="metric-bias" class="hero-signal">-</div>
+        <div id="metric-dominant-driver" class="sub">Waiting for current regime read</div>
+        <div class="hero-strip">
+          <div class="hero-chip">
+            <div class="label">V8 Neural Bias</div>
+            <div id="metric-neural" class="value">-</div>
+            <div id="metric-neural-detail" class="sub">Latest routed predictor</div>
+          </div>
+          <div class="hero-chip">
+            <div class="label">Final Desk View</div>
+            <div id="metric-ensemble" class="value">-</div>
+            <div id="metric-ensemble-detail" class="sub">Manual-mode projected path</div>
+          </div>
+          <div class="hero-chip">
+            <div class="label">Bot Swarm</div>
+            <div id="metric-bots" class="value">-</div>
+            <div id="metric-bots-detail" class="sub">Specialist alignment</div>
+          </div>
+        </div>
+      </article>
     </section>
 
     <section class="controls">
@@ -386,123 +789,188 @@ def render_web_app_html() -> str:
           <option value="ollama">Ollama Cloud</option>
         </select>
       </div>
-      <button id="simulate">Simulate Next 5 Minutes</button>
+      <div class="control">
+        <label for="signal-mode">Signal Stack</label>
+        <select id="signal-mode">
+          <option value="v8_direct" selected>V8 Direct Manual</option>
+          <option value="hybrid">Hybrid Ensemble</option>
+        </select>
+      </div>
+      <button id="simulate">Freeze Next Projection</button>
       <label class="toggle"><input type="checkbox" id="auto-refresh" checked /> Auto refresh live market</label>
-      <div id="status" class="status">Loading simulator...</div>
+      <div id="status" class="status">Loading local V8 terminal...</div>
     </section>
 
     <section class="grid">
-      <article class="card"><div class="label">Current Price</div><div class="value" id="metric-price">-</div><div class="sub" id="metric-price-change">-</div></article>
-      <article class="card"><div class="label">Simulation Confidence</div><div class="value" id="metric-confidence">-</div><div class="sub">Whole simulation conviction after collapse</div></article>
       <article class="card"><div class="label">Consensus Score</div><div class="value" id="metric-consensus">-</div><div class="sub">Agreement across surviving futures</div></article>
       <article class="card"><div class="label">Uncertainty Width</div><div class="value" id="metric-uncertainty">-</div><div class="sub">Cone spread from branch disagreement</div></article>
-      <article class="card"><div class="label">Scenario Bias</div><div class="value" id="metric-bias">-</div><div class="sub" id="metric-dominant-driver">-</div></article>
-      <article class="card"><div class="label">Neural Bias</div><div class="value" id="metric-neural">-</div><div class="sub" id="metric-neural-detail">Latest model output</div></article>
-      <article class="card"><div class="label">Cone Hit Rate</div><div class="value" id="metric-hit-rate">-</div><div class="sub" id="metric-direction-match">Waiting for real candles after simulation</div></article>
-      <article class="card"><div class="label">Ensemble Signal</div><div class="value" id="metric-ensemble">-</div><div class="sub" id="metric-ensemble-detail">Combined branch + model + LLM view</div></article>
-      <article class="card"><div class="label">Bot Swarm</div><div class="value" id="metric-bots">-</div><div class="sub" id="metric-bots-detail">10 specialist strategy bots</div></article>
-      <article class="card"><div class="label">Timestamps</div><div class="value" id="metric-times">-</div><div class="sub" id="metric-live-time">-</div></article>
+      <article class="card"><div class="label">Manual Trade Mode</div><div class="value" id="metric-stack-mode">V8</div><div class="sub" id="metric-stack-mode-detail">Direct path selection without external gate veto</div></article>
+      <article class="card"><div class="label">Judge Stance</div><div class="value" id="metric-judge-stance">-</div><div class="sub" id="metric-judge-detail">GPT sidecar narrative</div></article>
+      <article class="card"><div class="label">Forecast Horizon</div><div class="value" id="metric-horizon-focus">15m</div><div class="sub">Live compare chart focus</div></article>
+      <article class="card"><div class="label">Local Route</div><div class="value" id="metric-llm-route">LM Studio</div><div class="sub">Operator-controlled sidecar route</div></article>
     </section>
 
     <section class="main-grid">
       <article class="panel">
-        <h2>Live Market</h2>
-        <div class="caption">Clean live tape only. Indicators are intentionally removed from this chart so it stays readable.</div>
-        <div id="live-chart"></div>
+        <h2>Live Market Tape</h2>
+        <div class="caption">TradingView now anchors the live tape so you get a richer charting surface with better navigation, zooming, and manual tape reading.</div>
+        <iframe id="tradingview-frame" class="tv-frame" title="TradingView Live Market Tape"></iframe>
       </article>
 
       <article class="panel">
-        <h2>Predicted vs Actual</h2>
-        <div class="caption">Combined final forecast path from simulator + bot swarm + GPT tilt + model bias, with the top and minority branch context.</div>
+        <h2>Predicted vs Actual Future</h2>
+        <div class="caption">The frozen V8 path is compared against arriving candles after the trigger timestamp so you can inspect path realism instead of raw classifier output.</div>
         <div id="compare-chart"></div>
       </article>
 
       <article class="panel">
-        <h2>Final Judge</h2>
+        <h2>Final Judge Desk</h2>
+        <div class="caption">Narrative explanation, trade stance, and dissent framing for manual execution review.</div>
         <div id="swarm-judge" class="conversation-list"></div>
       </article>
     </section>
 
-    <section class="analysis-grid">
-      <article class="panel">
-        <h2>Branch Conversation</h2>
-        <div id="conversation" class="conversation-list"></div>
+    <section class="workspace-grid">
+      <article class="panel workspace-shell">
+        <div class="workspace-head">
+          <div>
+            <h2>Signal Workspace</h2>
+            <div class="caption">Switch between dense signal panels instead of keeping every intelligence tile visible at once.</div>
+          </div>
+          <div class="workspace-tabs" data-workspace="signal">
+            <button class="workspace-tab active" data-target="ws-conversation">Conversation</button>
+            <button class="workspace-tab" data-target="ws-bots">Bots</button>
+            <button class="workspace-tab" data-target="ws-reaction">Reaction</button>
+            <button class="workspace-tab" data-target="ws-structure">Structure</button>
+            <button class="workspace-tab" data-target="ws-ladder">Forecast</button>
+            <button class="workspace-tab" data-target="ws-order-blocks">Order Blocks</button>
+            <button class="workspace-tab" data-target="ws-fvg">FVG</button>
+            <button class="workspace-tab" data-target="ws-news">News</button>
+            <button class="workspace-tab" data-target="ws-crowd">Crowd</button>
+          </div>
+        </div>
+        <div class="workspace-body">
+          <section id="ws-conversation" class="workspace-panel active">
+            <h3>Branch Conversation</h3>
+            <div class="content-host">
+              <div id="conversation" class="conversation-list"></div>
+            </div>
+          </section>
+          <section id="ws-bots" class="workspace-panel">
+            <h3>Specialist Bots</h3>
+            <div class="content-host">
+              <div id="specialist-bots" class="bot-list"></div>
+            </div>
+          </section>
+          <section id="ws-reaction" class="workspace-panel">
+            <h3>Public Reaction Theater</h3>
+            <div class="caption">How the crowd might be reacting, summarized through the judge and the raw feeds.</div>
+            <div class="content-host">
+              <div id="public-reaction" class="reaction-list"></div>
+            </div>
+          </section>
+          <section id="ws-structure" class="workspace-panel">
+            <h3>Technical Structure</h3>
+            <div class="content-host">
+              <div id="technical-structure" class="ta-grid"></div>
+            </div>
+          </section>
+          <section id="ws-ladder" class="workspace-panel">
+            <h3>Forecast Ladder</h3>
+            <div class="content-host">
+              <div id="forecast-ladder" class="history-list"></div>
+            </div>
+          </section>
+          <section id="ws-order-blocks" class="workspace-panel">
+            <h3>Order Blocks</h3>
+            <div class="content-host">
+              <div id="order-blocks" class="history-list"></div>
+            </div>
+          </section>
+          <section id="ws-fvg" class="workspace-panel">
+            <h3>Fair Value Gaps</h3>
+            <div class="content-host">
+              <div id="fair-value-gaps" class="history-list"></div>
+            </div>
+          </section>
+          <section id="ws-news" class="workspace-panel">
+            <h3>Headline Context</h3>
+            <div class="content-host">
+              <div id="news" class="list"></div>
+            </div>
+          </section>
+          <section id="ws-crowd" class="workspace-panel">
+            <h3>Public Discussion Pulse</h3>
+            <div class="content-host">
+              <div id="crowd" class="list"></div>
+            </div>
+          </section>
+        </div>
       </article>
 
-      <article class="panel">
-        <h2>Specialist Bots</h2>
-        <div id="specialist-bots" class="bot-list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Public Reaction Theater</h2>
-        <div class="caption">How the crowd might be reacting, summarized through the judge and the raw feeds.</div>
-        <div id="public-reaction" class="reaction-list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Technical Structure</h2>
-        <div id="technical-structure" class="ta-grid"></div>
-      </article>
-    </section>
-
-    <section class="intel-grid">
-      <article class="panel">
-        <h2>Forecast Ladder</h2>
-        <div id="forecast-ladder" class="history-list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Order Blocks</h2>
-        <div id="order-blocks" class="history-list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Fair Value Gaps</h2>
-        <div id="fair-value-gaps" class="history-list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Headline Context</h2>
-        <div id="news" class="list"></div>
-      </article>
-
-      <article class="panel">
-        <h2>Public Discussion Pulse</h2>
-        <div id="crowd" class="list"></div>
-      </article>
-    </section>
-
-    <section class="graph-grid">
-      <article class="panel">
-        <h2>Swarm Influence Graph</h2>
-        <div class="caption">Bots, personas, and the simulator laid out as an influence network.</div>
-        <div id="swarm-graph"></div>
-      </article>
-      <article class="panel">
-        <h2>Branch Graph View</h2>
-        <div class="caption">Top branch, minority branch, and supporting paths in a branch-oriented view.</div>
-        <div id="branch-graph-view"></div>
-      </article>
-      <article class="panel">
-        <h2>TradingView Desk</h2>
-        <div class="caption">Embedded external chart desk for manual confirmation.</div>
-        <iframe id="tradingview-frame" class="tv-frame" title="TradingView Desk"></iframe>
-      </article>
-    </section>
-
-    <section class="footer-grid">
-      <article class="panel">
-        <h2>Persona Impact</h2>
-        <div id="personas" class="persona-list"></div>
-      </article>
-      <article class="panel">
-        <h2>Macro Pulse</h2>
-        <div id="macro" class="macro"></div>
-      </article>
-      <article class="panel">
-        <h2>Recent Simulation History</h2>
-        <div id="history" class="history-list"></div>
+      <article class="panel workspace-shell">
+        <div class="workspace-head">
+          <div>
+            <h2>Research Workspace</h2>
+            <div class="caption">Graphs, local tape, personas, macro state, and history live here as switchable operator views.</div>
+          </div>
+          <div class="workspace-tabs" data-workspace="research">
+            <button class="workspace-tab active" data-target="ws-swarm-graph">Swarm</button>
+            <button class="workspace-tab" data-target="ws-branch-graph">Branches</button>
+            <button class="workspace-tab" data-target="ws-local-tape">Local Tape</button>
+            <button class="workspace-tab" data-target="ws-personas">Personas</button>
+            <button class="workspace-tab" data-target="ws-tilts">Tilts</button>
+            <button class="workspace-tab" data-target="ws-macro">Macro</button>
+            <button class="workspace-tab" data-target="ws-history">History</button>
+          </div>
+        </div>
+        <div class="workspace-body">
+          <section id="ws-swarm-graph" class="workspace-panel active">
+            <h3>Swarm Influence Graph</h3>
+            <div class="caption">Bots, personas, and the simulator laid out as an influence network.</div>
+            <div class="plot-host">
+              <div id="swarm-graph"></div>
+            </div>
+          </section>
+          <section id="ws-branch-graph" class="workspace-panel">
+            <h3>Branch Graph View</h3>
+            <div class="caption">Top branch, minority branch, and supporting paths in a branch-oriented view.</div>
+            <div class="plot-host">
+              <div id="branch-graph-view"></div>
+            </div>
+          </section>
+          <section id="ws-local-tape" class="workspace-panel">
+            <h3>Local Simulation Tape</h3>
+            <div class="caption">Native local tape remains available here if you want to compare it against TradingView’s live chart desk.</div>
+            <div class="plot-host">
+              <div id="live-chart"></div>
+            </div>
+          </section>
+          <section id="ws-personas" class="workspace-panel">
+            <h3>Persona Impact</h3>
+            <div class="content-host">
+              <div id="personas" class="persona-list"></div>
+            </div>
+          </section>
+          <section id="ws-tilts" class="workspace-panel">
+            <h3>LLM Persona Tilts</h3>
+            <div class="content-host">
+              <div id="tilts" class="tilt-list"></div>
+            </div>
+          </section>
+          <section id="ws-macro" class="workspace-panel">
+            <h3>Macro Pulse</h3>
+            <div class="content-host">
+              <div id="macro" class="macro"></div>
+            </div>
+          </section>
+          <section id="ws-history" class="workspace-panel">
+            <h3>Recent Simulation History</h3>
+            <div class="content-host">
+              <div id="history" class="history-list"></div>
+            </div>
+          </section>
+        </div>
       </article>
     </section>
   </div>
@@ -512,9 +980,11 @@ def render_web_app_html() -> str:
       activeSymbol: 'XAUUSD',
       activeHorizon: 15,
       llmProvider: 'lm_studio',
+      stackMode: 'v8_direct',
       lastSimulation: null,
       lastMonitor: null,
       refreshTimer: null,
+      lastLatencyMs: null,
     };
 
     function fmtPct(value) {
@@ -538,8 +1008,30 @@ def render_web_app_html() -> str:
       document.getElementById('status').textContent = message;
     }
 
+    function localSessionLabel(date = new Date()) {
+      const hour = date.getHours();
+      if (hour >= 6 && hour < 13) return 'Asia Session';
+      if (hour >= 13 && hour < 18) return 'London Session';
+      if (hour >= 18 && hour < 23) return 'New York Session';
+      return 'Overnight Session';
+    }
+
+    function updateHeaderShell() {
+      const now = new Date();
+      document.getElementById('header-time').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      document.getElementById('header-date').textContent = `${now.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} • ${localSessionLabel(now)}`;
+      document.getElementById('header-session').textContent = `Session: ${localSessionLabel(now)}`;
+      document.getElementById('header-market-status').textContent = `Market: ${state.activeSymbol || 'XAUUSD'} Live`;
+      document.getElementById('header-model').textContent = `Model: ${state.stackMode === 'v8_direct' ? 'V8 Direct' : 'Hybrid Ensemble'}`;
+      document.getElementById('header-latency').textContent = `Latency: ${state.lastLatencyMs === null ? '--' : `${state.lastLatencyMs} ms`}`;
+      document.getElementById('header-live-mode').textContent = `Mode: ${state.stackMode === 'v8_direct' ? 'Manual' : 'Hybrid'}`;
+      document.getElementById('header-llm').textContent = `LLM: ${state.llmProvider === 'lm_studio' ? 'LM Studio' : 'Ollama'}`;
+    }
+
     function colorForSignal(signal) {
-      return signal === 'bullish' ? 'var(--bull)' : 'var(--bear)';
+      if (signal === 'bullish' || signal === 'buy') return 'var(--accent-green)';
+      if (signal === 'bearish' || signal === 'sell') return 'var(--accent-red)';
+      return 'var(--accent-amber)';
     }
 
     function renderMetrics(simPayload, monitorPayload) {
@@ -549,11 +1041,14 @@ def render_web_app_html() -> str:
       const ensemble = (simPayload || {}).ensemble_prediction || {};
       const judge = (((simPayload || {}).swarm_judge || {}).content || {});
       const activePrediction = (monitorPayload || {}).active_prediction || {};
+      const stackMode = String((simPayload || {}).stack_mode || state.stackMode || 'v8_direct');
+
+      updateHeaderShell();
 
       document.getElementById('metric-price').textContent = fmtPrice(market.current_price);
       const change = Number(market.price_change || 0);
       document.getElementById('metric-price-change').textContent = `${change >= 0 ? '+' : ''}${fmtPrice(change)} vs previous candle`;
-      document.getElementById('metric-price-change').style.color = change >= 0 ? 'var(--bull)' : 'var(--bear)';
+      document.getElementById('metric-price-change').style.color = change >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
 
       document.getElementById('metric-confidence').textContent = fmtPct(sim.overall_confidence);
       document.getElementById('metric-consensus').textContent = fmtPct(sim.consensus_score);
@@ -561,6 +1056,15 @@ def render_web_app_html() -> str:
       document.getElementById('metric-bias').textContent = (sim.scenario_bias || '-').toUpperCase();
       document.getElementById('metric-bias').style.color = colorForSignal(sim.scenario_bias);
       document.getElementById('metric-dominant-driver').textContent = sim.dominant_driver || 'No dominant driver';
+      document.getElementById('metric-stack-mode').textContent = stackMode === 'v8_direct' ? 'V8 DIRECT' : 'HYBRID';
+      document.getElementById('metric-stack-mode-detail').textContent = stackMode === 'v8_direct'
+        ? 'Manual desk mode with direct V8 path projection'
+        : 'Hybrid ensemble with external selector stack';
+      document.getElementById('metric-judge-stance').textContent = String(judge.manual_stance || 'hold').toUpperCase();
+      document.getElementById('metric-judge-stance').style.color = colorForSignal(String(judge.manual_stance || '').toLowerCase());
+      document.getElementById('metric-judge-detail').textContent = judge.summary || judge.discussion_takeaway || 'Judge summary waiting';
+      document.getElementById('metric-horizon-focus').textContent = `${state.activeHorizon}m`;
+      document.getElementById('metric-llm-route').textContent = state.llmProvider === 'lm_studio' ? 'LM STUDIO' : 'OLLAMA';
 
       if (model && typeof model.bullish_probability === 'number') {
         document.getElementById('metric-neural').textContent = fmtPct(model.bullish_probability);
@@ -610,6 +1114,8 @@ def render_web_app_html() -> str:
       document.getElementById('metric-times').textContent = fmtTime((simPayload || {}).generated_at);
       const liveCandle = ((monitorPayload || {}).live_market || []).slice(-1)[0];
       document.getElementById('metric-live-time').textContent = liveCandle ? `Latest live candle: ${fmtTime(liveCandle.timestamp)}` : '-';
+      document.getElementById('stack-badge').textContent = stackMode === 'v8_direct' ? 'V8 Direct' : 'Hybrid Ensemble';
+      updateHeaderShell();
     }
 
     function renderTilts(tilts) {
@@ -1059,7 +1565,39 @@ def render_web_app_html() -> str:
       const iframe = document.getElementById('tradingview-frame');
       if (!iframe) return;
       const tvSymbol = encodeURIComponent(tradingViewSymbol(symbol));
-      iframe.src = `https://s.tradingview.com/widgetembed/?symbol=${tvSymbol}&interval=5&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hide_side_toolbar=0&allow_symbol_change=1&saveimage=1&hideideas=1`;
+      const interval = [5, 10, 15, 30].includes(Number(state.activeHorizon)) ? Number(state.activeHorizon) : 15;
+      iframe.src = `https://s.tradingview.com/widgetembed/?symbol=${tvSymbol}&interval=${interval}&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hide_side_toolbar=0&allow_symbol_change=1&saveimage=1&hideideas=1`;
+    }
+
+    function resizeWorkspacePlots(container) {
+      if (!container || typeof Plotly === 'undefined') return;
+      for (const plotId of ['swarm-graph', 'branch-graph-view', 'live-chart']) {
+        const node = container.querySelector(`#${plotId}`);
+        if (node) {
+          try {
+            Plotly.Plots.resize(node);
+          } catch (error) {
+            console.warn(`Plot resize skipped for ${plotId}`, error);
+          }
+        }
+      }
+    }
+
+    function activateWorkspaceTab(button) {
+      if (!button) return;
+      const tabRow = button.closest('.workspace-tabs');
+      if (!tabRow) return;
+      const shell = button.closest('.workspace-shell');
+      if (!shell) return;
+      const targetId = button.dataset.target;
+      tabRow.querySelectorAll('.workspace-tab').forEach((item) => item.classList.remove('active'));
+      shell.querySelectorAll('.workspace-panel').forEach((panel) => panel.classList.remove('active'));
+      button.classList.add('active');
+      const target = shell.querySelector(`#${targetId}`);
+      if (target) {
+        target.classList.add('active');
+        requestAnimationFrame(() => resizeWorkspacePlots(target));
+      }
     }
 
     function renderCompareChart(simPayload, monitorPayload) {
@@ -1209,15 +1747,21 @@ def render_web_app_html() -> str:
 
     async function simulate(symbol, announce = true) {
       state.activeSymbol = symbol;
-      if (announce) setStatus(`Simulating ${symbol} with live candles, headlines, and public-discussion context...`);
+      if (announce) setStatus(`Simulating ${symbol} in ${state.stackMode === 'v8_direct' ? 'V8 direct manual mode' : 'hybrid mode'} with live market context...`);
       const provider = encodeURIComponent(state.llmProvider || 'lm_studio');
-      const response = await fetch(`/api/simulate-live?symbol=${encodeURIComponent(symbol)}&llm_provider=${provider}`);
+      const stackMode = encodeURIComponent(state.stackMode || 'v8_direct');
+      const startedAt = performance.now();
+      const response = await fetch(`/api/simulate-live?symbol=${encodeURIComponent(symbol)}&llm_provider=${provider}&stack_mode=${stackMode}`);
+      state.lastLatencyMs = Math.max(1, Math.round(performance.now() - startedAt));
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText || `Request failed with ${response.status}`);
       }
       state.lastSimulation = await response.json();
+      state.stackMode = String(state.lastSimulation.stack_mode || state.stackMode || 'v8_direct');
+      document.getElementById('signal-mode').value = state.stackMode;
       renderPersonas(state.lastSimulation.personas || {});
+      renderTilts(state.lastSimulation.persona_weight_tilts || {});
       renderConversation(state.lastSimulation);
       renderSwarmJudge(state.lastSimulation);
       renderPublicReaction(state.lastSimulation);
@@ -1231,7 +1775,8 @@ def render_web_app_html() -> str:
       renderBranchGraph(state.lastSimulation);
       renderTradingView(symbol);
       await refreshMonitor(false);
-      setStatus(`Simulation frozen at ${fmtTime(state.lastSimulation.generated_at)} for ${symbol}. Live market will keep refreshing beside it.`);
+      updateHeaderShell();
+      setStatus(`Simulation frozen at ${fmtTime(state.lastSimulation.generated_at)} for ${symbol}. ${state.stackMode === 'v8_direct' ? 'Manual V8 direct projection is active.' : 'Hybrid ensemble projection is active.'}`);
     }
 
     async function refreshMonitor(announce = false) {
@@ -1250,6 +1795,7 @@ def render_web_app_html() -> str:
         renderHistory(state.lastMonitor);
       }
       if (announce) setStatus(`Live market refreshed at ${fmtTime((state.lastMonitor || {}).server_timestamp)}.`);
+      updateHeaderShell();
     }
 
     function startRefreshLoop() {
@@ -1294,13 +1840,25 @@ def render_web_app_html() -> str:
       if (state.lastSimulation && state.lastMonitor) {
         renderCompareChart(state.lastSimulation, state.lastMonitor);
       }
+      renderTradingView(state.activeSymbol || document.getElementById('symbol').value);
     });
     document.getElementById('llm-provider').addEventListener('change', (event) => {
       state.llmProvider = String(event.target.value || 'lm_studio');
+      updateHeaderShell();
+    });
+    document.getElementById('signal-mode').addEventListener('change', (event) => {
+      state.stackMode = String(event.target.value || 'v8_direct');
+      updateHeaderShell();
+    });
+    document.querySelectorAll('.workspace-tab').forEach((button) => {
+      button.addEventListener('click', () => activateWorkspaceTab(button));
     });
 
     window.addEventListener('load', async () => {
       try {
+        updateHeaderShell();
+        setInterval(updateHeaderShell, 1000);
+        document.querySelectorAll('.workspace-tab.active').forEach((button) => activateWorkspaceTab(button));
         await simulate(document.getElementById('symbol').value, false);
         startRefreshLoop();
       } catch (error) {

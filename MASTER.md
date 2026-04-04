@@ -2853,3 +2853,260 @@ The real `v8` success criteria are:
 3. top-3 containment is materially better than top-1 random baseline
 4. analog / regime / fair-value features show real importance in the selector
 5. the final chosen path is more realistic than the older probability-only collapse
+
+## Final V8 Results
+
+`v8` is now completed and synced locally.
+
+Important note about completion:
+
+- the cloud pipeline itself completed all major research steps
+- the remote final summarizer failed only because the cloud workspace did not have `outputs/evaluation/v7_summary.json`
+- the real `v8` artifacts were still produced successfully
+- local summary generation succeeded after sync
+
+Final local summary artifacts:
+
+- `outputs/evaluation/v8_summary.json`
+- `outputs/evaluation/v8_summary.md`
+- `outputs/evaluation/v8_evaluation_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_evaluation_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_branch_selector_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_branch_selector_report_mh12_recent_v8.json`
+- `outputs/evaluation/v8_branch_archive_report_mh12_full_v8.json`
+- `outputs/evaluation/v8_branch_archive_report_mh12_recent_v8.json`
+
+### `mh12_full_v8`
+
+Core walk-forward / backtest state:
+
+- walk-forward strategic ROC-AUC: `0.5103`
+- classic filtered backtest win rate: `56.92%`
+- event-driven backtest win rate: `46.12%`
+- event-driven `15m`:
+  - win rate: `52.39%`
+  - avg unit pnl: `0.008563`
+
+Branch-selector results:
+
+- selector top-1 branch accuracy: `0.61325`
+- selector top-3 containment: `0.63650`
+- average selected path error: `0.000769`
+- generator baseline path error: `0.000774`
+- selector error improvement: `0.000006`
+- selector event-driven `15m`:
+  - trade count: `4000`
+  - win rate: `52.20%`
+  - avg unit pnl: `0.045599`
+  - cumulative unit pnl: `182.396896`
+
+Interpretation:
+
+- `full_v8` is the strongest `v8` branch
+- branch selection is learning something real at the top-1 / top-3 level
+- the selector only slightly improves path error versus the generator baseline
+- the strongest useful product story remains selective `15m`
+
+### `mh12_recent_v8`
+
+Core walk-forward / backtest state:
+
+- walk-forward strategic ROC-AUC: `0.4972`
+- classic filtered backtest win rate: `58.31%`
+- event-driven backtest win rate: `47.77%`
+- event-driven `15m`:
+  - win rate: `53.57%`
+  - avg unit pnl: `0.006001`
+
+Branch-selector results:
+
+- selector top-1 branch accuracy: `0.5800`
+- selector top-3 containment: `0.6032`
+- average selected path error: `0.001451`
+- generator baseline path error: `0.001451`
+- selector error improvement: effectively `0.0`
+- selector event-driven `15m`:
+  - trade count: `2500`
+  - win rate: `50.72%`
+  - avg unit pnl: `0.014306`
+  - cumulative unit pnl: `35.764118`
+
+Interpretation:
+
+- `recent_v8` did not beat the stronger recent `v7` event-driven `15m` win-rate profile
+- branch selection works structurally, but the selector is still too close to the generator baseline
+- the recent-regime branch selector needs denser / more selective archive construction to become meaningfully different
+
+## Honest V8 Interpretation
+
+What `v8` did accomplish:
+
+- it turned branch selection into a real learned problem
+- it produced a functioning branch archive and selector-training pipeline
+- it achieved materially non-random top-1 branch accuracy on held-out selector evaluation
+- it preserved the main project truth that `15m` is the only horizon with consistent positive execution-aware behavior
+
+What `v8` did not accomplish yet:
+
+- it did not create a dramatic raw ROC-AUC breakout
+- it did not make HMM / analog / fair-value features obviously dominant in the selector
+- it did not create a large selector-vs-generator separation on path error
+- it did not improve cone containment enough to call the future-path cone trustworthy yet
+
+Best honest summary:
+
+- `v8` is a major architectural success
+- `v8` is only a modest predictive success
+- the biggest win is that Nexus now has a true learned branch-selector research path instead of only generator-first heuristics
+
+## V9 Direction
+
+The best next move after `v8` is:
+
+1. promote the learned selector into the live branch ranking path
+2. rebuild recent branch archives with denser sampling around high-impact regimes
+3. optimize directly for event-driven `15m` selected-branch pnl / drawdown / containment
+4. use GPT-OSS only for explanation and catalyst rationale around the chosen branch, not as the numeric selector
+
+## Latest Gate Redesign
+
+After the local Backtrader week checks, one more failure mode became clear:
+
+- pure ungated `v8` overtrades and loses
+- the saved full `v8` gate is too strict on the local synced slice and often takes `0` trades
+- the old gate logic was effectively applying a double abstention penalty:
+  - hard binary tradeability labels during gate training
+  - then a threshold optimizer that still preferred very cautious participation
+
+The gate has now been redesigned locally to be softer and more quant-aware instead of just stricter.
+
+Files changed:
+
+- `src/training/train_tft.py`
+- `src/training/meta_gate.py`
+- `src/evaluation/walkforward.py`
+- `tests/test_walkforward.py`
+
+What changed in the new gate:
+
+- tradeability labels are now soft instead of hard all-or-nothing masks
+- quant context is converted into a continuous `quant_tradeability_score` instead of strict rule cutoffs
+- gate inference now blends:
+  - learned logistic gate score
+  - quant tradeability score
+- the precision/meta gate combiner is softer and no longer punishes moderate scores as harshly
+- walk-forward threshold search now considers much lower gate quantiles and targets non-dead participation more explicitly
+
+Important local verification:
+
+- `tests.test_walkforward` passes
+- `scripts/validate_pipeline.py` passes
+
+Local recalibration sanity check on the synced `mh12_full_v8` slice:
+
+- recalibrated gate threshold: about `0.5631`
+- recalibrated gate participation: about `16.01%`
+- recalibrated gate train precision: about `50.09%`
+- recalibrated applied positive rate matches train participation exactly after the inference/training blend bug was fixed
+
+Important interpretation:
+
+- this redesign does **not** mean `v8` suddenly became profitable
+- it does mean the gate is now being pushed toward a usable middle zone instead of the old binary failure:
+  - `everything passes`
+  - or `nothing passes`
+
+Practical next step from here:
+
+1. regenerate the saved precision/meta gate artifacts under this softer quant-aware logic
+2. rerun local `15m` execution-aware checks first
+3. then use the redesigned gate in the next `v9` / selector-focused cycle
+
+Local compatibility note:
+
+- rerunning `mh12_full_v8` with the redesigned gate *application* but the old saved `v8` gate artifact no longer collapsed to `0` trades
+- but it became effectively too permissive on the local week slice, which means:
+  - the new gate scoring scale and the old saved gate threshold are no longer a trustworthy match
+- conclusion:
+- the code redesign is correct
+- the persisted gate artifacts now need to be regenerated under the new logic before any honest full-stack comparison is made
+
+## Current Gate Refresh Status
+
+The `v8` gate-refresh pass has now been launched on the cloud Jupyter server instead of doing a full retrain.
+
+Purpose:
+
+- keep the existing `mh12_full_v8` and `mh12_recent_v8` checkpoints
+- regenerate:
+  - `precision_gate_*`
+  - `meta_gate_*`
+- rerun walk-forward / backtest so the saved gate thresholds match the new softer gate scale
+
+New scripts added for this refresh:
+
+- `scripts/regenerate_gate_artifacts.py`
+- `scripts/remote_v8_gate_refresh.py`
+- `scripts/launch_remote_v8_gate_refresh_jupyter.py`
+- `scripts/check_remote_v8_gate_refresh_status_jupyter.py`
+
+Current remote status at handoff:
+
+- remote PID: `1231842`
+- remote log: `/home/rocm-user/jupyter/nexus/outputs/logs/remote_v8_gate_refresh.log`
+- current confirmed stage: `regenerate_gate_mh12_full_v8`
+
+Important note:
+
+- this is **not** a full `v8` retrain
+- it is a much cheaper recalibration pass over the saved `v8` checkpoints and artifacts
+
+## Local V8 Direct Manual Terminal Update
+
+Date:
+
+- `2026-04-04T11:52:43+05:30`
+
+What was completed locally:
+
+- redesigned the local dashboard UI into a dark glass / soft-neumorphic terminal
+- exposed `Signal Stack` selection directly in the UI
+- defaulted the local operator flow to `V8 Direct Manual`
+- kept `LM Studio Local` as the primary local sidecar route
+- added top status-header pills for:
+  - local session
+  - market status
+  - model mode
+  - latency
+  - live/manual mode
+  - LLM route
+- added dedicated manual-trading hero cards and restored the missing `LLM Persona Tilts` panel
+
+Files changed:
+
+- `src/ui/web.py`
+- `src/service/app.py` (already had the `v8_direct` path and was validated)
+
+Local runtime status:
+
+- local server started successfully in `v8_direct` mode
+- URL: `http://127.0.0.1:8000/ui`
+- server PID: `22872`
+- local logs:
+  - `outputs/logs/local_v8_direct_server.out.log`
+  - `outputs/logs/local_v8_direct_server.err.log`
+
+Smoke verification:
+
+- `/ui` serves the redesigned terminal shell
+- `/api/simulate-live?symbol=XAUUSD&llm_provider=lm_studio&stack_mode=v8_direct` returns:
+  - `stack_mode = v8_direct`
+  - `manual_trading_mode = true`
+  - `final_forecast.mode = v8_direct`
+  - `ensemble_prediction.mode = v8_direct`
+
+Operational meaning:
+
+- this local terminal is now running `V8 only` for manual desk usage
+- external gate veto is not being used in this local operating mode
+- the user is expected to take trades manually from the projected path / final judge / structure view rather than allow auto-filtered execution
