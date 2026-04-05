@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from src.v13.daps import maximum_lot_for_leverage
+
 try:
     import backtrader as bt  # type: ignore
 except Exception:  # pragma: no cover
@@ -45,6 +47,25 @@ def scaled_lot_for_equity(
         return float(max_lot)
     progress = (equity - start_equity) / max(end_equity - start_equity, 1e-6)
     return float(start_lot + progress * (max_lot - start_lot))
+
+
+def cap_lot_by_leverage(
+    lot: float,
+    *,
+    equity: float,
+    price_per_ounce: float,
+    contract_size_oz: float,
+    max_account_leverage: float | None,
+) -> float:
+    leverage_cap = maximum_lot_for_leverage(
+        current_equity=float(equity),
+        max_account_leverage=max_account_leverage,
+        price_per_ounce=price_per_ounce,
+        contract_size_oz=contract_size_oz,
+    )
+    if leverage_cap is None:
+        return float(lot)
+    return float(min(float(lot), float(leverage_cap)))
 
 
 def build_v12_signal_plan(
@@ -101,6 +122,7 @@ if bt is not None:
             start_equity=1000.0,
             end_equity=2500.0,
             contract_size_oz=100.0,
+            max_account_leverage=None,
         )
 
         def __init__(self) -> None:
@@ -130,9 +152,33 @@ if bt is not None:
                         start_equity=float(self.p.start_equity),
                         end_equity=float(self.p.end_equity),
                     )
+                current_price = float(self.datas[0].close[0]) if len(self.datas[0].close) else 0.0
+                lot = cap_lot_by_leverage(
+                    lot,
+                    equity=float(self.broker.getvalue()),
+                    price_per_ounce=current_price,
+                    contract_size_oz=float(self.p.contract_size_oz),
+                    max_account_leverage=self.p.max_account_leverage,
+                )
+                if lot <= 0.0:
+                    self.skipped_log.append(
+                        {
+                            "sample_id": int(self.active_plan.get("sample_id", -1)),
+                            "decision_ts": str(dt),
+                            "reason": "lot_below_minimum",
+                            "regime": str(self.active_plan.get("dominant_regime", "unknown")),
+                            "uts_score": float(self.active_plan.get("uts_score", 0.0) or 0.0),
+                        }
+                    )
+                    self.active_plan = None
+                    return
                 size = float(lot * float(self.p.contract_size_oz))
                 self.active_plan["planned_lot"] = lot
                 self.active_plan["planned_size_oz"] = size
+                notional_value = float(size * current_price)
+                equity = float(self.broker.getvalue())
+                self.active_plan["planned_notional_usd"] = notional_value
+                self.active_plan["effective_leverage"] = 0.0 if equity <= 0.0 else float(notional_value / equity)
                 self.active_plan["entry_dt"] = dt
                 if int(self.active_plan.get("direction", 1)) > 0:
                     self.pending_order = self.buy(size=size)

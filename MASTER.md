@@ -3899,3 +3899,180 @@ What is still not solved:
 ### V14 Recommendation
 
 Keep the BCFE plus CABR plus UTS stack, improve CABR beyond `0.56` with stronger context conditioning, materially reduce RCPC calibration error, and extend Stage 3 paper-trade validation before any live deployment claim.
+
+## V14 Research Systems Status
+
+### V14 Goal
+
+`V14` was the research cycle focused on three genuinely new systems plus two execution-layer upgrades:
+
+- `ACM` (`Asymmetric Crowd Memory`)
+- `BST` (`Branch Survival Testing`)
+- `SSC` (`Simulation Self-Critique`)
+- temporal `CABR`
+- `RSC` (`Regime-Stratified Calibration`)
+- `LDRG` (`Live Deployment Readiness Gate`)
+
+The local V14 prompt has now been completed end-to-end.
+
+### What Was Implemented
+
+New V14 modules landed in:
+
+- `src/v14/acm.py`
+- `src/v14/bst.py`
+- `src/v14/ssc.py`
+- `src/v14/rsc.py`
+- `src/v14/ldrg.py`
+- `src/v14/policy_utils.py`
+
+Supporting scripts and artifacts landed in:
+
+- `scripts/rebuild_branch_archive_v14.py`
+- `scripts/train_v14_ssc.py`
+- `scripts/check_ldrg_status.py`
+- `scripts/run_v14_backtrader_month_internal.py`
+- `scripts/run_v14_backtrader_walk_forward_internal.py`
+- `scripts/build_v14_summary.py`
+
+And V14 extended the existing stack in:
+
+- `src/simulation/personas.py`
+- `src/v13/cabr.py`
+- `src/v13/uts.py`
+- `scripts/train_v13_cabr.py`
+- `scripts/run_v12_backtrader_month.py`
+- `scripts/run_v12_backtrader_walk_forward.py`
+
+### Phase 1 to Phase 5 Result
+
+V14 archive rebuild and model training produced:
+
+- V14 branch archive rows: `77817`
+- V14 branch archive columns: `129`
+- trusted BCFE feature count carried forward: `25`
+- mean `bst_survival_score`: `0.797247`
+- mean `fear_index_retail`: `0.006196`
+- mean `fear_index_institutional`: `0.004462`
+
+Temporal CABR result:
+
+- held-out pairwise accuracy: `0.641945`
+- V13 snapshot CABR baseline: `0.531314`
+- delta vs V13: `+0.110631`
+- target `> 0.56`: reached
+
+Per-regime temporal CABR accuracy:
+
+- `panic_shock`: `0.628223`
+- `ranging`: `0.642303`
+- `trending_down`: `0.679702`
+- `trending_up`: `0.610354`
+
+SSC result:
+
+- assumption risk MAE: `0.173623`
+- context consistency MAE: `0.467224`
+- contradiction depth MAE: `0.112124`
+- composite critique score mean: `0.791785`
+- device: `cuda`
+
+### Phase 8 Walk-Forward Result
+
+Full V14 walk-forward replay across all available months:
+
+- months replayed: `37`
+- aggregate trades: `61`
+- aggregate win rate: `0.770492`
+- aggregate return sum: `17.134118%`
+- aggregate profit factor: `4.242104`
+- profitable months: `24 / 37`
+- objective-pass months: `0 / 37`
+- max single-month drawdown: `1.405340%`
+- average Stage 1 vs Stage 2 gap: `0.000576`
+- average SSC rejection rate: `0.0`
+- average BST survival score: `0.852102`
+
+RSC walk-forward status:
+
+- paper trades accumulated: `61`
+- paper-trade win rate: `0.786885`
+- learned regimes: `ranging`
+- max RSC calibration error: `0.513619`
+- per-regime RSC error:
+  - `ranging`: `0.367899`
+  - `panic_shock`: `0.513619`
+  - `trending_down`: `0.400676`
+
+### December 2023 Backtrader Month
+
+Latest required V14 month replay:
+
+- month: `2023-12`
+- starting capital: `$1000`
+- final capital: `$1010.04`
+- net profit: `$10.04`
+- return: `+1.003767%`
+- trades executed: `3`
+- win rate: `0.666667`
+- max drawdown: `1.405340%`
+- profit factor: `1.697216`
+- Stage 1 vs Stage 2 gap: `0.001171`
+
+Comparison versus V13:
+
+- V13 month replay: `$1015.49`, `17` trades, `0.588235` win rate, `1.740793` profit factor
+- V14 month replay: `$1010.04`, `3` trades, `0.666667` win rate, `1.697216` profit factor
+
+So V14 improved ranking quality and selectivity, but the practical month profile became too conservative.
+
+### LDRG Result
+
+Current local `LDRG` status:
+
+- tier: `0`
+- recommendation: `Continue research. Tier 1 not yet complete.`
+- blocking criteria:
+  - `wf_profitable_months_85pct`
+  - `s3pta_200plus_trades`
+  - `rsc_error_below_020`
+
+### Current Honest V14 Read
+
+V14 is a meaningful research improvement, but it is not a deployment-readiness pass.
+
+What is now true:
+
+- the full V14 prompt was completed
+- temporal CABR materially exceeded the `> 0.56` target
+- BST appears directionally helpful for robustness, with higher-BST months showing better average profit factor than lower-BST months
+- walk-forward drawdown improved sharply versus V13
+- LDRG is now formalised and the remaining blockers are explicit
+
+What is still not solved:
+
+- RSC calibration error is still far above the `0.20` target
+- the V14 policy under-trades badly relative to the required month objective
+- SSC is trained and integrated, but it is not yet affecting live decisions in practice because rejection rate stayed at `0.0`
+- profitable month breadth fell below the Tier 1 requirement
+- V14 still does not justify live deployment
+
+### V15 Recommendation
+
+V15 should keep the temporal CABR gains, keep ACM and BST, and focus on execution-policy recovery rather than another ranking jump.
+
+Strongest next moves:
+
+- reduce excessive conservatism in `LRTD` and thresholding so trade coverage recovers
+- push `RSC` below `0.20` per regime with more paper trades and stronger regime-specific calibration constraints
+- make `SSC` operationally meaningful as a real veto or size-scaling signal
+- run an explicit `BST` ablation so the robustness contribution is measured causally, not only observationally
+
+### V14 Summary Artifacts
+
+Final V14 deliverables were written to:
+
+- `outputs/evaluation/v14_summary.json`
+- `outputs/evaluation/v14_summary.md`
+- `outputs/v14/research_paper_outline.md`
+- `outputs/v14/ldrg_status.json`

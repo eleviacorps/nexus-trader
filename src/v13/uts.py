@@ -41,18 +41,25 @@ def derive_contradiction_type(
 def unified_trade_score(
     cabr_score: float,
     calibrated_win_prob: float,
-    branch_diversity: float,
-    analog_confidence: float,
+    branch_diversity: float = 0.5,
+    analog_confidence: float = 0.5,
     contradiction_type: str = 'unknown',
     emotional_momentum: float = 0.0,
+    *,
+    bst_survival_score: float | None = None,
+    ssc_critique_score: float | None = None,
 ) -> float:
     contradiction_penalty = float(CONTRADICTION_PENALTIES.get(str(contradiction_type), CONTRADICTION_PENALTIES['unknown']))
+    robustness_score = float(branch_diversity if bst_survival_score is None else bst_survival_score)
     raw_uts = (
         0.35 * float(cabr_score) +
         0.30 * float(calibrated_win_prob) +
-        0.20 * float(branch_diversity) +
+        0.22 * float(robustness_score) +
         0.15 * float(analog_confidence)
     ) - contradiction_penalty - max(0.0, abs(float(emotional_momentum)) - 0.5) * 0.05
+    if ssc_critique_score is not None:
+        critique = float(np.clip(ssc_critique_score, 0.0, 1.0))
+        raw_uts += (0.06 * critique) - ((1.0 - critique) * 0.08)
     return float(np.clip(raw_uts, 0.0, 1.0))
 
 

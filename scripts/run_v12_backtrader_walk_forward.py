@@ -17,7 +17,7 @@ from src.v12.tctl import replay_candidates_with_online_bcfe
 from src.v13.cabr import augment_cabr_context, load_v13_candidate_frames
 
 
-def _available_months() -> list[str]:
+def _available_months_v13() -> list[str]:
     archive = pd.read_parquet(PROJECT_ROOT / 'outputs' / 'v10' / 'branch_features_v10_full.parquet')
     _, valid_frame, _, _ = load_v13_candidate_frames(archive)
     replay = augment_cabr_context(replay_candidates_with_online_bcfe(valid_frame))
@@ -26,24 +26,18 @@ def _available_months() -> list[str]:
     return months
 
 
-def _report_path_for_month(month: str) -> Path:
+def _report_path_for_month_v13(month: str) -> Path:
     if month == '2023-12':
         return PROJECT_ROOT / 'outputs' / 'v13' / 'backtrader_month_2023_12_v13.json'
     return PROJECT_ROOT / 'outputs' / 'v13' / f'backtrader_month_{month.replace("-", "_")}_v13.json'
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description='Run V13 month replay across all available replay months.')
-    parser.add_argument('--version', default='v13')
-    args = parser.parse_args()
-    if str(args.version).strip().lower() != 'v13':
-        raise SystemExit('This script currently supports --version v13 only.')
-
+def _run_v13() -> int:
     script = PROJECT_ROOT / 'scripts' / 'run_v12_backtrader_month.py'
-    months = _available_months()
+    months = _available_months_v13()
     reports = []
     for month in months:
-        report_path = _report_path_for_month(month)
+        report_path = _report_path_for_month_v13(month)
         if not report_path.exists():
             completed = subprocess.run([sys.executable, str(script), '--month', str(month), '--version', 'v13'], cwd=str(PROJECT_ROOT), check=False)
             if completed.returncode != 0:
@@ -87,5 +81,22 @@ def main() -> int:
     return 0
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Run V13 or V14 month replay across all available replay months.')
+    parser.add_argument('--version', default='v13')
+    args = parser.parse_args()
+    version = str(args.version).strip().lower()
+    if version == 'v13':
+        return _run_v13()
+    if version == 'v14':
+        from scripts.run_v14_backtrader_walk_forward_internal import main as run_v14_main
+        return run_v14_main()
+    if version == 'v15':
+        from scripts.run_v15_backtrader_walk_forward_internal import main as run_v15_main
+        return run_v15_main()
+    raise SystemExit('This script currently supports --version v13, --version v14, or --version v15.')
+
+
 if __name__ == '__main__':
     raise SystemExit(main())
+

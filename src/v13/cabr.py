@@ -44,6 +44,9 @@ CONTEXT_SCALAR_COLUMNS: tuple[str, ...] = (
     'context_emotional_fragility',
     'context_emotional_conviction',
     'context_narrative_age',
+    'fear_index_retail',
+    'fear_index_institutional',
+    'fear_index_algo',
 )
 
 
@@ -113,6 +116,30 @@ class ContextEncoder(nn.Module):
         return self.net(x)
 
 
+class TemporalContextEncoder(nn.Module):
+    def __init__(
+        self,
+        feature_dim: int,
+        hidden_dim: int = 64,
+        n_bars: int = 12,
+        n_layers: int = 2,
+    ):
+        super().__init__()
+        self.n_bars = int(n_bars)
+        self.gru = nn.GRU(
+            feature_dim,
+            hidden_dim,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=0.10 if n_layers > 1 else 0.0,
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, context_sequence: torch.Tensor) -> torch.Tensor:
+        _, h_n = self.gru(context_sequence)
+        return self.norm(h_n[-1])
+
+
 class CABR(nn.Module):
     def __init__(
         self,
@@ -120,10 +147,21 @@ class CABR(nn.Module):
         context_feature_dim: int,
         embed_dim: int = 64,
         n_heads: int = 4,
+        use_temporal_context: bool = False,
+        n_context_bars: int = 12,
     ):
         super().__init__()
         self.branch_encoder = BranchEncoder(branch_feature_dim, embed_dim)
-        self.context_encoder = ContextEncoder(context_feature_dim, embed_dim)
+        if use_temporal_context:
+            self.context_encoder = TemporalContextEncoder(
+                context_feature_dim,
+                hidden_dim=embed_dim,
+                n_bars=n_context_bars,
+            )
+        else:
+            self.context_encoder = ContextEncoder(context_feature_dim, embed_dim)
+        self.use_temporal = bool(use_temporal_context)
+        self.n_context_bars = int(n_context_bars)
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads=n_heads, dropout=0.10, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
         self.score_head = nn.Sequential(
@@ -134,7 +172,12 @@ class CABR(nn.Module):
 
     def score(self, branch_features: torch.Tensor, context_features: torch.Tensor) -> torch.Tensor:
         b_emb = self.branch_encoder(branch_features).unsqueeze(1)
-        c_emb = self.context_encoder(context_features).unsqueeze(1)
+        if self.use_temporal and context_features.dim() == 3:
+            c_emb = self.context_encoder(context_features).unsqueeze(1)
+        else:
+            if context_features.dim() == 3:
+                context_features = context_features[:, -1, :]
+            c_emb = self.context_encoder(context_features).unsqueeze(1)
         attn_out, _ = self.cross_attn(query=c_emb, key=b_emb, value=b_emb)
         combined = self.norm(b_emb + attn_out).squeeze(1)
         return self.score_head(combined).squeeze(-1)
@@ -230,10 +273,33 @@ def augment_cabr_context(frame: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def prepare_context_sequences(
+    frame: pd.DataFrame,
+    *,
+    context_cols: Sequence[str],
+    n_bars: int = 12,
+) -> np.ndarray:
+    working = frame.copy()
+    working['timestamp'] = pd.to_datetime(working['timestamp'], utc=True, errors='coerce')
+    working = working.sort_values('timestamp').reset_index(drop=True)
+    context_values = working[list(context_cols)].fillna(0.0).to_numpy(dtype=np.float32)
+    sequences: list[np.ndarray] = []
+    for idx in range(len(context_values)):
+        start = max(0, idx - int(n_bars))
+        window = context_values[start:idx]
+        if len(window) < int(n_bars):
+            pad = np.zeros((int(n_bars) - len(window), context_values.shape[1]), dtype=np.float32)
+            window = np.vstack([pad, window]) if len(window) else pad
+        sequences.append(window.astype(np.float32))
+    return np.asarray(sequences, dtype=np.float32)
+
+
 def load_v13_candidate_frames(
     archive: pd.DataFrame,
     *,
     validation_fraction: float = 0.2,
+    use_temporal_context: bool = False,
+    n_context_bars: int = 12,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], tuple[str, ...]]:
     train_frame, valid_frame, _ = prepare_tctl_candidates(archive, validation_fraction=validation_fraction)
     train_frame = augment_cabr_context(train_frame)
@@ -247,6 +313,8 @@ def build_cabr_pairs(
     *,
     branch_feature_names: Sequence[str],
     context_feature_names: Sequence[str],
+    use_temporal_context: bool = False,
+    n_context_bars: int = 12,
     regime_col: str = 'regime_class',
     hard_negative_ratio: float = 0.33,
     similarity_threshold: float = 0.80,
@@ -256,7 +324,10 @@ def build_cabr_pairs(
     working['timestamp'] = pd.to_datetime(working['timestamp'], utc=True, errors='coerce')
     working = working.sort_values('timestamp').reset_index(drop=True)
     branch_values = working[list(branch_feature_names)].fillna(0.0).to_numpy(dtype=np.float32)
-    context_values = working[list(context_feature_names)].fillna(0.0).to_numpy(dtype=np.float32)
+    if use_temporal_context:
+        context_values = prepare_context_sequences(working, context_cols=context_feature_names, n_bars=n_context_bars)
+    else:
+        context_values = working[list(context_feature_names)].fillna(0.0).to_numpy(dtype=np.float32)
     outcomes = working['setl_target_net_unit_pnl'].to_numpy(dtype=np.float32)
     regimes = working.get(regime_col, 'ranging').astype(str).to_numpy()
 
@@ -387,6 +458,8 @@ def train_cabr_model(
     *,
     branch_feature_names: Sequence[str],
     context_feature_names: Sequence[str],
+    use_temporal_context: bool = False,
+    n_context_bars: int = 12,
     device: str | None = None,
     epochs: int = 30,
     batch_size: int = 256,
@@ -394,12 +467,29 @@ def train_cabr_model(
     checkpoint_path: Path = V13_CABR_MODEL_PATH,
 ) -> dict[str, Any]:
     target_device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-    train_pairs = build_cabr_pairs(train_frame, branch_feature_names=branch_feature_names, context_feature_names=context_feature_names)
-    valid_pairs = build_cabr_pairs(valid_frame, branch_feature_names=branch_feature_names, context_feature_names=context_feature_names)
+    train_pairs = build_cabr_pairs(
+        train_frame,
+        branch_feature_names=branch_feature_names,
+        context_feature_names=context_feature_names,
+        use_temporal_context=use_temporal_context,
+        n_context_bars=n_context_bars,
+    )
+    valid_pairs = build_cabr_pairs(
+        valid_frame,
+        branch_feature_names=branch_feature_names,
+        context_feature_names=context_feature_names,
+        use_temporal_context=use_temporal_context,
+        n_context_bars=n_context_bars,
+    )
     if len(train_pairs['pairs']) == 0:
         raise ValueError('CABR training produced no valid within-regime pairs.')
 
-    model = CABR(len(branch_feature_names), len(context_feature_names)).to(target_device)
+    model = CABR(
+        len(branch_feature_names),
+        len(context_feature_names),
+        use_temporal_context=use_temporal_context,
+        n_context_bars=n_context_bars,
+    ).to(target_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(epochs), 1))
     train_loader = _pair_dataloader(train_pairs, batch_size=batch_size, shuffle=True)
@@ -437,6 +527,8 @@ def train_cabr_model(
                 'context_feature_names': tuple(context_feature_names),
                 'embed_dim': 64,
                 'n_heads': 4,
+                'use_temporal_context': bool(use_temporal_context),
+                'n_context_bars': int(n_context_bars),
                 'best_accuracy': best_acc,
                 'loss_history': loss_history,
                 'valid_accuracy_history': valid_history,
@@ -466,6 +558,8 @@ def load_cabr_model(path: Path = V13_CABR_MODEL_PATH, *, map_location: str | Non
         context_feature_dim=len(context_feature_names),
         embed_dim=int(payload.get('embed_dim', 64)),
         n_heads=int(payload.get('n_heads', 4)),
+        use_temporal_context=bool(payload.get('use_temporal_context', False)),
+        n_context_bars=int(payload.get('n_context_bars', 12)),
     )
     model.load_state_dict(payload['state_dict'])
     model.eval()
@@ -484,7 +578,10 @@ def score_cabr_model(
     model = model.to(target_device)
     model.eval()
     branch_values = np.asarray(frame[list(branch_feature_names)].fillna(0.0).to_numpy(dtype=np.float32), order='C').copy()
-    context_values = np.asarray(frame[list(context_feature_names)].fillna(0.0).to_numpy(dtype=np.float32), order='C').copy()
+    if getattr(model, 'use_temporal', False):
+        context_values = prepare_context_sequences(frame, context_cols=context_feature_names, n_bars=getattr(model, 'n_context_bars', 12))
+    else:
+        context_values = np.asarray(frame[list(context_feature_names)].fillna(0.0).to_numpy(dtype=np.float32), order='C').copy()
     with torch.no_grad():
         branch_tensor = torch.from_numpy(branch_values).to(device=target_device)
         context_tensor = torch.from_numpy(context_values).to(device=target_device)

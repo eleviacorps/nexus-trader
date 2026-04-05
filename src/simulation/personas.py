@@ -9,6 +9,7 @@ from typing import Dict, Mapping
 import numpy as np
 
 from src.simulation.strategies import StrategySignal, strategy_map
+from src.v14.acm import build_acm_memories
 
 
 @dataclass
@@ -24,8 +25,9 @@ class Persona:
         weighted_signal = 0.0
         weighted_confidence = 0.0
         total_weight = 0.0
+        effective_weights = self._strategy_weights_with_memory(row)
 
-        for strategy_name, weight in self.strategy_weights.items():
+        for strategy_name, weight in effective_weights.items():
             fn = strategy_map().get(strategy_name)
             if fn is None:
                 continue
@@ -84,6 +86,35 @@ class Persona:
         if self.name == "noise":
             return 0.02 * crowd_extreme
         return 0.0
+
+    def _strategy_weights_with_memory(self, row: Mapping[str, float]) -> Dict[str, float]:
+        weights = {key: float(value) for key, value in self.strategy_weights.items()}
+        recent_bars = row.get("recent_bars")
+        fear_index = float(row.get(f"fear_index_{self.name}", 0.0) or 0.0)
+        if isinstance(recent_bars, (list, tuple)) and recent_bars:
+            try:
+                memories = build_acm_memories(recent_bars)
+                fear_index = max(fear_index, float(memories.get(self.name).fear_index if self.name in memories else 0.0))
+            except Exception:
+                pass
+        modifier_map = (
+            build_acm_memories(recent_bars).get(self.name).strategy_weight_modifier()
+            if isinstance(recent_bars, (list, tuple)) and recent_bars
+            else None
+        )
+        if modifier_map is None:
+            modifier_map = {
+                "trend": max(0.3, 1.0 - fear_index * 0.6),
+                "mean_rev": min(2.0, 1.0 + fear_index * 0.8),
+                "ict": min(1.8, 1.0 + fear_index * 0.5) if self.name == "institutional" else 1.0,
+                "momentum": max(0.4, 1.0 - fear_index * 0.4),
+                "smc": 1.0,
+            }
+        adjusted = {name: max(0.0, weights.get(name, 0.0) * float(modifier_map.get(name, 1.0))) for name in weights}
+        total = sum(adjusted.values())
+        if total <= 0.0:
+            return weights
+        return {name: value / total for name, value in adjusted.items()}
 
 
 def rng_gauss_like(scale: float) -> float:
