@@ -206,10 +206,18 @@ def augment_cabr_context(frame: pd.DataFrame) -> pd.DataFrame:
     cem = build_crowd_emotional_momentum(working)
     if not cem.empty:
         working = working.merge(cem, on='sample_id', how='left')
-    working['context_emotional_momentum'] = working.get('cem_momentum', 0.0).fillna(0.0).astype(float)
-    working['context_emotional_fragility'] = working.get('cem_fragility', 0.5).fillna(0.5).astype(float)
-    working['context_emotional_conviction'] = working.get('cem_conviction', 0.5).fillna(0.5).astype(float)
-    working['context_narrative_age'] = working.get('cem_narrative_age', 0).fillna(0).astype(float)
+    if 'cem_momentum' not in working.columns:
+        working['cem_momentum'] = 0.0
+    if 'cem_fragility' not in working.columns:
+        working['cem_fragility'] = 0.5
+    if 'cem_conviction' not in working.columns:
+        working['cem_conviction'] = 0.5
+    if 'cem_narrative_age' not in working.columns:
+        working['cem_narrative_age'] = 0.0
+    working['context_emotional_momentum'] = working['cem_momentum'].fillna(0.0).astype(float)
+    working['context_emotional_fragility'] = working['cem_fragility'].fillna(0.5).astype(float)
+    working['context_emotional_conviction'] = working['cem_conviction'].fillna(0.5).astype(float)
+    working['context_narrative_age'] = working['cem_narrative_age'].fillna(0).astype(float)
 
     for regime_name in REGIME_CLASSES:
         working[f'context_regime_{regime_name}'] = (working['regime_class'] == regime_name).astype(float)

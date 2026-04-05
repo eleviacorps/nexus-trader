@@ -173,6 +173,8 @@ def run_v13(args: argparse.Namespace) -> int:
     data = V12SignalData(dataname=raw_bars.tz_convert(None))
     cerebro = bt.Cerebro(stdstats=False)
     cerebro.broker.setcash(float(args.capital))
+    cerebro.broker.setcommission(commission=0.0, margin=0.0, mult=1.0, leverage=100.0, stocklike=False)
+    cerebro.broker.set_slippage_perc(float(args.slippage_pips) * float(args.pip_size) / max(float(raw_bars['close'].iloc[-1]), 1e-6), slip_open=True, slip_limit=True, slip_match=True, slip_out=False)
     cerebro.adddata(data)
     cerebro.addstrategy(
         NexusV12Strategy,
@@ -287,4 +289,6 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+
 

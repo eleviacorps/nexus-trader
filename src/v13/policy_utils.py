@@ -82,7 +82,7 @@ def enrich_v13_policy_frame(
 
 
 def fit_uts_selector(train_frame: pd.DataFrame, *, score_column: str = 'uts_score') -> UTSThresholdSelector:
-    selector = UTSThresholdSelector(target_participation=0.35, min_participation=0.20, max_participation=0.45)
+    selector = UTSThresholdSelector(target_participation=0.45, min_participation=0.25, max_participation=0.60)
     selector.fit(
         train_frame[score_column].to_numpy(dtype=np.float32),
         train_frame.get('regime_class', train_frame.get('dominant_regime', 'ranging')).tolist(),
@@ -128,7 +128,7 @@ def generate_v13_decisions(
     *,
     threshold_selector: UTSThresholdSelector,
     deployable_regimes: Iterable[str],
-    lrtd_threshold: float = 0.30,
+    lrtd_threshold: float = 0.55,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     ranked = frame.sort_values(['sample_id', 'uts_score'], ascending=[True, False], kind='mergesort').groupby('sample_id', sort=False).head(1).copy()
     ranked = ranked.sort_values('decision_ts').reset_index(drop=True)
@@ -178,3 +178,4 @@ def generate_v13_decisions(
 
     executed = ranked.iloc[keep_rows].copy().reset_index(drop=True) if keep_rows else ranked.iloc[0:0].copy()
     return executed, skipped
+

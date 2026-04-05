@@ -3774,3 +3774,128 @@ Next strongest move:
 - improve TCTL pair construction and threshold selection
 - fix the overly conservative confidence calibration path
 - run a real Stage 3 paper-trade window before any live deployment claim
+
+## V13 Execution-Layer Research Status
+
+### V13 Goal
+
+`V13` was the execution-layer repair cycle after `V12` proved that feature consistency was much better but the trade stack was still too weak and too conservative.
+
+The full local V13 prompt is now completed end-to-end.
+
+### What Was Implemented
+
+New local V13 architecture landed across:
+
+- `src/v13/cabr.py`
+- `src/v13/rcpc.py`
+- `src/v13/uts.py`
+- `src/v13/s3pta.py`
+- `src/v13/daps.py`
+- `src/v13/mbeg.py`
+- `src/v13/lrtd.py`
+- `src/v13/policy_utils.py`
+
+And the supporting execution / evaluation path was wired through:
+
+- `src/v12/backtrader_strategy.py`
+- `src/v12/sarv.py`
+- `src/service/app.py`
+- `scripts/train_v13_cabr.py`
+- `scripts/evaluate_v13_cabr.py`
+- `scripts/run_s3pta.py`
+- `scripts/run_v12_backtrader_month.py`
+- `scripts/run_v12_backtrader_walk_forward.py`
+
+### Phase 0 Truth
+
+V13 continues to trust only the `25` BCFE-consistent features from V12 and rejects the `11` failing features.
+
+### Phase 1 and Phase 2 Result
+
+Patched regime-fixed V12 baseline:
+
+- held-out pairwise accuracy: `0.499369`
+
+CABR result:
+
+- held-out pairwise accuracy: `0.531314`
+- delta vs patched V12 baseline: `+0.031945`
+- delta vs original V12 summary value: `+0.047183`
+
+Honest interpretation:
+
+- CABR is a real step forward
+- but it still missed the `> 0.56` target from the V13 prompt
+
+### RCPC / UTS / S3PTA / DAPS / MBEG / LRTD Result
+
+Current local status:
+
+- RCPC switched to learned calibration after `54` real paper trades
+- current RCPC calibration error: `0.391655`
+- S3PTA paper trades: `54`
+- S3PTA paper-trade win rate: `0.388889`
+- UTS deployable regimes in the current month run: `panic_shock`, `ranging`, `trending_down`, `trending_up`
+- DAPS average lot in the month replay: `0.018824`
+- MBEG veto rate in the month replay: `0.0`
+- LRTD suppression rate in the month replay: `0.119048`
+
+### December 2023 Backtrader Month
+
+Latest required V13 month replay:
+
+- month: `2023-12`
+- starting capital: `$1000`
+- final capital: `$1015.49`
+- net profit: `$15.49`
+- return: `+1.549369%`
+- trades executed: `17`
+- win rate: `0.588235`
+- max drawdown: `1.110708%`
+- profit factor: `1.740793`
+- Stage 1 vs Stage 2 gap: `0.000005`
+
+Important comparison versus V12:
+
+- V12 month replay: `$1000 -> $1000`, `0` trades
+- V13 month replay: `$1000 -> $1015.49`, `17` trades
+
+So the practical V13 improvement is real: the system moved from no usable month activity to a passing month replay under the required Backtrader path.
+
+### V13 Walk-Forward Result
+
+Full walk-forward replay across all available replay months:
+
+- months replayed: `37`
+- aggregate trades: `570`
+- aggregate win rate: `0.675439`
+- aggregate return sum: `89.774457%`
+- profitable months: `32 / 37`
+- objective-pass months: `21 / 37`
+- max single-month drawdown: `11.463713%`
+- average monthly return: `2.426337%`
+- average monthly trades: `15.405405`
+
+### Current Honest V13 Read
+
+V13 is the first local version that looks meaningfully viable in realistic replay terms.
+
+What is now true:
+
+- the full V13 prompt was completed
+- CABR improved ranking quality materially
+- RCPC calibration state now actually progresses from priors to learned calibration
+- the V13 Backtrader month objective was met
+- the walk-forward profile is directionally strong
+
+What is still not solved:
+
+- CABR still missed the prompt target of `> 0.56`
+- RCPC calibration error is still far too high for a confident production claim
+- S3PTA paper-trade quality is still not strong enough to call execution fully solved
+- only `21` of `37` walk-forward months met the full objective band
+
+### V14 Recommendation
+
+Keep the BCFE plus CABR plus UTS stack, improve CABR beyond `0.56` with stronger context conditioning, materially reduce RCPC calibration error, and extend Stage 3 paper-trade validation before any live deployment claim.
