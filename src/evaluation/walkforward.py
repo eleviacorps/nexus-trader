@@ -525,6 +525,18 @@ def _loader_kwargs() -> dict[str, Any]:
     return kwargs
 
 
+def build_v12_regime_isolation_report(
+    frame: Any,
+    *,
+    outcome_col: str = "setl_target_net_unit_pnl",
+    trade_mask: np.ndarray | None = None,
+    regime_col: str = "dominant_regime",
+) -> dict[str, Any]:
+    from src.v12.wfri import build_regime_isolation_report
+
+    return build_regime_isolation_report(frame, outcome_col=outcome_col, trade_mask=trade_mask, regime_col=regime_col)
+
+
 def fixed_risk_capital_backtest_from_unit_pnl(
     pnl: np.ndarray,
     *,

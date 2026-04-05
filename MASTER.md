@@ -3611,3 +3611,166 @@ Important local verification for this pass:
 - `tests.test_v11_research`: passes
 - `tests.test_walkforward`: passes
 - `tests.test_v9_runtime`: passes
+
+## V12 Execution-Consistency Pass
+
+V12 is now the active layer on top of the existing `v10` and `v11` stack.
+
+Core purpose:
+
+- close the archive-vs-execution gap that broke `v11` in Backtrader
+- make feature computation causal and bar-consistent
+- replace fragile absolute execution scoring with a contrastive ranker
+- enforce a staged validation protocol before trusting any live claim
+
+### What Landed
+
+Implemented in-code:
+
+- `src/v12/bar_consistent_features.py`
+- `src/v12/feature_consistency_audit.py`
+- `src/v12/tctl.py`
+- `src/v12/sarv.py`
+- `src/v12/live_confidence_calibrator.py`
+- `src/v12/wfri.py`
+- `src/v12/crowd_emotional_momentum.py`
+- `src/v12/backtrader_strategy.py`
+
+Runnable scripts:
+
+- `scripts/run_feature_consistency_audit.py`
+- `scripts/train_v12_tctl.py`
+- `scripts/run_sarv_validation.py`
+- `scripts/run_v12_backtrader_month.py`
+- `scripts/run_v12_backtrader_walk_forward.py`
+- `scripts/build_v12_summary.py`
+
+New final reports:
+
+- `outputs/v12/feature_consistency_report.json`
+- `outputs/v12/tctl_evaluation_report.json`
+- `outputs/v12/sarv_report.json`
+- `outputs/v12/backtrader_month_2023_12.json`
+- `outputs/evaluation/v12_summary.json`
+- `outputs/evaluation/v12_summary.md`
+
+### Important V12 Systems Fix
+
+The original `scripts/run_feature_consistency_audit.py` looked hung because the older online replay path was recomputing the full feature buffer bar by bar. That has now been fixed.
+
+Current V12 audit behavior:
+
+- prints progress immediately
+- uses the canonical causal BCFE path
+- completes in seconds instead of appearing dead for many minutes
+
+### Phase 1 Audit Result
+
+Feature consistency on the current local stack:
+
+- pass count: `25`
+- fail count: `11`
+- BCFE self-check fail count: `0`
+
+Current failing features:
+
+- `ema_cross`
+- `dist_to_high`
+- `dist_to_low`
+- `hh`
+- `ll`
+- `volume_ratio`
+- `session_asian`
+- `session_london`
+- `session_ny`
+- `dow_sin`
+- `dow_cos`
+
+Current V12 rule:
+
+- features that failed the audit are not treated as production-trustworthy V12 inputs
+- the BCFE-consistent passed subset is the safe path
+
+### TCTL Result
+
+Latest local `v12` TCTL training:
+
+- feature count: `50`
+- train candidates: `19,200`
+- valid candidates: `4,800`
+- held-out pairwise accuracy: `0.484131`
+- score diversity on valid set: `2,393` distinct rounded values
+- device: `cuda`
+
+Important interpretation:
+
+- this is better than the `v11` constant-score collapse pattern
+- but the ranker is still weak on held-out ordering quality
+- V12 solved transfer-consistency more clearly than raw ranking power
+
+### SARV Result
+
+Latest SARV report on the most recent `90`-day replay window:
+
+- Stage 1 win rate: `0.597222`
+- Stage 2 win rate: `0.597222`
+- Stage 2 gap: `0.0`
+- Stage 1 participation: `0.533333`
+- Stage 2 participation: `0.533333`
+- Stage 3: pending
+
+Important honesty:
+
+- V12 currently clears the primary gap metric on this local replay slice
+- but SARV still does **not** fully pass because:
+  - Stage 1 participation is above the allowed band
+  - Stage 3 paper-trade validation does not exist yet
+
+### One-Month Backtrader Result
+
+The required one-month Backtrader run was executed on `2023-12`.
+
+Why not `2024-01`:
+
+- current `v10` branch-feature coverage ends at `2023-12-29`
+- so a true `2024-01` V12 month cannot be built from the current archived candidate set
+
+Latest local month result:
+
+- month: `2023-12`
+- starting capital: `$1000`
+- final capital: `$1000`
+- return: `0.0%`
+- trades executed: `0`
+- plans generated: `1`
+- replay calibration error: `0.49805`
+
+Important interpretation:
+
+- this is materially better than the catastrophic `v11` Backtrader collapse in the narrow sense that the execution pipeline no longer explodes from feature mismatch
+- but it is **not yet a usable trading result**
+- the current calibrated gate plus WFRI policy is too conservative and produces effectively no month activity
+
+### WFRI / Calibration Status
+
+Current deployment profile from the local month run:
+
+- deployable regime classes: `trending_up` only
+- calibration error remains far above the `sub-5%` V12 aspiration
+
+So the current honest V12 read is:
+
+- BCFE is real
+- the audit infrastructure is real
+- the archive-vs-replay gap appears much tighter
+- TCTL no longer collapses to one score
+- but the current TCTL + calibration + regime gating stack is still not production-ready
+
+### Current V13 Recommendation
+
+Next strongest move:
+
+- keep BCFE as the only canonical feature path
+- improve TCTL pair construction and threshold selection
+- fix the overly conservative confidence calibration path
+- run a real Stage 3 paper-trade window before any live deployment claim

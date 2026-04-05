@@ -24,6 +24,7 @@ from src.service.llm_sidecar import request_market_context, sidecar_health
 from src.service.live_data import build_live_monitor, build_live_simulation, record_simulation_history, _build_final_forecast
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
+from src.v13.s3pta import PaperTradeAccumulator
 
 try:
     import torch  # type: ignore
@@ -406,6 +407,8 @@ def create_app() -> Any:
     server = ModelServer()
     app = FastAPI(title='Nexus Trader Inference API', version='0.2.0')
     default_stack_mode = os.getenv("NEXUS_STACK_MODE", "hybrid").strip().lower() or "hybrid"
+    s3pta_enabled = os.getenv("NEXUS_S3PTA_ENABLED", "0") == "1"
+    paper_trade_accumulator = PaperTradeAccumulator() if s3pta_enabled else None
 
     @app.get('/health')
     def health():
@@ -451,6 +454,28 @@ def create_app() -> Any:
         payload['history_entry'] = record_simulation_history(payload, payload.get('model_prediction'))
         payload['stack_mode'] = active_stack_mode
         payload['manual_trading_mode'] = active_stack_mode == "v8_direct"
+        if paper_trade_accumulator is not None:
+            try:
+                market = payload.get('market', {}) if isinstance(payload, dict) else {}
+                current_price = float(market.get('current_price', 0.0) or 0.0)
+                ensemble = payload.get('ensemble_prediction', {}) if isinstance(payload, dict) else {}
+                signal = str(ensemble.get('signal', 'bullish')).lower()
+                direction = 'BUY' if signal == 'bullish' else 'SELL'
+                regime = str(((payload.get('model_prediction') or {}).get('model_diagnostics') or {}).get('dominant_regime', 'unknown'))
+                timestamp = str(market.get('timestamp', ''))
+                if current_price > 0.0 and timestamp:
+                    paper_trade_accumulator.log_trade(
+                        symbol=symbol,
+                        direction=direction,
+                        uts_score=float(ensemble.get('confidence', 0.5) or 0.5),
+                        cabr_score=float(ensemble.get('bullish_probability', 0.5) or 0.5),
+                        regime=regime,
+                        entry_price=current_price,
+                        entry_time=timestamp,
+                        exit_time=timestamp,
+                    )
+            except Exception:
+                pass
         return payload
 
     @app.get('/api/live-monitor')
