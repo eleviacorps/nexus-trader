@@ -10,6 +10,7 @@ from src.v15.cpm import ConditionalPredictabilityMapper
 from src.v16.confidence_tier import ConfidenceTier, TIER_COLORS, TIER_LABELS, classify_confidence
 from src.v16.sel import sel_lot_size, should_execute
 from src.v16.sqt import SimulationQualityTracker
+from src.v17.relativistic_cone import RelativisticCone
 
 
 SYMBOL_PIP_SIZE = {
@@ -30,6 +31,8 @@ class SimulationResult:
     consensus_path: list[float]
     cone_upper: list[float]
     cone_lower: list[float]
+    cone_outer_upper: list[float]
+    cone_outer_lower: list[float]
     minority_path: list[float]
     minority_direction: str
     selected_branch_idx: int
@@ -47,6 +50,12 @@ class SimulationResult:
     should_execute: bool
     execution_reason: str
     suggested_lot: float
+    cone_type: str
+    cone_c_m: float
+    cone_h_plus: float
+    cone_h_minus: float
+    cone_compact_support: bool
+    cone_asymmetric: bool
 
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -81,6 +90,14 @@ def _horizon_cone(cone: list[Mapping[str, Any]], max_minutes: int) -> list[Mappi
             continue
         filtered.append(point)
     return filtered
+
+
+def _historical_log_returns(candles: list[Mapping[str, Any]]) -> np.ndarray:
+    closes = np.asarray([_safe_float(item.get("close"), 0.0) for item in candles], dtype=np.float64)
+    closes = closes[closes > 0.0]
+    if closes.size < 2:
+        return np.asarray([], dtype=np.float64)
+    return np.diff(np.log(closes))
 
 
 def _minority_path(branches: list[Mapping[str, Any]], highlighted: Mapping[str, Any], anchor_price: float, max_minutes: int) -> tuple[list[float], str]:
@@ -122,7 +139,10 @@ def build_v16_simulation_result(
     current_row = payload.get("current_row", {}) if isinstance(payload, Mapping) else {}
     symbol = str(payload.get("symbol", "XAUUSD"))
     anchor_price = _safe_float(market.get("current_price"), 0.0)
-    cone = _horizon_cone(list(payload.get("cone", [])), max_minutes=primary_horizon_minutes)
+    raw_cone = payload.get("cone", [])
+    if isinstance(raw_cone, Mapping):
+        raw_cone = list(raw_cone.get("points", []))
+    cone = _horizon_cone(list(raw_cone), max_minutes=primary_horizon_minutes)
     if not cone:
         cone = [
             {
@@ -132,18 +152,34 @@ def build_v16_simulation_result(
                 "upper_price": anchor_price,
             }
         ]
-    modifier = _safe_float((eci_context or {}).get("cone_width_modifier"), 0.0)
     consensus_path = [round(anchor_price, 5)] + [round(_safe_float(point.get("center_price"), anchor_price), 5) for point in cone]
-    cone_upper = [round(anchor_price, 5)]
-    cone_lower = [round(anchor_price, 5)]
-    for point in cone:
-        center = _safe_float(point.get("center_price"), anchor_price)
-        lower = _safe_float(point.get("lower_price"), center)
-        upper = _safe_float(point.get("upper_price"), center)
-        half_width = max(upper - center, center - lower)
-        widened_half_width = half_width * max(1.0, 1.0 + modifier)
-        cone_upper.append(round(center + widened_half_width, 5))
-        cone_lower.append(round(max(0.0, center - widened_half_width), 5))
+    hurst_positive = _safe_float(current_row.get("hurst_positive"), 0.55)
+    hurst_negative = _safe_float(current_row.get("hurst_negative"), 0.62)
+    historical_returns = _historical_log_returns(list(market.get("candles", [])))
+    rc = RelativisticCone(historical_returns)
+    rc_envelope = rc.envelope(
+        current_price=anchor_price,
+        n_bars=max(len(cone), 1),
+        hurst_positive=hurst_positive,
+        hurst_negative=hurst_negative,
+    )
+    inner_upper = [round(anchor_price, 5)] + [round(float(value), 5) for value in list(rc_envelope.get("inner_upper", []))]
+    inner_lower = [round(anchor_price, 5)] + [round(float(value), 5) for value in list(rc_envelope.get("inner_lower", []))]
+    outer_upper = [round(anchor_price, 5)] + [round(float(value), 5) for value in list(rc_envelope.get("cone_upper", []))]
+    outer_lower = [round(anchor_price, 5)] + [round(float(value), 5) for value in list(rc_envelope.get("cone_lower", []))]
+    cone_points = []
+    for index, point in enumerate(cone, start=1):
+        cone_points.append(
+            {
+                "timestamp": point.get("timestamp"),
+                "horizon": index,
+                "center_price": consensus_path[index],
+                "lower_price": inner_lower[index] if index < len(inner_lower) else inner_lower[-1],
+                "upper_price": inner_upper[index] if index < len(inner_upper) else inner_upper[-1],
+                "outer_lower_price": outer_lower[index] if index < len(outer_lower) else outer_lower[-1],
+                "outer_upper_price": outer_upper[index] if index < len(outer_upper) else outer_upper[-1],
+            }
+        )
 
     minority_path, minority_direction = _minority_path(
         list(payload.get("branches", [])),
@@ -155,13 +191,16 @@ def build_v16_simulation_result(
     top_branch = branches[0] if branches else {}
     top_branch_prices = np.asarray([anchor_price] + [float(item) for item in top_branch.get("predicted_prices", [])[: max(1, primary_horizon_minutes // 5)]], dtype=np.float32)
     atr = max(_safe_float(current_row.get("atr_14"), anchor_price * 0.0015), 0.25)
-    bst_score = float(branch_survival_score(top_branch_prices, current_atr=atr, n_perturbations=30)) if top_branch_prices.size >= 2 else 0.5
+    legacy_bst = float(branch_survival_score(top_branch_prices, current_atr=atr, n_perturbations=30)) if top_branch_prices.size >= 2 else 0.5
+    branch_log_returns = np.diff(np.log(np.clip(top_branch_prices.astype(np.float64), 1e-8, None))) if top_branch_prices.size >= 2 else np.asarray([], dtype=np.float64)
+    branch_plausibility = rc.branch_plausibility(branch_log_returns, n_bars=max(1, primary_horizon_minutes // 5))
+    bst_score = float(np.clip((0.55 * legacy_bst) + (0.45 * branch_plausibility), 0.0, 1.0))
     cabr_score = _cabr_proxy(branches, simulation, model_prediction)
     cpm_score = float(ConditionalPredictabilityMapper().score_row(current_row).get("predictability", 0.5))
     pip_size = _symbol_pip_size(symbol)
     cone_width_pips = 0.0
-    if len(cone_upper) > 1 and len(cone_lower) > 1:
-        cone_width_pips = float(np.mean(np.asarray(cone_upper[1:], dtype=np.float64) - np.asarray(cone_lower[1:], dtype=np.float64)) / max(pip_size, 1e-9))
+    if len(inner_upper) > 1 and len(inner_lower) > 1:
+        cone_width_pips = float(np.mean(np.asarray(inner_upper[1:], dtype=np.float64) - np.asarray(inner_lower[1:], dtype=np.float64)) / max(pip_size, 1e-9))
     tier = classify_confidence(cabr_score, bst_score, cone_width_pips, cpm_score)
     tracker = sqt or SimulationQualityTracker()
     execute, execution_reason = should_execute(tier, mode, tracker)
@@ -179,8 +218,10 @@ def build_v16_simulation_result(
         tier_color=TIER_COLORS[tier],
         tier_label=TIER_LABELS[tier],
         consensus_path=consensus_path,
-        cone_upper=cone_upper,
-        cone_lower=cone_lower,
+        cone_upper=inner_upper,
+        cone_lower=inner_lower,
+        cone_outer_upper=outer_upper,
+        cone_outer_lower=outer_lower,
         minority_path=[round(float(value), 5) for value in minority_path],
         minority_direction=minority_direction,
         selected_branch_idx=int(_safe_float(top_branch.get("path_id"), 1)) - 1 if top_branch else 0,
@@ -198,19 +239,53 @@ def build_v16_simulation_result(
         should_execute=bool(execute),
         execution_reason=execution_reason,
         suggested_lot=float(suggested_lot),
+        cone_type="relativistic",
+        cone_c_m=float(rc_envelope.get("c_m", 0.003)),
+        cone_h_plus=float(rc_envelope.get("h_plus", hurst_positive)),
+        cone_h_minus=float(rc_envelope.get("h_minus", hurst_negative)),
+        cone_compact_support=bool(rc_envelope.get("compact_support", True)),
+        cone_asymmetric=bool(rc_envelope.get("asymmetric", False)),
     )
     result_payload = result.to_payload()
     return {
         "simulation": result_payload,
+        "cone": {
+            "type": "relativistic",
+            "points": cone_points,
+            "outer_upper": outer_upper[1:],
+            "outer_lower": outer_lower[1:],
+            "inner_upper": inner_upper[1:],
+            "inner_lower": inner_lower[1:],
+            "c_m": rc_envelope.get("c_m", 0.003),
+            "h_plus": rc_envelope.get("h_plus", hurst_positive),
+            "h_minus": rc_envelope.get("h_minus", hurst_negative),
+            "compact_support": rc_envelope.get("compact_support", True),
+            "asymmetric": rc_envelope.get("asymmetric", False),
+        },
+        "relativistic_cone": {
+            "type": "relativistic",
+            "points": cone_points,
+            "outer_upper": outer_upper[1:],
+            "outer_lower": outer_lower[1:],
+            "inner_upper": inner_upper[1:],
+            "inner_lower": inner_lower[1:],
+            "c_m": rc_envelope.get("c_m", 0.003),
+            "h_plus": rc_envelope.get("h_plus", hurst_positive),
+            "h_minus": rc_envelope.get("h_minus", hurst_negative),
+            "compact_support": rc_envelope.get("compact_support", True),
+            "asymmetric": rc_envelope.get("asymmetric", False),
+        },
         "final_forecast": {
             "mode": "v16_simulator",
             "points": [
                 {
                     "minutes": index * 5,
-                    "timestamp": cone[index - 1].get("timestamp") if index - 1 < len(cone) else None,
+                    "timestamp": cone_points[index - 1].get("timestamp") if index - 1 < len(cone_points) else None,
                     "final_price": consensus_path[index],
-                    "cone_upper": cone_upper[index],
-                    "cone_lower": cone_lower[index],
+                    "cone_upper": inner_upper[index],
+                    "cone_lower": inner_lower[index],
+                    "outer_upper": outer_upper[index],
+                    "outer_lower": outer_lower[index],
                     "minority_price": result_payload["minority_path"][index] if index < len(result_payload["minority_path"]) else result_payload["minority_path"][-1],
                 }
                 for index in range(1, len(consensus_path))
@@ -219,8 +294,10 @@ def build_v16_simulation_result(
                 {
                     "minutes": index * 5,
                     "final_price": consensus_path[index],
-                    "cone_upper": cone_upper[index],
-                    "cone_lower": cone_lower[index],
+                    "cone_upper": inner_upper[index],
+                    "cone_lower": inner_lower[index],
+                    "outer_upper": outer_upper[index],
+                    "outer_lower": outer_lower[index],
                     "minority_price": result_payload["minority_path"][index] if index < len(result_payload["minority_path"]) else result_payload["minority_path"][-1],
                 }
                 for index in range(1, len(consensus_path))

@@ -39,6 +39,8 @@ from src.simulation.personas import default_personas
 from src.v6 import build_volatility_envelopes, detect_regime, get_historical_path_retriever, rank_branches_with_selector
 from src.v9 import classify_contradiction, load_latest_persona_state, load_memory_bank, query_memory_bank
 from src.v15.eci import EconomicCalendarIntegration
+from src.v17.mmm import MultifractalMarketMemory
+from src.v17.wltc import build_wltc_states
 
 USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
 
@@ -75,7 +77,7 @@ MACRO_TICKERS: dict[str, str] = {
 }
 
 _CACHE: dict[str, tuple[float, Any]] = {}
-SIMULATION_SCHEMA_VERSION = "live_v16_15m"
+SIMULATION_SCHEMA_VERSION = "live_v17_15m"
 
 
 def _fetch_url(url: str, timeout: int = 20) -> bytes:
@@ -152,6 +154,47 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return number
     except Exception:
         return default
+
+
+def _cone_points(cone_payload: Any) -> list[dict[str, Any]]:
+    if isinstance(cone_payload, Mapping):
+        points = cone_payload.get("points", [])
+        return list(points) if isinstance(points, list) else []
+    if isinstance(cone_payload, list):
+        return list(cone_payload)
+    return []
+
+
+def _build_wltc_context(recent_bars: list[dict[str, Any]]) -> dict[str, dict[str, float | int | str]]:
+    try:
+        states = build_wltc_states(recent_bars)
+    except Exception:
+        states = {}
+    return {name: dict(state.summary()) for name, state in states.items()}
+
+
+def _build_mmm_live_context(price_frame: pd.DataFrame) -> dict[str, Any]:
+    if price_frame.empty:
+        return {
+            "hurst_overall": 0.5,
+            "hurst_positive": 0.5,
+            "hurst_negative": 0.5,
+            "hurst_asymmetry": 0.0,
+            "market_memory_regime": "random_walk",
+        }
+    mmm = MultifractalMarketMemory(window=252)
+    features = price_frame.reset_index(drop=False).copy()
+    features["return_1"] = pd.to_numeric(features.get("return_1"), errors="coerce").fillna(0.0)
+    features["atr_pct"] = pd.to_numeric(features.get("atr_pct"), errors="coerce").fillna(0.0)
+    enriched = mmm.rolling_features(features[["return_1", "atr_pct"]], return_col="return_1", vol_col="atr_pct")
+    latest = enriched.iloc[-1].to_dict() if not enriched.empty else {}
+    return {
+        "hurst_overall": round(_safe_float(latest.get("hurst_overall"), 0.5), 4),
+        "hurst_positive": round(_safe_float(latest.get("hurst_positive"), 0.5), 4),
+        "hurst_negative": round(_safe_float(latest.get("hurst_negative"), 0.5), 4),
+        "hurst_asymmetry": round(_safe_float(latest.get("hurst_asymmetry"), 0.0), 4),
+        "market_memory_regime": str(latest.get("market_memory_regime", "random_walk")),
+    }
 
 
 def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
@@ -1171,7 +1214,7 @@ def build_history_entry(payload: dict[str, Any], model_prediction: dict[str, Any
     candles = list(market.get("candles", []))
     anchor_timestamp = candles[-1]["timestamp"] if candles else payload.get("generated_at")
     anchor_price = _safe_float(market.get("current_price"), 0.0)
-    cone = list(payload.get("cone", []))
+    cone = _cone_points(payload.get("cone", []))
     entry = {
         "symbol": payload.get("symbol", "XAUUSD"),
         "generated_at": payload.get("generated_at"),
@@ -1205,6 +1248,9 @@ def build_history_entry(payload: dict[str, Any], model_prediction: dict[str, Any
         "sqt_label": simulation.get("sqt_label", "NEUTRAL"),
         "sqt_accuracy": _safe_float(simulation.get("sqt_accuracy"), 0.5),
         "eci": dict(payload.get("eci", {})),
+        "relativistic_cone": dict(payload.get("relativistic_cone", {})),
+        "wltc": dict(payload.get("wltc", {})),
+        "mmm": dict(payload.get("mmm", {})),
         "model_prediction": model_prediction or {},
     }
     return entry
@@ -1250,7 +1296,7 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
             continue
         actual = candles[candles.index > anchor_timestamp].copy()
         predicted_center = list(entry.get("center_path", []))
-        cone = list(entry.get("cone", []))
+        cone = _cone_points(entry.get("cone", []))
         actual_future = []
         matched = 0
         hits = 0
@@ -1545,6 +1591,19 @@ def build_live_sequence(
     memory_bank_context = _memory_bank_context(fused)
     live_frame = price_frame.iloc[:min_rows].copy()
     latest = live_frame.iloc[-1].to_dict()
+    recent_bars = (
+        live_frame[["open", "high", "low", "close", "volume"]]
+        .tail(72)
+        .reset_index(drop=False)
+        .rename(columns={"index": "timestamp"})
+        .to_dict(orient="records")
+    )
+    for row in recent_bars:
+        if row.get("timestamp") is not None:
+            row["timestamp"] = pd.Timestamp(row["timestamp"]).isoformat()
+    latest["recent_bars"] = recent_bars
+    wltc_context = _build_wltc_context(recent_bars)
+    mmm_context = _build_mmm_live_context(live_frame)
     eci_context = _eci_display_context(live_frame.index[-1])
     latest["macro_bias"] = macro["macro_bias"]
     latest["macro_shock"] = macro["macro_shock"]
@@ -1554,6 +1613,16 @@ def build_live_sequence(
     latest["crowd_bias"] = round(float(crowd_bias), 4)
     latest["crowd_extreme"] = round(float(crowd_extreme), 4)
     latest["consensus_score"] = 0.0
+    latest["hurst_overall"] = round(_safe_float(mmm_context.get("hurst_overall"), 0.5), 4)
+    latest["hurst_positive"] = round(_safe_float(mmm_context.get("hurst_positive"), 0.5), 4)
+    latest["hurst_negative"] = round(_safe_float(mmm_context.get("hurst_negative"), 0.5), 4)
+    latest["hurst_asymmetry"] = round(_safe_float(mmm_context.get("hurst_asymmetry"), 0.0), 4)
+    latest["market_memory_regime"] = str(mmm_context.get("market_memory_regime", "random_walk"))
+    for persona_name, summary in wltc_context.items():
+        latest[f"fear_index_{persona_name}"] = round(_safe_float(summary.get("fear_index"), 0.0), 4)
+        latest[f"wltc_testosterone_{persona_name}"] = round(_safe_float(summary.get("testosterone_index"), 0.0), 4)
+        latest[f"wltc_fundamental_tracking_{persona_name}"] = round(_safe_float(summary.get("fundamental_tracking"), 1.0), 4)
+        latest[f"wltc_bid_aggressiveness_{persona_name}"] = round(_safe_float(summary.get("bid_aggressiveness"), 1.0), 4)
     analog_scorer = get_historical_analog_scorer()
     analog_history = (
         live_frame[PRICE_FEATURE_COLUMNS]
@@ -1579,6 +1648,11 @@ def build_live_sequence(
             "news_bias": latest["news_bias"],
             "crowd_bias": latest["crowd_bias"],
             "crowd_extreme": latest["crowd_extreme"],
+            "hurst_overall": latest["hurst_overall"],
+            "hurst_positive": latest["hurst_positive"],
+            "hurst_negative": latest["hurst_negative"],
+            "hurst_asymmetry": latest["hurst_asymmetry"],
+            "eci_cone_width_modifier": round(_safe_float(eci_context.get("cone_width_modifier"), 0.0), 4),
         },
         "technical_analysis": {
             "structure": technical_analysis.get("structure"),
@@ -1609,6 +1683,21 @@ def build_live_sequence(
             "analog_confidence": latest.get("analog_confidence"),
             "close": latest.get("close"),
             "atr_14": latest.get("atr_14"),
+            "hurst_overall": latest.get("hurst_overall"),
+            "hurst_positive": latest.get("hurst_positive"),
+            "hurst_negative": latest.get("hurst_negative"),
+            "hurst_asymmetry": latest.get("hurst_asymmetry"),
+            "wltc_testosterone_retail": latest.get("wltc_testosterone_retail"),
+            "wltc_testosterone_noise": latest.get("wltc_testosterone_noise"),
+            "wltc_fundamental_tracking_retail": latest.get("wltc_fundamental_tracking_retail"),
+            "wltc_fundamental_tracking_institutional": latest.get("wltc_fundamental_tracking_institutional"),
+        },
+        "wltc": wltc_context,
+        "mmm": mmm_context,
+        "eci": {
+            "cone_width_modifier": round(_safe_float(eci_context.get("cone_width_modifier"), 0.0), 4),
+            "mins_to_next_high": round(_safe_float(eci_context.get("mins_to_next_high"), 0.0), 2),
+            "mins_since_last_high": round(_safe_float(eci_context.get("mins_since_last_high"), 0.0), 2),
         },
     }
 
@@ -1693,10 +1782,21 @@ def build_live_sequence(
     payload["current_row"] = latest
     payload["memory_bank_context"] = memory_bank_context
     payload["contradiction"] = contradiction_payload
+    payload["wltc"] = wltc_context
+    payload["mmm"] = mmm_context
     if isinstance(payload.get("simulation"), dict):
         payload["simulation"]["contradiction_type"] = contradiction.contradiction_type.value
         payload["simulation"]["contradiction_confidence"] = round(float(contradiction.confidence), 6)
         payload["simulation"]["cone_treatment"] = contradiction.cone_treatment
+        payload["simulation"]["hurst_overall"] = latest["hurst_overall"]
+        payload["simulation"]["hurst_positive"] = latest["hurst_positive"]
+        payload["simulation"]["hurst_negative"] = latest["hurst_negative"]
+        payload["simulation"]["hurst_asymmetry"] = latest["hurst_asymmetry"]
+        payload["simulation"]["market_memory_regime"] = latest["market_memory_regime"]
+        payload["simulation"]["testosterone_index"] = {
+            name: round(_safe_float(summary.get("testosterone_index"), 0.0), 4)
+            for name, summary in wltc_context.items()
+        }
     payload["technical_analysis"] = technical_analysis
     payload["analog_context"] = analog_snapshot.to_dict()
     payload["branch_graph"] = _build_branch_graph(

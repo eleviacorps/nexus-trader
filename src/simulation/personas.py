@@ -9,7 +9,7 @@ from typing import Dict, Mapping
 import numpy as np
 
 from src.simulation.strategies import StrategySignal, strategy_map
-from src.v14.acm import build_acm_memories
+from src.v17.wltc import build_wltc_states
 
 
 @dataclass
@@ -56,19 +56,22 @@ class Persona:
         crowd_bias = float(row.get("crowd_bias", 0.0))
         crowd_extreme = float(row.get("crowd_extreme", 0.0))
         displacement = float(row.get("displacement", 0.0))
+        fair_value_z = float(row.get("quant_fair_value_z", 0.0))
         llm_market_bias = float(row.get("llm_market_bias", 0.0))
         llm_persona_bias = float(row.get(f"llm_{self.name}_bias", 0.0))
+        fundamental_tracking = float(row.get(f"wltc_fundamental_tracking_{self.name}", 1.0) or 1.0)
+        fundamental_pull = -np.tanh(fair_value_z) * fundamental_tracking
 
         if self.name == "retail":
-            return (0.15 * news_bias) + (0.34 * crowd_bias) + (0.18 * crowd_extreme * (1.0 if displacement >= 0 else -1.0)) + (0.08 * llm_market_bias) + (0.18 * llm_persona_bias)
+            return (0.15 * news_bias) + (0.34 * crowd_bias) + (0.18 * crowd_extreme * (1.0 if displacement >= 0 else -1.0)) + (0.08 * llm_market_bias) + (0.18 * llm_persona_bias) + (0.06 * fundamental_pull)
         if self.name == "institutional":
-            return (0.40 * macro_bias) + (0.12 * news_bias) - (0.10 * crowd_bias * crowd_extreme) + (0.10 * llm_market_bias) + (0.22 * llm_persona_bias)
+            return (0.40 * macro_bias) + (0.12 * news_bias) - (0.10 * crowd_bias * crowd_extreme) + (0.10 * llm_market_bias) + (0.22 * llm_persona_bias) + (0.14 * fundamental_pull)
         if self.name == "algo":
-            return (0.08 * macro_bias) + (0.05 * news_bias) + (0.06 * np.tanh(displacement)) + (0.05 * llm_market_bias)
+            return (0.08 * macro_bias) + (0.05 * news_bias) + (0.06 * np.tanh(displacement)) + (0.05 * llm_market_bias) + (0.07 * fundamental_pull)
         if self.name == "whale":
-            return (0.30 * macro_bias) - (0.28 * crowd_bias * max(0.3, crowd_extreme)) + (0.10 * news_bias) + (0.08 * llm_market_bias) + (0.22 * llm_persona_bias)
+            return (0.30 * macro_bias) - (0.28 * crowd_bias * max(0.3, crowd_extreme)) + (0.10 * news_bias) + (0.08 * llm_market_bias) + (0.22 * llm_persona_bias) + (0.16 * fundamental_pull)
         if self.name == "noise":
-            return (0.12 * news_bias) + (0.20 * crowd_bias) + rng_gauss_like(crowd_extreme) + (0.04 * llm_market_bias)
+            return (0.12 * news_bias) + (0.20 * crowd_bias) + rng_gauss_like(crowd_extreme) + (0.04 * llm_market_bias) + (0.03 * fundamental_pull)
         return 0.0
 
     def _contextual_confidence_boost(self, row: Mapping[str, float]) -> float:
@@ -91,24 +94,30 @@ class Persona:
         weights = {key: float(value) for key, value in self.strategy_weights.items()}
         recent_bars = row.get("recent_bars")
         fear_index = float(row.get(f"fear_index_{self.name}", 0.0) or 0.0)
-        if isinstance(recent_bars, (list, tuple)) and recent_bars:
+        testosterone_index = float(row.get(f"wltc_testosterone_{self.name}", 0.0) or 0.0)
+        modifier_map = None
+        if isinstance(recent_bars, (list, tuple)) and recent_bars and (
+            testosterone_index <= 0.0
+            or float(row.get(f"wltc_fundamental_tracking_{self.name}", 0.0) or 0.0) <= 0.0
+            or fear_index <= 0.0
+        ):
             try:
-                memories = build_acm_memories(recent_bars)
-                fear_index = max(fear_index, float(memories.get(self.name).fear_index if self.name in memories else 0.0))
+                states = build_wltc_states(list(recent_bars))
+                state = states.get(self.name)
+                if state is not None:
+                    fear_index = max(fear_index, float(state.fear_index))
+                    testosterone_index = max(testosterone_index, float(state.testosterone_index))
+                    modifier_map = state.strategy_weight_modifier()
             except Exception:
-                pass
-        modifier_map = (
-            build_acm_memories(recent_bars).get(self.name).strategy_weight_modifier()
-            if isinstance(recent_bars, (list, tuple)) and recent_bars
-            else None
-        )
+                modifier_map = None
         if modifier_map is None:
             modifier_map = {
-                "trend": max(0.3, 1.0 - fear_index * 0.6),
-                "mean_rev": min(2.0, 1.0 + fear_index * 0.8),
-                "ict": min(1.8, 1.0 + fear_index * 0.5) if self.name == "institutional" else 1.0,
-                "momentum": max(0.4, 1.0 - fear_index * 0.4),
+                "trend": max(0.3, 1.0 - fear_index * 0.6 + testosterone_index * 0.45),
+                "mean_rev": min(2.2, 1.0 + fear_index * 0.8 - testosterone_index * 0.35),
+                "ict": min(1.8, 1.0 + fear_index * 0.5 - testosterone_index * 0.10) if self.name == "institutional" else 1.0,
+                "momentum": max(0.4, 1.0 - fear_index * 0.4 + testosterone_index * 0.55),
                 "smc": 1.0,
+                "fundamental_tracking": max(0.10, 1.0 - testosterone_index * 0.6),
             }
         adjusted = {name: max(0.0, weights.get(name, 0.0) * float(modifier_map.get(name, 1.0))) for name in weights}
         total = sum(adjusted.values())

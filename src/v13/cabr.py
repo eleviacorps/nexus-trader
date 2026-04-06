@@ -16,6 +16,7 @@ from config.project_config import V12_FEATURE_CONSISTENCY_REPORT_PATH, V13_CABR_
 from src.v12.crowd_emotional_momentum import build_crowd_emotional_momentum
 from src.v12.tctl import prepare_tctl_candidates
 from src.v12.wfri import REGIME_CLASSES, map_regime_class
+from src.v17.lee_coc import LeeCOC
 
 
 GEOMETRY_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -47,6 +48,10 @@ CONTEXT_SCALAR_COLUMNS: tuple[str, ...] = (
     'fear_index_retail',
     'fear_index_institutional',
     'fear_index_algo',
+    'context_hurst_overall',
+    'context_hurst_positive',
+    'context_hurst_negative',
+    'context_hurst_asymmetry',
 )
 
 
@@ -86,13 +91,17 @@ class CABRPairDataset(Dataset[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
         )
 
 
+def _activation(use_chaotic_activation: bool) -> nn.Module:
+    return LeeCOC() if use_chaotic_activation else nn.GELU()
+
+
 class BranchEncoder(nn.Module):
-    def __init__(self, branch_feature_dim: int, embed_dim: int = 64):
+    def __init__(self, branch_feature_dim: int, embed_dim: int = 64, use_chaotic_activation: bool = False):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(branch_feature_dim, embed_dim * 2),
             nn.LayerNorm(embed_dim * 2),
-            nn.GELU(),
+            _activation(use_chaotic_activation),
             nn.Dropout(0.10),
             nn.Linear(embed_dim * 2, embed_dim),
         )
@@ -102,12 +111,12 @@ class BranchEncoder(nn.Module):
 
 
 class ContextEncoder(nn.Module):
-    def __init__(self, context_feature_dim: int, embed_dim: int = 64):
+    def __init__(self, context_feature_dim: int, embed_dim: int = 64, use_chaotic_activation: bool = False):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(context_feature_dim, embed_dim * 2),
             nn.LayerNorm(embed_dim * 2),
-            nn.GELU(),
+            _activation(use_chaotic_activation),
             nn.Dropout(0.10),
             nn.Linear(embed_dim * 2, embed_dim),
         )
@@ -149,9 +158,10 @@ class CABR(nn.Module):
         n_heads: int = 4,
         use_temporal_context: bool = False,
         n_context_bars: int = 12,
+        use_chaotic_activation: bool = False,
     ):
         super().__init__()
-        self.branch_encoder = BranchEncoder(branch_feature_dim, embed_dim)
+        self.branch_encoder = BranchEncoder(branch_feature_dim, embed_dim, use_chaotic_activation=use_chaotic_activation)
         if use_temporal_context:
             self.context_encoder = TemporalContextEncoder(
                 context_feature_dim,
@@ -159,14 +169,15 @@ class CABR(nn.Module):
                 n_bars=n_context_bars,
             )
         else:
-            self.context_encoder = ContextEncoder(context_feature_dim, embed_dim)
+            self.context_encoder = ContextEncoder(context_feature_dim, embed_dim, use_chaotic_activation=use_chaotic_activation)
         self.use_temporal = bool(use_temporal_context)
         self.n_context_bars = int(n_context_bars)
+        self.use_chaotic_activation = bool(use_chaotic_activation)
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads=n_heads, dropout=0.10, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
         self.score_head = nn.Sequential(
             nn.Linear(embed_dim, 32),
-            nn.GELU(),
+            _activation(use_chaotic_activation),
             nn.Linear(32, 1),
         )
 
@@ -220,6 +231,12 @@ def _days_since_regime_change(regimes: pd.Series, timestamps: pd.Series) -> pd.S
     return pd.Series(values, index=regimes.index, dtype=np.float32)
 
 
+def _series_or_default(frame: pd.DataFrame, column: str, default: float) -> pd.Series:
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors='coerce').fillna(default).astype(float)
+    return pd.Series(default, index=frame.index, dtype=np.float32)
+
+
 def derive_cabr_feature_columns(frame: pd.DataFrame) -> tuple[tuple[str, ...], tuple[str, ...]]:
     passing = tuple(f'bcfe_{name}' for name in _load_pass_features() if f'bcfe_{name}' in frame.columns)
     branch_cols = tuple(
@@ -235,9 +252,18 @@ def derive_cabr_feature_columns(frame: pd.DataFrame) -> tuple[tuple[str, ...], t
     return branch_cols, context_cols
 
 
-def augment_cabr_context(frame: pd.DataFrame) -> pd.DataFrame:
+def augment_cabr_context(frame: pd.DataFrame, mmm_features: pd.DataFrame | None = None) -> pd.DataFrame:
     working = frame.copy()
     working['timestamp'] = pd.to_datetime(working['timestamp'], utc=True, errors='coerce')
+    if mmm_features is not None and not mmm_features.empty:
+        mmm = mmm_features.copy()
+        mmm['timestamp'] = pd.to_datetime(mmm['timestamp'], utc=True, errors='coerce')
+        merge_cols = [
+            column
+            for column in ('timestamp', 'hurst_overall', 'hurst_positive', 'hurst_negative', 'hurst_asymmetry', 'market_memory_regime')
+            if column in mmm.columns
+        ]
+        working = working.merge(mmm[merge_cols].drop_duplicates(subset=['timestamp']), on='timestamp', how='left')
     working['regime_class'] = working.get('dominant_regime', 'ranging').map(map_regime_class)
     working['context_regime_confidence'] = working.get('hmm_regime_probability', 0.5).astype(float)
     working['context_rsi_14'] = working.get('bcfe_rsi_14', 50.0).astype(float)
@@ -261,6 +287,10 @@ def augment_cabr_context(frame: pd.DataFrame) -> pd.DataFrame:
     working['context_emotional_fragility'] = working['cem_fragility'].fillna(0.5).astype(float)
     working['context_emotional_conviction'] = working['cem_conviction'].fillna(0.5).astype(float)
     working['context_narrative_age'] = working['cem_narrative_age'].fillna(0).astype(float)
+    working['context_hurst_overall'] = _series_or_default(working, 'hurst_overall', 0.5)
+    working['context_hurst_positive'] = _series_or_default(working, 'hurst_positive', 0.5)
+    working['context_hurst_negative'] = _series_or_default(working, 'hurst_negative', 0.5)
+    working['context_hurst_asymmetry'] = _series_or_default(working, 'hurst_asymmetry', 0.0)
 
     for regime_name in REGIME_CLASSES:
         working[f'context_regime_{regime_name}'] = (working['regime_class'] == regime_name).astype(float)
@@ -465,6 +495,7 @@ def train_cabr_model(
     batch_size: int = 256,
     lr: float = 3e-4,
     checkpoint_path: Path = V13_CABR_MODEL_PATH,
+    use_chaotic_activation: bool = False,
 ) -> dict[str, Any]:
     target_device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     train_pairs = build_cabr_pairs(
@@ -489,6 +520,7 @@ def train_cabr_model(
         len(context_feature_names),
         use_temporal_context=use_temporal_context,
         n_context_bars=n_context_bars,
+        use_chaotic_activation=use_chaotic_activation,
     ).to(target_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(epochs), 1))
@@ -529,6 +561,7 @@ def train_cabr_model(
                 'n_heads': 4,
                 'use_temporal_context': bool(use_temporal_context),
                 'n_context_bars': int(n_context_bars),
+                'use_chaotic_activation': bool(use_chaotic_activation),
                 'best_accuracy': best_acc,
                 'loss_history': loss_history,
                 'valid_accuracy_history': valid_history,
@@ -560,6 +593,7 @@ def load_cabr_model(path: Path = V13_CABR_MODEL_PATH, *, map_location: str | Non
         n_heads=int(payload.get('n_heads', 4)),
         use_temporal_context=bool(payload.get('use_temporal_context', False)),
         n_context_bars=int(payload.get('n_context_bars', 12)),
+        use_chaotic_activation=bool(payload.get('use_chaotic_activation', False)),
     )
     model.load_state_dict(payload['state_dict'])
     model.eval()

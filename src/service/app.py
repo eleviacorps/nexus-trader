@@ -20,7 +20,7 @@ from config.project_config import (
     TFT_CHECKPOINT_PATH,
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
-from src.service.llm_sidecar import request_market_context, sidecar_health
+from src.service.llm_sidecar import read_packet_log, request_market_context, sidecar_health
 from src.service.live_data import build_live_monitor, build_live_simulation, fetch_recent_market_candles, record_simulation_history
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
@@ -546,6 +546,8 @@ def create_app() -> Any:
             eci_context=payload.get('eci'),
         )
         payload['simulation'] = dict(payload.get('simulation', {})) | dict(v16_payload.get('simulation', {}))
+        payload['cone'] = v16_payload.get('cone', payload.get('cone', {}))
+        payload['relativistic_cone'] = v16_payload.get('relativistic_cone', {})
         payload['final_forecast'] = v16_payload.get('final_forecast', {})
         payload['v16'] = v16_payload
         payload['ensemble_prediction'] = _v16_ensemble(payload)
@@ -604,6 +606,10 @@ def create_app() -> Any:
             'crowd_items': [item.get('title', '') for item in payload.get('feeds', {}).get('public_discussions', [])[:5]],
         }
         return request_market_context(symbol, context, provider=llm_provider, model=llm_model)
+
+    @app.get('/api/llm/kimi-log')
+    def kimi_log(limit: int = 12):
+        return {'entries': read_packet_log(limit=limit)}
 
     @app.get('/api/paper/state')
     def paper_state(symbol: str = 'XAUUSD'):
