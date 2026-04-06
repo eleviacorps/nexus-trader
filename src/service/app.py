@@ -22,7 +22,13 @@ from config.project_config import (
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
 from src.service.llm_sidecar import is_nvidia_nim_provider, read_packet_log, request_kimi_judge, request_market_context, sidecar_health
-from src.service.live_data import build_live_monitor, build_live_simulation, fetch_recent_market_candles, record_simulation_history
+from src.service.live_data import (
+    build_live_monitor,
+    build_live_simulation,
+    build_realtime_chart_payload,
+    fetch_live_quote,
+    record_simulation_history,
+)
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
 from src.v13.s3pta import PaperTradeAccumulator
@@ -556,10 +562,10 @@ def create_app() -> Any:
         prices: dict[str, float] = {}
         for symbol_name in sorted({str(item).upper() for item in symbols if item}):
             try:
-                candles = fetch_recent_market_candles(symbol_name)
-                if candles.empty:
+                price = float(fetch_live_quote(symbol_name) or 0.0)
+                if price <= 0.0:
                     continue
-                prices[symbol_name] = float(candles.iloc[-1]["close"])
+                prices[symbol_name] = price
             except Exception:
                 continue
         return prices
@@ -673,6 +679,7 @@ def create_app() -> Any:
         payload['manual_trading_mode'] = True
         payload['sqt'] = sqt_tracker.summary()
         payload['paper_trading'] = _paper_state(symbol)
+        payload['realtime_chart'] = build_realtime_chart_payload(symbol)
         kimi_context = build_kimi_context_payload(payload)
         if is_nvidia_nim_provider(llm_provider):
             kimi_judge = request_kimi_judge(symbol, kimi_context, provider=llm_provider, model=llm_model)
@@ -720,6 +727,10 @@ def create_app() -> Any:
     @app.get('/api/live-monitor')
     def live_monitor(symbol: str = 'XAUUSD'):
         return _refresh_sqt(symbol)
+
+    @app.get('/api/chart/realtime')
+    def realtime_chart(symbol: str = 'XAUUSD', bars: int = 240):
+        return build_realtime_chart_payload(symbol, bars=max(60, min(int(bars), 720)))
 
     @app.get('/api/llm/health')
     def llm_health(provider: str = 'lm_studio', model: str | None = None):

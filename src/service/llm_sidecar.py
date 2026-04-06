@@ -40,6 +40,7 @@ class LlmSidecarConfig:
 
 
 NVIDIA_NIM_MODEL_FALLBACK_CHAIN = [
+    "moonshotai/kimi-k2-instruct",
     "moonshotai/kimi-k2-5",
     "nvidia/llama-3.1-nemotron-70b-instruct",
     "meta/llama-3.1-70b-instruct",
@@ -165,6 +166,14 @@ def _request_headers(api_key: str = "") -> dict[str, str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def _openai_compat_url(base_url: str, endpoint: str) -> str:
+    base = (base_url or "").rstrip("/")
+    suffix = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    if base.endswith("/v1"):
+        return f"{base}{suffix}"
+    return f"{base}/v1{suffix}"
 
 
 def _flatten_numeric_paths(payload: Any, prefix: str = "") -> list[tuple[str, float]]:
@@ -299,7 +308,11 @@ def sidecar_health(
             models = payload.get("models", []) if isinstance(payload, dict) else []
             model_ids = [item.get("name") for item in models if isinstance(item, dict)]
         else:
-            payload = _get_json(f"{resolved.base_url.rstrip('/')}/v1/models", timeout_seconds=resolved.timeout_seconds, api_key=resolved.api_key)
+            payload = _get_json(
+                _openai_compat_url(resolved.base_url, "/models"),
+                timeout_seconds=resolved.timeout_seconds,
+                api_key=resolved.api_key,
+            )
             models = payload.get("data", []) if isinstance(payload, dict) else []
             model_ids = [item.get("id") for item in models if isinstance(item, dict)]
         return {"ok": True, "enabled": True, "models": model_ids, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider}
@@ -363,9 +376,12 @@ def _chat_json_request(
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.2,
+                    "top_p": 0.9,
+                    "max_tokens": 4096,
+                    "stream": False,
                 }
                 response = _post_json(
-                    f"{resolved.base_url.rstrip('/')}/v1/chat/completions",
+                    _openai_compat_url(resolved.base_url, "/chat/completions"),
                     payload,
                     timeout_seconds=resolved.timeout_seconds,
                     api_key=resolved.api_key,

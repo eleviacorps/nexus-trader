@@ -241,10 +241,30 @@ def _fetch_yahoo_chart(ticker: str, interval: str, range_: str) -> pd.DataFrame:
     return frame
 
 
-def fetch_recent_market_candles(symbol: str, interval: str = "5m", range_: str = "5d") -> pd.DataFrame:
+def _market_cache_ttl(interval: str) -> int:
+    normalized = str(interval or "5m").strip().lower()
+    return {
+        "1m": 5,
+        "2m": 8,
+        "5m": 15,
+        "15m": 30,
+        "30m": 60,
+        "60m": 120,
+        "1h": 120,
+        "1d": 900,
+    }.get(normalized, 30)
+
+
+def fetch_recent_market_candles(
+    symbol: str,
+    interval: str = "5m",
+    range_: str = "5d",
+    ttl_seconds: int | None = None,
+) -> pd.DataFrame:
     settings = _symbol_settings(symbol)
     cache_key = f"candles:{settings['ticker']}:{interval}:{range_}"
-    frame = _cached(cache_key, 45, lambda: _fetch_yahoo_chart(settings["ticker"], interval=interval, range_=range_))
+    ttl = int(ttl_seconds if ttl_seconds is not None else _market_cache_ttl(interval))
+    frame = _cached(cache_key, ttl, lambda: _fetch_yahoo_chart(settings["ticker"], interval=interval, range_=range_))
     if settings["symbol"] != "XAUUSD":
         return frame
 
@@ -264,7 +284,28 @@ def fetch_recent_market_candles(symbol: str, interval: str = "5m", range_: str =
             calibrated.attrs["market_source"] = "futures_proxy_gc_f"
         return calibrated
 
-    return _cached(f"{cache_key}:spot", 25, _spot_calibrate)
+    return _cached(f"{cache_key}:spot", max(2, min(ttl, 8)), _spot_calibrate)
+
+
+def fetch_live_quote(symbol: str) -> float:
+    settings = _symbol_settings(symbol)
+    cache_key = f"live_quote:{settings['symbol']}"
+
+    def _factory() -> float:
+        if settings["symbol"] == "XAUUSD":
+            try:
+                payload = _fetch_json(str(settings.get("spot_api")), timeout=10)
+                price = _safe_float(payload.get("price"), 0.0)
+                if price > 0.0:
+                    return price
+            except Exception:
+                pass
+        frame = fetch_recent_market_candles(settings["symbol"], interval="1m", range_="1d", ttl_seconds=5)
+        if frame.empty:
+            return 0.0
+        return _safe_float(frame["close"].iloc[-1], 0.0)
+
+    return round(_safe_float(_cached(cache_key, 3, _factory), 0.0), 5)
 
 
 def _score_news_text(text: str, market_label: str) -> float:
@@ -1196,6 +1237,18 @@ def _candles_to_records(price_frame: pd.DataFrame, limit: int = 240) -> list[dic
         }
         for index, row in price_frame.tail(limit).iterrows()
     ]
+
+
+def build_realtime_chart_payload(symbol: str, bars: int = 240) -> dict[str, Any]:
+    frame = fetch_recent_market_candles(symbol, interval="1m", range_="1d", ttl_seconds=5)
+    if frame.empty:
+        return {"symbol": str(symbol).upper(), "interval": "1m", "candles": []}
+    return {
+        "symbol": str(symbol).upper(),
+        "interval": "1m",
+        "source": str(frame.attrs.get("market_source", "unknown")),
+        "candles": _candles_to_records(frame, limit=bars),
+    }
 
 
 def _read_simulation_history(limit: int = 200) -> list[dict[str, Any]]:

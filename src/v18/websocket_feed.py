@@ -98,6 +98,16 @@ class LiveFeedManager:
                     pass
         return rows
 
+    def _paper_summary(self, symbol: str, price: float) -> dict[str, Any]:
+        if self._paper_engine is None:
+            return {}
+        try:
+            state = self._paper_engine.state(current_prices={symbol: price})
+        except Exception:
+            return {}
+        summary = state.get("summary", {})
+        return dict(summary) if isinstance(summary, dict) else {}
+
     async def heartbeat_loop(
         self,
         price_fn: Callable[[str], float],
@@ -118,6 +128,7 @@ class LiveFeedManager:
                         "price": price,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "positions": self._position_payload(symbol, price),
+                        "paper_summary": self._paper_summary(symbol, price),
                         "sqt": sqt_fn(),
                         "bar_countdown": seconds_to_next_15m(),
                     }
