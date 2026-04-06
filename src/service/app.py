@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ from config.project_config import (
     TFT_CHECKPOINT_PATH,
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
-from src.service.llm_sidecar import read_packet_log, request_market_context, sidecar_health
+from src.service.llm_sidecar import is_nvidia_nim_provider, read_packet_log, request_kimi_judge, request_market_context, sidecar_health
 from src.service.live_data import build_live_monitor, build_live_simulation, fetch_recent_market_candles, record_simulation_history
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
@@ -28,6 +29,7 @@ from src.v13.s3pta import PaperTradeAccumulator
 from src.v16.csl import build_v16_simulation_result
 from src.v16.paper import PaperTradingEngine
 from src.v16.sqt import SimulationQualityTracker
+from src.v18.websocket_feed import LiveFeedManager
 
 try:
     import torch  # type: ignore
@@ -36,11 +38,14 @@ except ImportError:  # pragma: no cover
 
 try:
     from fastapi import FastAPI, HTTPException  # type: ignore
+    from fastapi import WebSocket, WebSocketDisconnect  # type: ignore
     from fastapi.responses import HTMLResponse  # type: ignore
     from pydantic import BaseModel, Field  # type: ignore
 except ImportError:  # pragma: no cover
     FastAPI = None
     HTTPException = RuntimeError  # type: ignore
+    WebSocket = Any  # type: ignore
+    WebSocketDisconnect = RuntimeError  # type: ignore
     BaseModel = object  # type: ignore
     HTMLResponse = str  # type: ignore
 
@@ -72,6 +77,8 @@ class PaperOpenRequest(BaseModel):  # type: ignore[misc]
     leverage: float = 200.0
     stop_pips: float = 20.0
     take_profit_pips: float = 30.0
+    stop_loss: float | None = None
+    take_profit: float | None = None
     note: str = ""
 
 
@@ -82,6 +89,12 @@ class PaperCloseRequest(BaseModel):  # type: ignore[misc]
 
 class PaperResetRequest(BaseModel):  # type: ignore[misc]
     starting_balance: float = 1000.0
+
+
+class PaperModifyRequest(BaseModel):  # type: ignore[misc]
+    trade_id: str
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 def llm_numeric_prior(payload: dict[str, Any]) -> float:
@@ -292,6 +305,104 @@ def build_v8_direct_forecast(payload: dict[str, Any], model_prediction: dict[str
     }
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    simulation = payload.get("simulation", {}) if isinstance(payload, dict) else {}
+    technical_analysis = payload.get("technical_analysis", {}) if isinstance(payload, dict) else {}
+    feeds = payload.get("feeds", {}) if isinstance(payload, dict) else {}
+    bot_swarm = payload.get("bot_swarm", {}) if isinstance(payload, dict) else {}
+    sqt = payload.get("sqt", {}) if isinstance(payload, dict) else {}
+    model_prediction = payload.get("model_prediction", {}) if isinstance(payload, dict) else {}
+    current_price = _safe_float(market.get("current_price"), 0.0)
+    confidence = _safe_float(simulation.get("overall_confidence"), _safe_float(simulation.get("cabr_score"), 0.0))
+    regime = str(
+        simulation.get(
+            "detected_regime",
+            simulation.get("market_memory_regime", ((model_prediction.get("model_diagnostics") or {}).get("dominant_regime", "unknown"))),
+        )
+    )
+    return {
+        "symbol": payload.get("symbol", "XAUUSD"),
+        "market": {
+            "current_price": round(current_price, 5),
+            "candles": market.get("candles", []),
+        },
+        "simulation": {
+            "scenario_bias": str(simulation.get("direction", simulation.get("scenario_bias", "neutral"))).lower(),
+            "direction": simulation.get("direction"),
+            "overall_confidence": round(confidence, 6),
+            "cabr_score": round(_safe_float(simulation.get("cabr_score"), 0.0), 6),
+            "cpm_score": round(_safe_float(simulation.get("cpm_score"), 0.0), 6),
+            "cone_width_pips": round(_safe_float(simulation.get("cone_width_pips"), 0.0), 3),
+            "contradiction_type": simulation.get("contradiction_type", payload.get("contradiction", {}).get("type", "unknown")),
+            "detected_regime": regime,
+            "cone_treatment": simulation.get("cone_treatment", payload.get("contradiction", {}).get("cone_treatment", "normal")),
+            "hurst_overall": round(_safe_float(simulation.get("hurst_overall"), 0.5), 6),
+            "hurst_positive": round(_safe_float(simulation.get("hurst_positive"), 0.5), 6),
+            "hurst_negative": round(_safe_float(simulation.get("hurst_negative"), 0.5), 6),
+            "hurst_asymmetry": round(_safe_float(simulation.get("hurst_asymmetry"), 0.0), 6),
+            "testosterone_index": simulation.get("testosterone_index", {}),
+            "suggested_lot": round(_safe_float(simulation.get("suggested_lot"), 0.0), 4),
+            "cone_c_m": round(_safe_float(simulation.get("cone_c_m"), 0.0), 6),
+            "entry_zone": simulation.get("entry_zone", []),
+        },
+        "technical_analysis": technical_analysis,
+        "bot_swarm": bot_swarm,
+        "news_feed": list((feeds.get("news") or []))[:8],
+        "public_discussions": list((feeds.get("public_discussions") or []))[:8],
+        "sqt": sqt,
+        "mfg": payload.get("mfg", {}),
+    }
+
+
+def fallback_kimi_judge(payload: dict[str, Any]) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    simulation = payload.get("simulation", {}) if isinstance(payload, dict) else {}
+    technical_analysis = payload.get("technical_analysis", {}) if isinstance(payload, dict) else {}
+    sqt = payload.get("sqt", {}) if isinstance(payload, dict) else {}
+    current_price = _safe_float(market.get("current_price"), 0.0)
+    atr = _safe_float(technical_analysis.get("atr_14"), _safe_float(payload.get("current_row", {}).get("atr_14"), current_price * 0.0015))
+    direction = str(simulation.get("direction", "HOLD")).upper()
+    contradiction = str(simulation.get("contradiction_type", "unknown")).lower()
+    sqt_label = str(sqt.get("label", simulation.get("sqt_label", "NEUTRAL"))).upper()
+    if sqt_label == "COLD" or contradiction == "full_disagreement":
+        direction = "HOLD"
+    support = _safe_float((technical_analysis.get("nearest_support") or {}).get("price"), current_price - atr)
+    resistance = _safe_float((technical_analysis.get("nearest_resistance") or {}).get("price"), current_price + atr)
+    if direction == "BUY":
+        entry_zone = [round(current_price - (0.20 * atr), 2), round(current_price + (0.12 * atr), 2)]
+        stop_loss = round(min(support, current_price - atr), 2)
+        take_profit = round(max(resistance, current_price + (1.4 * atr)), 2)
+    elif direction == "SELL":
+        entry_zone = [round(current_price - (0.12 * atr), 2), round(current_price + (0.20 * atr), 2)]
+        stop_loss = round(max(resistance, current_price + atr), 2)
+        take_profit = round(min(support, current_price - (1.4 * atr)), 2)
+    else:
+        entry_zone = []
+        stop_loss = None
+        take_profit = None
+    return {
+        "stance": direction if direction in {"BUY", "SELL"} else "HOLD",
+        "confidence": str(simulation.get("confidence_tier", "LOW")).replace("_", " ").upper(),
+        "entry_zone": entry_zone,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "hold_time": "current_bar" if direction in {"BUY", "SELL"} else "skip",
+        "reasoning": f"Fallback judge derived from the simulator direction {direction}, CABR {_safe_float(simulation.get('cabr_score'), 0.0):.1%}, and current structure.",
+        "key_risk": "This is a local fallback because the remote Kimi response is unavailable.",
+        "crowd_note": "Crowd state is being proxied locally from WLTC and bot swarm data.",
+        "regime_note": f"Structure is {technical_analysis.get('structure', 'unknown')} in {technical_analysis.get('location', 'unknown')} location.",
+        "invalidation": stop_loss,
+    }
+
+
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
     if len(sequence) != sequence_len:
         raise ValueError(f'Expected sequence length {sequence_len}, got {len(sequence)}')
@@ -438,6 +549,8 @@ def create_app() -> Any:
     sqt_tracker = SimulationQualityTracker()
     scored_predictions: set[str] = set()
     paper_trader = PaperTradingEngine(starting_balance=float(os.getenv("NEXUS_PAPER_START_BALANCE", "1000")))
+    feed_manager = LiveFeedManager()
+    feed_manager.set_paper_engine(paper_trader)
 
     def _current_prices(symbols: set[str]) -> dict[str, float]:
         prices: dict[str, float] = {}
@@ -457,6 +570,9 @@ def create_app() -> Any:
         if symbol:
             open_symbols.add(str(symbol).upper())
         return paper_trader.state(current_prices=_current_prices(open_symbols))
+
+    def _live_price(symbol: str) -> float:
+        return _current_prices({str(symbol).upper()}).get(str(symbol).upper(), 0.0)
 
     def _refresh_sqt(symbol: str) -> dict[str, Any]:
         monitor = build_live_monitor(symbol)
@@ -557,6 +673,26 @@ def create_app() -> Any:
         payload['manual_trading_mode'] = True
         payload['sqt'] = sqt_tracker.summary()
         payload['paper_trading'] = _paper_state(symbol)
+        kimi_context = build_kimi_context_payload(payload)
+        if is_nvidia_nim_provider(llm_provider):
+            kimi_judge = request_kimi_judge(symbol, kimi_context, provider=llm_provider, model=llm_model)
+            if not kimi_judge.get("available", False):
+                kimi_judge = {
+                    "available": False,
+                    "provider": llm_provider,
+                    "model": llm_model or "",
+                    "error": kimi_judge.get("error", "Kimi request failed."),
+                    "content": fallback_kimi_judge(payload),
+                }
+        else:
+            kimi_judge = {
+                "available": False,
+                "provider": llm_provider,
+                "model": llm_model or "",
+                "reason": "provider_not_nim",
+                "content": fallback_kimi_judge(payload),
+            }
+        payload['kimi_judge'] = kimi_judge
         if paper_trade_accumulator is not None:
             try:
                 market = payload.get('market', {}) if isinstance(payload, dict) else {}
@@ -628,11 +764,27 @@ def create_app() -> Any:
                 leverage=request.leverage,
                 stop_pips=request.stop_pips,
                 take_profit_pips=request.take_profit_pips,
+                stop_loss=request.stop_loss,
+                take_profit=request.take_profit,
                 note=request.note,
             )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"opened": position, "paper_trading": _paper_state(request.symbol)}
+
+    @app.post('/api/paper/modify')
+    def paper_modify(request: PaperModifyRequest):
+        try:
+            updated = paper_trader.modify_position(
+                request.trade_id,
+                stop_loss=request.stop_loss,
+                take_profit=request.take_profit,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"modified": True, "position": updated, "paper_trading": _paper_state(str(updated.get("symbol", "XAUUSD")))}
 
     @app.post('/api/paper/close')
     def paper_close(request: PaperCloseRequest):
@@ -648,6 +800,36 @@ def create_app() -> Any:
     def paper_reset(request: PaperResetRequest):
         paper_trader.reset(starting_balance=request.starting_balance)
         return {"paper_trading": _paper_state()}
+
+    @app.websocket('/ws/live')
+    async def websocket_live(ws: WebSocket, symbol: str = 'XAUUSD'):
+        await feed_manager.connect(ws, symbol=symbol)
+        try:
+            while True:
+                message = (await ws.receive_text()).strip()
+                if message and message.lower() != "ping":
+                    feed_manager.set_symbol(ws, message)
+        except WebSocketDisconnect:
+            feed_manager.disconnect(ws)
+        except Exception:
+            feed_manager.disconnect(ws)
+
+    @app.on_event("startup")
+    async def startup_tasks():
+        if getattr(app.state, "v18_feed_task", None) is None:
+            app.state.v18_feed_task = asyncio.create_task(
+                feed_manager.heartbeat_loop(
+                    price_fn=_live_price,
+                    sqt_fn=sqt_tracker.summary,
+                )
+            )
+
+    @app.on_event("shutdown")
+    async def shutdown_tasks():
+        task = getattr(app.state, "v18_feed_task", None)
+        if task is not None:
+            task.cancel()
+            app.state.v18_feed_task = None
 
     @app.get('/ui', response_class=HTMLResponse)
     def ui():

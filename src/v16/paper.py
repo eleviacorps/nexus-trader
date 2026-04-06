@@ -110,12 +110,16 @@ class PaperTradingEngine:
             current_price = current_prices.get(symbol, _safe_float(position.get("entry_price"), 0.0))
             pnl_pips, pnl_usd = self._position_unrealized(position, current_price)
             unrealized_pnl += pnl_usd
+            stop_loss = position.get("stop_loss", position.get("stop_price"))
+            take_profit = position.get("take_profit", position.get("take_profit_price"))
             open_positions.append(
                 position
                 | {
                     "current_price": round(current_price, 5),
                     "unrealized_pnl_pips": round(pnl_pips, 2),
                     "unrealized_pnl_usd": round(pnl_usd, 2),
+                    "stop_loss": None if stop_loss is None else round(_safe_float(stop_loss), 5),
+                    "take_profit": None if take_profit is None else round(_safe_float(take_profit), 5),
                 }
             )
         closed_trades = list(payload.get("closed_trades", []))
@@ -156,6 +160,8 @@ class PaperTradingEngine:
         leverage: float = 200.0,
         stop_pips: float = 20.0,
         take_profit_pips: float = 30.0,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
         note: str = "",
     ) -> dict[str, Any]:
         payload = self._read_state()
@@ -188,6 +194,8 @@ class PaperTradingEngine:
         pip_size = spec["pip_size"]
         stop_distance = stop_pips * pip_size
         take_distance = take_profit_pips * pip_size
+        stop_price = _safe_float(stop_loss, float(entry_price) - (direction_sign * stop_distance))
+        take_profit_price = _safe_float(take_profit, float(entry_price) + (direction_sign * take_distance))
         trade_id = uuid.uuid4().hex[:12]
         position = {
             "trade_id": trade_id,
@@ -202,8 +210,10 @@ class PaperTradingEngine:
             "leverage": float(leverage),
             "stop_pips": float(stop_pips),
             "take_profit_pips": float(take_profit_pips),
-            "stop_price": round(float(entry_price) - (direction_sign * stop_distance), 5),
-            "take_profit_price": round(float(entry_price) + (direction_sign * take_distance), 5),
+            "stop_loss": round(stop_price, 5),
+            "take_profit": round(take_profit_price, 5),
+            "stop_price": round(stop_price, 5),
+            "take_profit_price": round(take_profit_price, 5),
             "notional_usd": round(notional_usd, 2),
             "margin_used": round(margin_used, 2),
             "note": str(note),
@@ -211,6 +221,34 @@ class PaperTradingEngine:
         payload["open_positions"].append(position)
         self._write_state(payload)
         return position
+
+    def modify_position(
+        self,
+        trade_id: str,
+        *,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> dict[str, Any]:
+        payload = self._read_state()
+        updated: dict[str, Any] | None = None
+        positions = []
+        for position in payload.get("open_positions", []):
+            if str(position.get("trade_id")) != str(trade_id):
+                positions.append(position)
+                continue
+            if stop_loss is not None:
+                position["stop_loss"] = round(float(stop_loss), 5)
+                position["stop_price"] = round(float(stop_loss), 5)
+            if take_profit is not None:
+                position["take_profit"] = round(float(take_profit), 5)
+                position["take_profit_price"] = round(float(take_profit), 5)
+            updated = position
+            positions.append(position)
+        if updated is None:
+            raise KeyError(f"Unknown paper trade id: {trade_id}")
+        payload["open_positions"] = positions
+        self._write_state(payload)
+        return updated
 
     def close_position(self, trade_id: str, *, exit_price: float) -> dict[str, Any]:
         payload = self._read_state()

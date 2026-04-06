@@ -27,7 +27,7 @@ from config.project_config import (
     V9_MEMORY_BANK_INDEX_PATH,
     V9_PERSONA_CALIBRATION_HISTORY_PATH,
 )
-from src.service.llm_sidecar import request_market_context, request_swarm_judgment
+from src.service.llm_sidecar import is_nvidia_nim_provider, request_market_context, request_swarm_judgment
 from src.service.specialist_bots import run_specialist_bots
 from src.mcts.analog import get_historical_analog_scorer
 from src.mcts.reverse_collapse import reverse_collapse
@@ -41,6 +41,7 @@ from src.v9 import classify_contradiction, load_latest_persona_state, load_memor
 from src.v15.eci import EconomicCalendarIntegration
 from src.v17.mmm import MultifractalMarketMemory
 from src.v17.wltc import build_wltc_states
+from src.v18.mfg_beliefs import MFGBeliefState
 
 USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
 
@@ -195,6 +196,12 @@ def _build_mmm_live_context(price_frame: pd.DataFrame) -> dict[str, Any]:
         "hurst_asymmetry": round(_safe_float(latest.get("hurst_asymmetry"), 0.0), 4),
         "market_memory_regime": str(latest.get("market_memory_regime", "random_walk")),
     }
+
+
+def _build_mfg_context(recent_bars: list[dict[str, Any]]) -> dict[str, Any]:
+    state = MFGBeliefState()
+    state.update_from_bars(recent_bars)
+    return state.summary()
 
 
 def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
@@ -1604,6 +1611,7 @@ def build_live_sequence(
     latest["recent_bars"] = recent_bars
     wltc_context = _build_wltc_context(recent_bars)
     mmm_context = _build_mmm_live_context(live_frame)
+    mfg_context = _build_mfg_context(recent_bars)
     eci_context = _eci_display_context(live_frame.index[-1])
     latest["macro_bias"] = macro["macro_bias"]
     latest["macro_shock"] = macro["macro_shock"]
@@ -1618,6 +1626,8 @@ def build_live_sequence(
     latest["hurst_negative"] = round(_safe_float(mmm_context.get("hurst_negative"), 0.5), 4)
     latest["hurst_asymmetry"] = round(_safe_float(mmm_context.get("hurst_asymmetry"), 0.0), 4)
     latest["market_memory_regime"] = str(mmm_context.get("market_memory_regime", "random_walk"))
+    latest["mfg_disagreement"] = round(_safe_float(mfg_context.get("disagreement"), 0.0), 8)
+    latest["mfg_consensus_drift"] = round(_safe_float(mfg_context.get("consensus_drift"), 0.0), 8)
     for persona_name, summary in wltc_context.items():
         latest[f"fear_index_{persona_name}"] = round(_safe_float(summary.get("fear_index"), 0.0), 4)
         latest[f"wltc_testosterone_{persona_name}"] = round(_safe_float(summary.get("testosterone_index"), 0.0), 4)
@@ -1694,6 +1704,7 @@ def build_live_sequence(
         },
         "wltc": wltc_context,
         "mmm": mmm_context,
+        "mfg": mfg_context,
         "eci": {
             "cone_width_modifier": round(_safe_float(eci_context.get("cone_width_modifier"), 0.0), 4),
             "mins_to_next_high": round(_safe_float(eci_context.get("mins_to_next_high"), 0.0), 2),
@@ -1701,7 +1712,12 @@ def build_live_sequence(
         },
     }
 
-    llm_context = request_market_context(symbol, llm_context_input, provider=llm_provider, model=llm_model)
+    using_nim = is_nvidia_nim_provider(llm_provider)
+    llm_context = (
+        {"available": False, "provider": "nvidia_nim", "reason": "deferred_to_kimi_judge", "content": {}}
+        if using_nim
+        else request_market_context(symbol, llm_context_input, provider=llm_provider, model=llm_model)
+    )
     llm_content = _llm_content(llm_context)
     latest["llm_market_bias"] = round((_llm_numeric_prior(llm_content) - 0.5) * 2.0, 4)
     latest["llm_institutional_bias"] = round(_safe_float(llm_content.get("institutional_bias"), 0.0), 4)
@@ -1784,6 +1800,7 @@ def build_live_sequence(
     payload["contradiction"] = contradiction_payload
     payload["wltc"] = wltc_context
     payload["mmm"] = mmm_context
+    payload["mfg"] = mfg_context
     if isinstance(payload.get("simulation"), dict):
         payload["simulation"]["contradiction_type"] = contradiction.contradiction_type.value
         payload["simulation"]["contradiction_confidence"] = round(float(contradiction.confidence), 6)
@@ -1793,6 +1810,8 @@ def build_live_sequence(
         payload["simulation"]["hurst_negative"] = latest["hurst_negative"]
         payload["simulation"]["hurst_asymmetry"] = latest["hurst_asymmetry"]
         payload["simulation"]["market_memory_regime"] = latest["market_memory_regime"]
+        payload["simulation"]["mfg_disagreement"] = latest["mfg_disagreement"]
+        payload["simulation"]["mfg_consensus_drift"] = latest["mfg_consensus_drift"]
         payload["simulation"]["testosterone_index"] = {
             name: round(_safe_float(summary.get("testosterone_index"), 0.0), 4)
             for name, summary in wltc_context.items()
@@ -1818,7 +1837,11 @@ def build_live_sequence(
         "public_discussions": discussion_items[:8],
         "market_context": llm_content,
     }
-    swarm_judge = request_swarm_judgment(symbol, judge_input, provider=llm_provider, model=llm_model)
+    swarm_judge = (
+        _fallback_swarm_judge(bot_swarm, payload.get("simulation", {}), technical_analysis)
+        if using_nim
+        else request_swarm_judgment(symbol, judge_input, provider=llm_provider, model=llm_model)
+    )
     if not swarm_judge.get("available", False):
         swarm_judge = _fallback_swarm_judge(bot_swarm, payload.get("simulation", {}), technical_analysis)
     payload["swarm_judge"] = swarm_judge

@@ -4774,3 +4774,123 @@ The next cycle should keep the new V17 observability stack, but treat the model 
 - verify the exact NVIDIA NIM model id and request contract needed for Kimi before treating that route as production-ready
 - do not promote `MMM` or `LeeCOC` into the main CABR checkpoint unless they beat the V14 temporal baseline in ablation
 - focus the next research pass on recovering `15m` participation without destroying the strong win-rate / cone-hit characteristics already present in the selective proxy outputs
+
+## V18
+
+V18 was executed as a product-and-runtime expansion pass built on top of the hosted V16 and V17 stack, with the main brief centered on the `15m` decision loop, stricter Kimi prompt packaging, real-time operator visibility, darker glass UI styling, and scroll-contained panels that do not keep stretching the layout.
+
+### Phase 0
+
+Initial verification before implementation:
+
+- the V17 theory and prompt files were read in full from `C:\\Users\\rfsga\\Downloads\\CORE_CONCEPT_AND_THEORY_V18.md` and `C:\\Users\\rfsga\\Downloads\\PromptV18.md`
+- the repo already contained the expected V17 base files: `src/v17/wltc.py`, `src/v17/mmm.py`, `src/v17/relativistic_cone.py`, `src/service/llm_sidecar.py`, `src/service/app.py`, and `src/ui/web.py`
+- the existing CABR checkpoint `checkpoints/v14/cabr_temporal.pt` was present
+- the historical Kimi log path required by the newer prompt was normalized by switching the active path to `outputs/v17/kimi_packet_log.jsonl`
+
+Runtime hosting arrangement for V18:
+
+- V16 remained live at `http://127.0.0.1:8016/ui`
+- V17 remained live at `http://127.0.0.1:8017/ui`
+- V18 was hosted separately at `http://127.0.0.1:8018/ui`
+
+### V18 Implementation
+
+Track 1: Kimi intelligence layer
+
+- added `src/v18/kimi_system_prompt.py` with a dedicated V18 system prompt, strict JSON schema, and a user-message builder that packages the `15m` XAUUSD context into a clean operator-facing Kimi request
+- updated `src/service/llm_sidecar.py` to support a structured V18 `kimi_judge` request path, parse JSON responses, expand the numeric glossary, and retry across the configured NVIDIA NIM fallback chain
+- changed the default NIM model in `config/project_config.py` to `moonshotai/kimi-k2-5`
+- preserved full packet logging in `outputs/v17/kimi_packet_log.jsonl`, which now stores the exact system prompt, user prompt, context payload, numeric meanings, and remote-response metadata for each `15m` Kimi request
+
+Track 2: real-time WebSocket feed
+
+- added `src/v18/websocket_feed.py`
+- exposed `/ws/live` in `src/service/app.py`
+- implemented a `1s` heartbeat carrying live price, open-position PnL, `SQT` summary, and countdown/progress to the next `15m` bar
+- wired automatic SL/TP closure checks into the heartbeat path for paper positions
+
+Track 3: paper-trading upgrades
+
+- extended `src/v16/paper.py` so positions persist `stop_loss` and `take_profit` alongside legacy aliases
+- added `modify_position(...)` support and exposed it through `POST /api/paper/modify`
+- extended `POST /api/paper/open` so paper orders can be opened with leverage, SL, and TP in one request
+- kept lot sizing equity-scaled and compatible with the `1:200` paper leverage cap
+
+Track 4: MFG crowd-belief model
+
+- added `src/v18/mfg_beliefs.py`
+- integrated mean-field belief summaries into `src/service/live_data.py`
+- the live payload now carries `mfg.disagreement`, `mfg.consensus_drift`, `mfg.mean_equilibrium_rate`, and persona-level belief blocks so both the API and Kimi layer can reason about crowd-state alignment instead of only raw bot outputs
+
+Track 5: UI rebuild
+
+- rebuilt `src/ui/web.py` into a darker V18 terminal while keeping the requested glassmorphism + neomorphism feel
+- set the darkest background tokens to `--bg: #02060b` and `--bg2: #071018`
+- made the major panels scroll-contained with fixed-height shells such as `h-chart`, `h-judge`, `h-trades`, `h-feed`, and `h-packet` so the page does not keep expanding as data grows
+- added the top decision ribbon, Kimi judge panel, WebSocket-driven countdown, packet inspector, numeric glossary, paper-trade controls, and cleaned news rendering
+
+### V18 Hosted Verification
+
+Local verification completed:
+
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m py_compile config\\project_config.py src\\v18\\__init__.py src\\v18\\kimi_system_prompt.py src\\v18\\mfg_beliefs.py src\\v18\\websocket_feed.py src\\service\\llm_sidecar.py src\\service\\live_data.py src\\service\\app.py src\\v16\\paper.py src\\ui\\web.py tests\\test_v18_kimi_prompt.py tests\\test_v18_mfg.py tests\\test_v18_websocket.py`
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m unittest tests.test_v18_kimi_prompt tests.test_v18_mfg tests.test_v18_websocket tests.test_llm_sidecar tests.test_service_app tests.test_v16_csl`
+
+Hosted endpoint checks:
+
+- `http://127.0.0.1:8018/health` returned `status=ok`, `sequence_len=120`, `feature_dim=100`
+- `http://127.0.0.1:8018/ui` responded successfully
+- `http://127.0.0.1:8018/api/paper/state?symbol=XAUUSD` responded successfully
+- `http://127.0.0.1:8018/api/llm/kimi-log?limit=1` responded successfully and showed V18 `kimi_judge` entries
+- `http://127.0.0.1:8018/api/simulate-live?symbol=XAUUSD&mode=frequency&llm_provider=nvidia_nim` completed successfully as an end-to-end route and returned:
+  - `SQT = COLD`
+  - `cabr_score = 0.609216`
+  - `cpm_score = 0.583333`
+  - `cone_width_pips = 1019.1`
+  - `mfg_disagreement = 0.00003341`
+  - `mfg_consensus_drift = -0.00001391`
+  - remote Kimi status still unresolved because all attempted NIM models returned `404`
+
+Current hosted paper-trading state at journal time:
+
+- balance: `$8158.00`
+- equity: `-$3434.09`
+- realized PnL: `$7158.00`
+- unrealized PnL: `-$11592.09`
+- total trades: `123`
+- open positions: `23`
+- win rate: `0.9837`
+
+Active V18 runtime logs:
+
+- `outputs/v18/server_8018.console.log`
+- `outputs/v18/server_8018.out.log`
+- `outputs/v18/server_8018.err.log`
+
+### Honest V18 Read
+
+What is now genuinely true:
+
+- V18 is hosted locally and usable as a separate runtime at `8018`
+- the requested darker glassmorphism + neomorphism visual direction is restored
+- the major data cards are scroll-contained instead of continuously increasing the page height
+- the full `15m` Kimi context packet, including numeric meanings, is exposed through both the UI and `api/llm/kimi-log`
+- the mean-field belief model, packetized Kimi judge layer, WebSocket heartbeat, and paper-trade SL/TP editing are all wired into the product path
+
+What is not yet true:
+
+- the live NVIDIA NIM path is not provider-confirmed yet, because the latest `kimi_judge` request still returned `404` across the full fallback chain
+- this journal pass does not claim a completed V18 research win, because no new full walk-forward / backtrader report was completed in this cycle
+- the current paper account state shows over-positioning risk, so execution discipline still needs tightening before this should be treated as a stable paper-trading environment
+
+Bottom line:
+
+- V18 is a strong product, observability, and operator-experience pass
+- V18 is not yet a completed research pass
+- the next cycle should focus on provider confirmation for Kimi and tighter live execution controls rather than more UI work
+
+### V18 Summary Artifacts
+
+- `outputs/evaluation/v18_summary.json`
+- `outputs/evaluation/v18_summary.md`

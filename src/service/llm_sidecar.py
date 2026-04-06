@@ -6,7 +6,8 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Mapping
+import re
+from typing import Any, Callable, Mapping
 
 from config.project_config import (
     LLM_PROVIDER_DEFAULT,
@@ -25,6 +26,7 @@ from config.project_config import (
     OLLAMA_MODEL,
     OLLAMA_TIMEOUT_SECONDS,
 )
+from src.v18.kimi_system_prompt import KIMI_SYSTEM_PROMPT, build_kimi_user_message
 
 
 @dataclass(frozen=True)
@@ -37,9 +39,23 @@ class LlmSidecarConfig:
     api_key: str = ""
 
 
+NVIDIA_NIM_MODEL_FALLBACK_CHAIN = [
+    "moonshotai/kimi-k2-5",
+    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "meta/llama-3.1-70b-instruct",
+]
+
+
 NUMERIC_FIELD_MEANINGS: dict[str, str] = {
     "market.current_price": "Latest observed market price for the instrument at request time.",
     "market.atr_14": "14-bar average true range used as the local volatility scale.",
+    "simulation.overall_confidence": "Composite 15-minute signal strength from the live simulator, on a 0 to 1 scale.",
+    "simulation.cabr_score": "Cross-attention branch-ranker confidence proxy; higher means the selected path is stronger.",
+    "simulation.cpm_score": "Conditional predictability score; higher means the local bar state has been more repeatable historically.",
+    "simulation.cone_width_pips": "Width of the inner 15-minute prediction cone in pips; larger means more uncertainty.",
+    "simulation.cone_c_m": "Empirical relativistic cone speed limit used to define the outer hard price envelope.",
+    "simulation.testosterone_index.retail": "WLTC winner-cycle intensity for the retail crowd.",
+    "simulation.testosterone_index.institutional": "WLTC winner-cycle intensity for the institutional crowd.",
     "simulation.macro_bias": "Macro directional tilt normalized to roughly -1 bearish through +1 bullish.",
     "simulation.news_bias": "News sentiment tilt normalized to roughly -1 bearish through +1 bullish.",
     "simulation.crowd_bias": "Crowd sentiment tilt normalized to roughly -1 bearish through +1 bullish.",
@@ -53,6 +69,12 @@ NUMERIC_FIELD_MEANINGS: dict[str, str] = {
     "technical_analysis.quant_transition_risk": "Risk that the current regime is about to change.",
     "technical_analysis.quant_vol_realism": "How realistic current volatility looks relative to historical analog structure.",
     "technical_analysis.quant_fair_value_z": "Distance from estimated fair value in standard-deviation units.",
+    "technical_analysis.rsi_14": "Fourteen-bar RSI momentum oscillator.",
+    "technical_analysis.atr_14": "Fourteen-bar average true range in raw price units.",
+    "technical_analysis.equilibrium": "Midpoint of the recent dealing range used to classify premium versus discount.",
+    "bot_swarm.aggregate.bullish_probability": "Aggregate bullish probability from the specialist bot swarm.",
+    "bot_swarm.aggregate.disagreement": "How much the specialist bots disagree with one another.",
+    "sqt.rolling_accuracy": "Rolling recent hit rate of the simulator.",
     "current_row.macro_bias": "Macro directional tilt for the live bar context.",
     "current_row.macro_shock": "Macro shock intensity for the live bar context.",
     "current_row.news_bias": "News directional tilt for the live bar context.",
@@ -74,7 +96,34 @@ NUMERIC_FIELD_MEANINGS: dict[str, str] = {
     "eci.cone_width_modifier": "Event-risk modifier that widens the V17 cone near major releases.",
     "eci.mins_to_next_high": "Minutes until the next high-impact event.",
     "eci.mins_since_last_high": "Minutes since the last high-impact event.",
+    "mfg.disagreement": "Cross-persona disagreement in expected drift; higher values imply more conflict between sub-populations.",
+    "mfg.consensus_drift": "Weighted mean-field drift estimate implied by the persona belief states.",
 }
+
+
+def is_nvidia_nim_provider(provider: str | None) -> bool:
+    return (provider or "").strip().lower() in {"nvidia_nim", "nim", "kimi", "qwen"}
+
+
+def get_nim_model(requested_model: str | None) -> str:
+    candidate = (requested_model or "").strip()
+    if candidate:
+        return candidate
+    return NVIDIA_NIM_MODEL_FALLBACK_CHAIN[0]
+
+
+def _nim_model_chain(requested_model: str | None) -> list[str]:
+    chain = [get_nim_model(requested_model)]
+    chain.extend(NVIDIA_NIM_MODEL_FALLBACK_CHAIN)
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in chain:
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(key)
+    return output
 
 
 def resolve_config(
@@ -97,7 +146,7 @@ def resolve_config(
         return LlmSidecarConfig(
             provider="nvidia_nim",
             base_url=NVIDIA_NIM_BASE_URL,
-            model=model or NVIDIA_NIM_MODEL,
+            model=get_nim_model(model or NVIDIA_NIM_MODEL),
             timeout_seconds=NVIDIA_NIM_TIMEOUT_SECONDS,
             enabled=NVIDIA_NIM_ENABLED,
             api_key=NVIDIA_NIM_API_KEY,
@@ -212,6 +261,30 @@ def parse_json_text(raw_text: str) -> dict[str, Any]:
     return payload
 
 
+def parse_kimi_response(raw_response: str) -> dict[str, Any]:
+    clean = re.sub(r"```(?:json)?", "", str(raw_response or ""), flags=re.IGNORECASE).strip().strip("`").strip()
+    if clean:
+        try:
+            payload = parse_json_text(clean)
+            return payload
+        except Exception:
+            pass
+    return {
+        "stance": "HOLD",
+        "confidence": "VERY_LOW",
+        "entry_zone": [],
+        "stop_loss": None,
+        "take_profit": None,
+        "hold_time": "skip",
+        "reasoning": f"Response parsing failed: {clean[:200]}",
+        "key_risk": "Unable to parse model response",
+        "crowd_note": "Unavailable due to parsing failure.",
+        "regime_note": "Unavailable due to parsing failure.",
+        "invalidation": None,
+        "error": True,
+    }
+
+
 def sidecar_health(
     config: LlmSidecarConfig | None = None,
     provider: str | None = None,
@@ -243,6 +316,7 @@ def _chat_json_request(
     request_kind: str = "generic",
     symbol: str | None = None,
     context: Mapping[str, Any] | None = None,
+    response_parser: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_config(provider=provider, config=config, model=model)
     if not resolved.enabled:
@@ -250,6 +324,7 @@ def _chat_json_request(
 
     should_log = resolved.provider == "nvidia_nim"
     packet_context = dict(context or {})
+    attempted_models = _nim_model_chain(model or resolved.model) if resolved.provider == "nvidia_nim" else [resolved.model]
     packet_entry = {
         "logged_at": datetime.now(timezone.utc).isoformat(),
         "packet_bucket_15m_utc": _packet_bucket_utc(),
@@ -257,6 +332,7 @@ def _chat_json_request(
         "symbol": str(symbol or packet_context.get("symbol", "")),
         "provider": resolved.provider,
         "model": resolved.model,
+        "attempted_models": attempted_models,
         "base_url": resolved.base_url,
         "horizon_minutes": 15,
         "system_prompt": system_prompt,
@@ -264,47 +340,66 @@ def _chat_json_request(
         "context": packet_context,
         "numeric_glossary": build_numeric_glossary(packet_context),
     }
-    try:
-        if resolved.provider == "ollama":
-            payload = {
-                "model": resolved.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "stream": False,
+    errors: list[str] = []
+    for chosen_model in attempted_models:
+        try:
+            if resolved.provider == "ollama":
+                payload = {
+                    "model": chosen_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "stream": False,
+                }
+                response = _post_json(f"{resolved.base_url.rstrip('/')}/api/chat", payload, timeout_seconds=resolved.timeout_seconds)
+                message = response.get("message", {}) if isinstance(response, dict) else {}
+                content = message.get("content", "")
+            else:
+                payload = {
+                    "model": chosen_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.2,
+                }
+                response = _post_json(
+                    f"{resolved.base_url.rstrip('/')}/v1/chat/completions",
+                    payload,
+                    timeout_seconds=resolved.timeout_seconds,
+                    api_key=resolved.api_key,
+                )
+                choices = response.get("choices", []) if isinstance(response, dict) else []
+                if not choices:
+                    raise ValueError("No chat choices returned by provider.")
+                message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+                content = message.get("content", "")
+            parser = response_parser or parse_json_text
+            parsed = parser(content)
+            if should_log:
+                _append_packet_log(packet_entry | {"status": "ok", "model": chosen_model, "raw_response": content, "response_content": parsed})
+            return {
+                "available": True,
+                "model": chosen_model,
+                "base_url": resolved.base_url,
+                "provider": resolved.provider,
+                "content": parsed,
             }
-            response = _post_json(f"{resolved.base_url.rstrip('/')}/api/chat", payload, timeout_seconds=resolved.timeout_seconds)
-            message = response.get("message", {}) if isinstance(response, dict) else {}
-            content = message.get("content", "")
-        else:
-            payload = {
-                "model": resolved.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-            }
-            response = _post_json(
-                f"{resolved.base_url.rstrip('/')}/v1/chat/completions",
-                payload,
-                timeout_seconds=resolved.timeout_seconds,
-                api_key=resolved.api_key,
-            )
-            choices = response.get("choices", []) if isinstance(response, dict) else []
-            if not choices:
-                raise ValueError("No chat choices returned by LM Studio")
-            message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-            content = message.get("content", "")
-        parsed = parse_json_text(content)
-        if should_log:
-            _append_packet_log(packet_entry | {"status": "ok", "response_content": parsed})
-        return {"available": True, "model": resolved.model, "base_url": resolved.base_url, "provider": resolved.provider, "content": parsed}
-    except Exception as exc:  # pragma: no cover
-        if should_log:
-            _append_packet_log(packet_entry | {"status": "error", "error": str(exc)})
-        return {"available": False, "model": resolved.model, "base_url": resolved.base_url, "provider": resolved.provider, "error": str(exc)}
+        except Exception as exc:  # pragma: no cover
+            errors.append(f"{chosen_model}: {exc}")
+            if resolved.provider != "nvidia_nim":
+                break
+    error_text = " | ".join(errors) if errors else "Unknown sidecar error"
+    if should_log:
+        _append_packet_log(packet_entry | {"status": "error", "error": error_text})
+    return {
+        "available": False,
+        "model": attempted_models[0] if attempted_models else resolved.model,
+        "base_url": resolved.base_url,
+        "provider": resolved.provider,
+        "error": error_text,
+    }
 
 
 def build_market_context_prompt(symbol: str, context: Mapping[str, Any]) -> str:
@@ -409,4 +504,24 @@ def request_swarm_judgment(
         request_kind="swarm_judgment",
         symbol=symbol,
         context=context,
+    )
+
+
+def request_kimi_judge(
+    symbol: str,
+    context: Mapping[str, Any],
+    config: LlmSidecarConfig | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    return _chat_json_request(
+        system_prompt=KIMI_SYSTEM_PROMPT,
+        user_prompt=build_kimi_user_message(context, symbol),
+        config=config,
+        provider=provider or "nvidia_nim",
+        model=model,
+        request_kind="kimi_judge",
+        symbol=symbol,
+        context=context,
+        response_parser=parse_kimi_response,
     )
