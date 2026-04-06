@@ -12,6 +12,11 @@ from config.project_config import (
     LM_STUDIO_ENABLED,
     LM_STUDIO_MODEL,
     LM_STUDIO_TIMEOUT_SECONDS,
+    NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_BASE_URL,
+    NVIDIA_NIM_ENABLED,
+    NVIDIA_NIM_MODEL,
+    NVIDIA_NIM_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
     OLLAMA_ENABLED,
     OLLAMA_MODEL,
@@ -26,9 +31,14 @@ class LlmSidecarConfig:
     model: str = LM_STUDIO_MODEL
     timeout_seconds: int = LM_STUDIO_TIMEOUT_SECONDS
     enabled: bool = LM_STUDIO_ENABLED
+    api_key: str = ""
 
 
-def resolve_config(provider: str | None = None, config: LlmSidecarConfig | None = None) -> LlmSidecarConfig:
+def resolve_config(
+    provider: str | None = None,
+    config: LlmSidecarConfig | None = None,
+    model: str | None = None,
+) -> LlmSidecarConfig:
     if config is not None:
         return config
     resolved_provider = (provider or LLM_PROVIDER_DEFAULT).strip().lower()
@@ -36,33 +46,49 @@ def resolve_config(provider: str | None = None, config: LlmSidecarConfig | None 
         return LlmSidecarConfig(
             provider="ollama",
             base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_MODEL,
+            model=model or OLLAMA_MODEL,
             timeout_seconds=OLLAMA_TIMEOUT_SECONDS,
             enabled=OLLAMA_ENABLED,
+        )
+    if resolved_provider in {"nvidia_nim", "nim", "kimi", "qwen"}:
+        return LlmSidecarConfig(
+            provider="nvidia_nim",
+            base_url=NVIDIA_NIM_BASE_URL,
+            model=model or NVIDIA_NIM_MODEL,
+            timeout_seconds=NVIDIA_NIM_TIMEOUT_SECONDS,
+            enabled=NVIDIA_NIM_ENABLED,
+            api_key=NVIDIA_NIM_API_KEY,
         )
     return LlmSidecarConfig(
         provider="lm_studio",
         base_url=LM_STUDIO_BASE_URL,
-        model=LM_STUDIO_MODEL,
+        model=model or LM_STUDIO_MODEL,
         timeout_seconds=LM_STUDIO_TIMEOUT_SECONDS,
         enabled=LM_STUDIO_ENABLED,
     )
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+def _request_headers(api_key: str = "") -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int, api_key: str = "") -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_request_headers(api_key=api_key),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _get_json(url: str, timeout_seconds: int) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+def _get_json(url: str, timeout_seconds: int, api_key: str = "") -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=_request_headers(api_key=api_key))
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -88,8 +114,12 @@ def parse_json_text(raw_text: str) -> dict[str, Any]:
     return payload
 
 
-def sidecar_health(config: LlmSidecarConfig | None = None, provider: str | None = None) -> dict[str, Any]:
-    resolved = resolve_config(provider=provider, config=config)
+def sidecar_health(
+    config: LlmSidecarConfig | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    resolved = resolve_config(provider=provider, config=config, model=model)
     if not resolved.enabled:
         return {"ok": False, "enabled": False, "reason": "disabled", "provider": resolved.provider}
     try:
@@ -98,7 +128,7 @@ def sidecar_health(config: LlmSidecarConfig | None = None, provider: str | None 
             models = payload.get("models", []) if isinstance(payload, dict) else []
             model_ids = [item.get("name") for item in models if isinstance(item, dict)]
         else:
-            payload = _get_json(f"{resolved.base_url.rstrip('/')}/v1/models", timeout_seconds=resolved.timeout_seconds)
+            payload = _get_json(f"{resolved.base_url.rstrip('/')}/v1/models", timeout_seconds=resolved.timeout_seconds, api_key=resolved.api_key)
             models = payload.get("data", []) if isinstance(payload, dict) else []
             model_ids = [item.get("id") for item in models if isinstance(item, dict)]
         return {"ok": True, "enabled": True, "models": model_ids, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider}
@@ -106,8 +136,14 @@ def sidecar_health(config: LlmSidecarConfig | None = None, provider: str | None 
         return {"ok": False, "enabled": True, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider, "error": str(exc)}
 
 
-def _chat_json_request(system_prompt: str, user_prompt: str, config: LlmSidecarConfig | None = None, provider: str | None = None) -> dict[str, Any]:
-    resolved = resolve_config(provider=provider, config=config)
+def _chat_json_request(
+    system_prompt: str,
+    user_prompt: str,
+    config: LlmSidecarConfig | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    resolved = resolve_config(provider=provider, config=config, model=model)
     if not resolved.enabled:
         return {"available": False, "reason": "disabled", "provider": resolved.provider}
 
@@ -133,7 +169,12 @@ def _chat_json_request(system_prompt: str, user_prompt: str, config: LlmSidecarC
                 ],
                 "temperature": 0.2,
             }
-            response = _post_json(f"{resolved.base_url.rstrip('/')}/v1/chat/completions", payload, timeout_seconds=resolved.timeout_seconds)
+            response = _post_json(
+                f"{resolved.base_url.rstrip('/')}/v1/chat/completions",
+                payload,
+                timeout_seconds=resolved.timeout_seconds,
+                api_key=resolved.api_key,
+            )
             choices = response.get("choices", []) if isinstance(response, dict) else []
             if not choices:
                 raise ValueError("No chat choices returned by LM Studio")
@@ -175,13 +216,20 @@ Current market state:
 """.strip()
 
 
-def request_market_context(symbol: str, context: Mapping[str, Any], config: LlmSidecarConfig | None = None, provider: str | None = None) -> dict[str, Any]:
+def request_market_context(
+    symbol: str,
+    context: Mapping[str, Any],
+    config: LlmSidecarConfig | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     prompt = build_market_context_prompt(symbol, context)
     return _chat_json_request(
         system_prompt="You are a strict JSON market-context extractor.",
         user_prompt=prompt,
         config=config,
         provider=provider,
+        model=model,
     )
 
 
@@ -220,11 +268,18 @@ Current swarm state:
 """.strip()
 
 
-def request_swarm_judgment(symbol: str, context: Mapping[str, Any], config: LlmSidecarConfig | None = None, provider: str | None = None) -> dict[str, Any]:
+def request_swarm_judgment(
+    symbol: str,
+    context: Mapping[str, Any],
+    config: LlmSidecarConfig | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     prompt = build_swarm_judgment_prompt(symbol, context)
     return _chat_json_request(
         system_prompt="You are a strict JSON swarm-judgment engine.",
         user_prompt=prompt,
         config=config,
         provider=provider,
+        model=model,
     )

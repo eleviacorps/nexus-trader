@@ -4322,3 +4322,151 @@ Current V15 working artifacts now present locally:
 - `outputs/v15/backtrader_month_2023_12_v15.json`
 - `checkpoints/v15/rsc_bootstrapped.pkl`
 - `checkpoints/v15/rsc_runtime.pkl`
+
+## V16 Always-On Simulator Status
+
+### V16 Goal
+
+V16 changes the product framing from a gate-heavy execution bot into an always-on simulator.
+
+The practical focus of this pass was:
+
+- keep the primary trading horizon centered on `15m`
+- keep the simulator refresh cadence at `5m`
+- remove precondition silence from the live display path
+- add a hosted paper-trading surface with leverage, history, and PnL
+- add optional NVIDIA NIM routing for Kimi or Qwen through the existing OpenAI-compatible sidecar path
+
+### Phase 0 Verification
+
+On `2026-04-06`, the required V15 artifacts were re-verified locally and all were present:
+
+- `src/v15/cpm.py`
+- `src/v15/participation_audit.py`
+- `src/v14/acm.py`
+- `src/v14/bst.py`
+- `src/v13/cabr.py`
+- `src/v12/bar_consistent_features.py`
+- `src/v12/backtrader_strategy.py`
+- `outputs/v15/cpm_labels.parquet`
+- `checkpoints/v14/cabr_temporal.pt`
+- `checkpoints/v15/rsc_bootstrapped.pkl`
+
+Current gate reality before V16:
+
+- legacy V15 research execution still contains blocking reasons such as `pce_not_predictable`, `minority_veto`, and `lot_below_minimum`
+- the participation audit vocabulary still includes `wfri_not_deployable`, `lrtd_suppressed`, and `uts_below_threshold`
+- the new V16 live simulator path does not use those as precondition display gates
+
+### V16 Implementation Landed
+
+New V16 modules added:
+
+- `src/v16/confidence_tier.py`
+- `src/v16/sqt.py`
+- `src/v16/sel.py`
+- `src/v16/csl.py`
+- `src/v16/paper.py`
+
+Core service and UI updates:
+
+- `src/service/llm_sidecar.py`
+- `src/service/live_data.py`
+- `src/service/app.py`
+- `src/ui/web.py`
+
+What these changes do:
+
+- convert the current live branch payload into a V16 simulation result with direction, cone, minority path, CABR proxy, BST survival score, CPM display score, confidence tier, SQT label, and suggested lot size
+- keep the main live presentation focused on the `15m` path while still refreshing every `5m`
+- expose Frequency Mode and Precision Mode through the live API and website
+- add a paper-trading engine with:
+  balance
+  equity
+  realized and unrealized PnL
+  open positions
+  closed trade history
+  leverage selection up to `1:200`
+- make paper-trade lot size scale with current equity, so growth from `$1000` to `$1100` can increase size automatically
+
+### NVIDIA NIM Support
+
+NVIDIA NIM support was added as an optional LLM route.
+
+Configuration now supports:
+
+- provider: `nvidia_nim`
+- API key env var: `NVIDIA_NIM_API_KEY`
+- base URL env var: `NEXUS_NVIDIA_NIM_BASE_URL`
+- model env var: `NEXUS_NVIDIA_NIM_MODEL`
+- live UI model override field for Kimi or Qwen model ids
+
+Important implementation choice:
+
+- no NVIDIA key was written into the repository, the journal, or any generated artifact
+
+### Local Hosting Status
+
+The V16 app was launched locally and is now hosted at:
+
+- UI: `http://127.0.0.1:8016/ui`
+- health: `http://127.0.0.1:8016/health`
+
+Runtime logs:
+
+- `outputs/v16/server_8016.out.log`
+- `outputs/v16/server_8016.err.log`
+
+### Local Verification
+
+Verification completed locally:
+
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m py_compile config\\project_config.py src\\service\\llm_sidecar.py src\\service\\live_data.py src\\service\\app.py src\\ui\\web.py src\\v16\\__init__.py src\\v16\\confidence_tier.py src\\v16\\sqt.py src\\v16\\sel.py src\\v16\\csl.py src\\v16\\paper.py tests\\test_v16_confidence_tier.py tests\\test_v16_sqt.py tests\\test_v16_sel.py tests\\test_v16_csl.py`
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m unittest tests.test_v16_confidence_tier tests.test_v16_sqt tests.test_v16_sel tests.test_v16_csl`
+- `http://127.0.0.1:8016/health`
+- `http://127.0.0.1:8016/ui`
+- `http://127.0.0.1:8016/api/paper/state?symbol=XAUUSD`
+- `http://127.0.0.1:8016/api/simulate-live?symbol=XAUUSD&mode=frequency&llm_provider=lm_studio`
+- live paper-trade API smoke: open then close one `XAUUSD` paper trade successfully at `0.05` lot
+
+Live smoke response from the hosted V16 API:
+
+- symbol: `XAUUSD`
+- direction: `BUY`
+- confidence tier: `low`
+- SQT label: `HOT`
+- ECI note: `No high-impact event pressure near the current 15m horizon.`
+- suggested lot: `0.05`
+- provider: `lm_studio`
+
+### Honest V16 Read
+
+What is now genuinely true:
+
+- the project now has a hosted V16 live simulator UI focused on `15m`
+- the app exposes a working paper-trading loop with leverage and trade history
+- the sidecar stack can now route through NVIDIA NIM safely without storing the key in code
+- V16 no longer treats the live display path as a trade/no-trade gate cascade
+
+What is not yet complete:
+
+- this pass did not complete the full V16 Backtrader month run
+- this pass did not complete the full V16 walk-forward research run
+- cone hit rate, direction hit rate, and minority rescue rate are therefore only live-runtime values right now, not final research metrics
+
+Bottom line:
+
+- V16 is now live as a local simulator-and-paper-trading product pass
+- V16 is not yet closed as a full research-evaluation pass
+
+### V16 Summary Artifacts
+
+- `outputs/evaluation/v16_summary.json`
+- `outputs/evaluation/v16_summary.md`
+
+### V17 Recommendation
+
+The next pass should now split clearly into two tracks instead of mixing them:
+
+- use the hosted V16 UI for real paper-trading accumulation and operator feedback
+- run dedicated V16 Frequency and Precision Backtrader / walk-forward research jobs separately, so the paper-trading product iteration does not get blocked by longer evaluation cycles

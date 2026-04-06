@@ -21,10 +21,13 @@ from config.project_config import (
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
 from src.service.llm_sidecar import request_market_context, sidecar_health
-from src.service.live_data import build_live_monitor, build_live_simulation, record_simulation_history, _build_final_forecast
+from src.service.live_data import build_live_monitor, build_live_simulation, fetch_recent_market_candles, record_simulation_history
 from src.ui.web import render_web_app_html
 from src.utils.device import get_torch_device
 from src.v13.s3pta import PaperTradeAccumulator
+from src.v16.csl import build_v16_simulation_result
+from src.v16.paper import PaperTradingEngine
+from src.v16.sqt import SimulationQualityTracker
 
 try:
     import torch  # type: ignore
@@ -32,11 +35,12 @@ except ImportError:  # pragma: no cover
     torch = None
 
 try:
-    from fastapi import FastAPI  # type: ignore
+    from fastapi import FastAPI, HTTPException  # type: ignore
     from fastapi.responses import HTMLResponse  # type: ignore
     from pydantic import BaseModel, Field  # type: ignore
 except ImportError:  # pragma: no cover
     FastAPI = None
+    HTTPException = RuntimeError  # type: ignore
     BaseModel = object  # type: ignore
     HTMLResponse = str  # type: ignore
 
@@ -56,6 +60,28 @@ class PredictResponse(BaseModel):  # type: ignore[misc]
     sequence_len: int
     feature_dim: int
     horizon_probabilities: dict[str, float] | None = None
+
+
+class PaperOpenRequest(BaseModel):  # type: ignore[misc]
+    symbol: str = "XAUUSD"
+    direction: str
+    entry_price: float
+    confidence_tier: str
+    sqt_label: str = "NEUTRAL"
+    mode: str = "frequency"
+    leverage: float = 200.0
+    stop_pips: float = 20.0
+    take_profit_pips: float = 30.0
+    note: str = ""
+
+
+class PaperCloseRequest(BaseModel):  # type: ignore[misc]
+    trade_id: str
+    exit_price: float
+
+
+class PaperResetRequest(BaseModel):  # type: ignore[misc]
+    starting_balance: float = 1000.0
 
 
 def llm_numeric_prior(payload: dict[str, Any]) -> float:
@@ -406,9 +432,69 @@ def create_app() -> Any:
 
     server = ModelServer()
     app = FastAPI(title='Nexus Trader Inference API', version='0.2.0')
-    default_stack_mode = os.getenv("NEXUS_STACK_MODE", "hybrid").strip().lower() or "hybrid"
+    default_mode = os.getenv("NEXUS_V16_MODE", "frequency").strip().lower() or "frequency"
     s3pta_enabled = os.getenv("NEXUS_S3PTA_ENABLED", "0") == "1"
     paper_trade_accumulator = PaperTradeAccumulator() if s3pta_enabled else None
+    sqt_tracker = SimulationQualityTracker()
+    scored_predictions: set[str] = set()
+    paper_trader = PaperTradingEngine(starting_balance=float(os.getenv("NEXUS_PAPER_START_BALANCE", "1000")))
+
+    def _current_prices(symbols: set[str]) -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for symbol_name in sorted({str(item).upper() for item in symbols if item}):
+            try:
+                candles = fetch_recent_market_candles(symbol_name)
+                if candles.empty:
+                    continue
+                prices[symbol_name] = float(candles.iloc[-1]["close"])
+            except Exception:
+                continue
+        return prices
+
+    def _paper_state(symbol: str | None = None) -> dict[str, Any]:
+        preview = paper_trader.state()
+        open_symbols = {str(position.get("symbol", "")).upper() for position in preview.get("open_positions", [])}
+        if symbol:
+            open_symbols.add(str(symbol).upper())
+        return paper_trader.state(current_prices=_current_prices(open_symbols))
+
+    def _refresh_sqt(symbol: str) -> dict[str, Any]:
+        monitor = build_live_monitor(symbol)
+        for item in monitor.get("recent_simulations", []):
+            if item.get("realized_direction") not in {"bullish", "bearish"}:
+                continue
+            key = f"{symbol}:{item.get('anchor_timestamp')}"
+            if key in scored_predictions:
+                continue
+            predicted = "BUY" if str(item.get("scenario_bias", "bullish")) == "bullish" else "SELL"
+            actual = "BUY" if str(item.get("realized_direction", "bullish")) == "bullish" else "SELL"
+            sqt_tracker.record(predicted, actual, str(item.get("confidence_tier", "uncertain")))
+            scored_predictions.add(key)
+        monitor["sqt"] = sqt_tracker.summary()
+        monitor["paper_trading"] = _paper_state(symbol)
+        return monitor
+
+    def _v16_ensemble(payload: dict[str, Any]) -> dict[str, Any]:
+        simulation = payload.get("simulation", {}) if isinstance(payload, dict) else {}
+        final_points = list((payload.get("final_forecast") or {}).get("points", []))
+        model_prediction = payload.get("model_prediction", {}) if isinstance(payload, dict) else {}
+        bullish_probability = float((model_prediction or {}).get("bullish_probability", 0.5) or 0.5)
+        if str(simulation.get("direction", "NEUTRAL")).upper() == "SELL":
+            bullish_probability = 1.0 - bullish_probability
+        return {
+            "signal": "bullish" if str(simulation.get("direction", "NEUTRAL")).upper() == "BUY" else "bearish" if str(simulation.get("direction", "NEUTRAL")).upper() == "SELL" else "neutral",
+            "confidence": float(simulation.get("cabr_score", 0.5) or 0.5),
+            "bullish_probability": round(float(bullish_probability), 6),
+            "bearish_probability": round(float(1.0 - bullish_probability), 6),
+            "horizon_predictions": [
+                {
+                    "minutes": int(item.get("minutes", 0) or 0),
+                    "target_price": float(item.get("final_price", 0.0) or 0.0),
+                    "confidence": float(simulation.get("cabr_score", 0.5) or 0.5),
+                }
+                for item in final_points
+            ],
+        }
 
     @app.get('/health')
     def health():
@@ -429,8 +515,19 @@ def create_app() -> Any:
         return load_json_artifact(FUTURE_BRANCHES_PATH) if FUTURE_BRANCHES_PATH.exists() else []
 
     @app.get('/api/simulate-live')
-    def simulate_live(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio', stack_mode: str | None = None):
-        payload = build_live_simulation(symbol, sequence_len=server.sequence_len, llm_provider=llm_provider)
+    def simulate_live(
+        symbol: str = 'XAUUSD',
+        llm_provider: str = 'lm_studio',
+        llm_model: str | None = None,
+        mode: str | None = None,
+    ):
+        _refresh_sqt(symbol)
+        payload = build_live_simulation(
+            symbol,
+            sequence_len=server.sequence_len,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+        )
         sequence = payload.pop('sequence', None)
         if sequence:
             try:
@@ -439,36 +536,40 @@ def create_app() -> Any:
                 payload['model_prediction'] = {'error': str(exc)}
         else:
             payload['model_prediction'] = None
-        active_stack_mode = (stack_mode or default_stack_mode).strip().lower() or "hybrid"
-        if active_stack_mode == "v8_direct":
-            payload['final_forecast'] = build_v8_direct_forecast(payload, payload.get('model_prediction'))
-            payload['ensemble_prediction'] = build_v8_direct_prediction(payload, payload.get('model_prediction'))
-        else:
-            payload['final_forecast'] = _build_final_forecast(
-                payload,
-                payload.get('bot_swarm', {}),
-                ((payload.get('llm_context') or {}).get('content') or {}),
-                payload.get('model_prediction'),
-            )
-            payload['ensemble_prediction'] = build_ensemble_prediction(payload, payload.get('model_prediction'))
+        active_mode = (mode or default_mode).strip().lower() or "frequency"
+        payload['paper_trading'] = _paper_state(symbol)
+        v16_payload = build_v16_simulation_result(
+            payload,
+            payload.get('model_prediction'),
+            mode=active_mode,
+            sqt=sqt_tracker,
+            eci_context=payload.get('eci'),
+        )
+        payload['simulation'] = dict(payload.get('simulation', {})) | dict(v16_payload.get('simulation', {}))
+        payload['final_forecast'] = v16_payload.get('final_forecast', {})
+        payload['v16'] = v16_payload
+        payload['ensemble_prediction'] = _v16_ensemble(payload)
         payload['history_entry'] = record_simulation_history(payload, payload.get('model_prediction'))
-        payload['stack_mode'] = active_stack_mode
-        payload['manual_trading_mode'] = active_stack_mode == "v8_direct"
+        payload['stack_mode'] = 'v16_simulator'
+        payload['mode'] = active_mode
+        payload['manual_trading_mode'] = True
+        payload['sqt'] = sqt_tracker.summary()
+        payload['paper_trading'] = _paper_state(symbol)
         if paper_trade_accumulator is not None:
             try:
                 market = payload.get('market', {}) if isinstance(payload, dict) else {}
                 current_price = float(market.get('current_price', 0.0) or 0.0)
-                ensemble = payload.get('ensemble_prediction', {}) if isinstance(payload, dict) else {}
-                signal = str(ensemble.get('signal', 'bullish')).lower()
-                direction = 'BUY' if signal == 'bullish' else 'SELL'
+                simulation = payload.get('simulation', {}) if isinstance(payload, dict) else {}
+                direction = str(simulation.get('direction', 'BUY')).upper()
                 regime = str(((payload.get('model_prediction') or {}).get('model_diagnostics') or {}).get('dominant_regime', 'unknown'))
-                timestamp = str(market.get('timestamp', ''))
+                candles = market.get('candles', []) if isinstance(market, dict) else []
+                timestamp = str(candles[-1].get('timestamp', '')) if candles else ""
                 if current_price > 0.0 and timestamp:
                     paper_trade_accumulator.log_trade(
                         symbol=symbol,
                         direction=direction,
-                        uts_score=float(ensemble.get('confidence', 0.5) or 0.5),
-                        cabr_score=float(ensemble.get('bullish_probability', 0.5) or 0.5),
+                        uts_score=float(simulation.get('bst_score', 0.5) or 0.5),
+                        cabr_score=float(simulation.get('cabr_score', 0.5) or 0.5),
                         regime=regime,
                         entry_price=current_price,
                         entry_time=timestamp,
@@ -480,15 +581,20 @@ def create_app() -> Any:
 
     @app.get('/api/live-monitor')
     def live_monitor(symbol: str = 'XAUUSD'):
-        return build_live_monitor(symbol)
+        return _refresh_sqt(symbol)
 
     @app.get('/api/llm/health')
-    def llm_health(provider: str = 'lm_studio'):
-        return sidecar_health(provider=provider)
+    def llm_health(provider: str = 'lm_studio', model: str | None = None):
+        return sidecar_health(provider=provider, model=model)
 
     @app.get('/api/llm/context')
-    def llm_context(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio'):
-        payload = build_live_simulation(symbol, sequence_len=server.sequence_len, llm_provider=llm_provider)
+    def llm_context(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio', llm_model: str | None = None):
+        payload = build_live_simulation(
+            symbol,
+            sequence_len=server.sequence_len,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+        )
         context = {
             'symbol': symbol,
             'market': payload.get('market', {}),
@@ -497,7 +603,45 @@ def create_app() -> Any:
             'news_headlines': [item.get('title', '') for item in payload.get('feeds', {}).get('news', [])[:5]],
             'crowd_items': [item.get('title', '') for item in payload.get('feeds', {}).get('public_discussions', [])[:5]],
         }
-        return request_market_context(symbol, context, provider=llm_provider)
+        return request_market_context(symbol, context, provider=llm_provider, model=llm_model)
+
+    @app.get('/api/paper/state')
+    def paper_state(symbol: str = 'XAUUSD'):
+        return _paper_state(symbol)
+
+    @app.post('/api/paper/open')
+    def paper_open(request: PaperOpenRequest):
+        try:
+            position = paper_trader.open_position(
+                symbol=request.symbol,
+                direction=request.direction,
+                entry_price=request.entry_price,
+                confidence_tier=request.confidence_tier,
+                sqt_label=request.sqt_label,
+                mode=request.mode,
+                leverage=request.leverage,
+                stop_pips=request.stop_pips,
+                take_profit_pips=request.take_profit_pips,
+                note=request.note,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"opened": position, "paper_trading": _paper_state(request.symbol)}
+
+    @app.post('/api/paper/close')
+    def paper_close(request: PaperCloseRequest):
+        try:
+            closed = paper_trader.close_position(request.trade_id, exit_price=request.exit_price)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"closed": closed, "paper_trading": _paper_state(str(closed.get("symbol", "XAUUSD")))}
+
+    @app.post('/api/paper/reset')
+    def paper_reset(request: PaperResetRequest):
+        paper_trader.reset(starting_balance=request.starting_balance)
+        return {"paper_trading": _paper_state()}
 
     @app.get('/ui', response_class=HTMLResponse)
     def ui():

@@ -22,6 +22,7 @@ from config.project_config import (
     NEWS_EVENTS_PATH,
     PRICE_FEATURE_COLUMNS,
     SEQUENCE_LEN,
+    V15_ECI_CALENDAR_PATH,
     V9_MEMORY_BANK_ENCODER_PATH,
     V9_MEMORY_BANK_INDEX_PATH,
     V9_PERSONA_CALIBRATION_HISTORY_PATH,
@@ -37,6 +38,7 @@ from src.simulation.abm import persona_vote_breakdown, simulate_one_step
 from src.simulation.personas import default_personas
 from src.v6 import build_volatility_envelopes, detect_regime, get_historical_path_retriever, rank_branches_with_selector
 from src.v9 import classify_contradiction, load_latest_persona_state, load_memory_bank, query_memory_bank
+from src.v15.eci import EconomicCalendarIntegration
 
 USER_AGENT = "Mozilla/5.0 (compatible; NexusTrader/0.3; +https://github.com/eleviacorps)"
 
@@ -73,7 +75,7 @@ MACRO_TICKERS: dict[str, str] = {
 }
 
 _CACHE: dict[str, tuple[float, Any]] = {}
-SIMULATION_SCHEMA_VERSION = "live_v2_atr_bounded"
+SIMULATION_SCHEMA_VERSION = "live_v16_15m"
 
 
 def _fetch_url(url: str, timeout: int = 20) -> bytes:
@@ -94,6 +96,45 @@ def _cached(key: str, ttl_seconds: int, factory):
     value = factory()
     _CACHE[key] = (now, value)
     return value
+
+
+def _economic_calendar() -> EconomicCalendarIntegration:
+    return _cached(
+        "v16_eci_integration",
+        300,
+        lambda: EconomicCalendarIntegration.from_csv(V15_ECI_CALENDAR_PATH),
+    )
+
+
+def _eci_note(context: Mapping[str, Any]) -> str:
+    if bool(context.get("avoid_window")):
+        mins = round(_safe_float(context.get("mins_to_next_high"), 0.0), 1)
+        return f"Major event in {mins} minutes - wide cone, avoid execution."
+    if bool(context.get("pre_release")):
+        mins = round(_safe_float(context.get("mins_to_next_high"), 0.0), 1)
+        return f"High-impact event due in {mins} minutes - simulator stays on, confidence reduced."
+    if bool(context.get("reaction_window")):
+        mins = round(_safe_float(context.get("mins_since_last_high"), 0.0), 1)
+        return f"Post-event reaction window active - recent release was {mins} minutes ago."
+    if bool(context.get("post_settling")):
+        return "Post-release settling window - structure may stabilize."
+    return "No high-impact event pressure near the current 15m horizon."
+
+
+def _eci_display_context(current_time: Any) -> dict[str, Any]:
+    base = _economic_calendar().get_context_at(current_time)
+    modifier = 0.0
+    if bool(base.get("avoid_window")):
+        modifier = 0.65
+    elif bool(base.get("pre_release")):
+        modifier = 0.35
+    elif bool(base.get("reaction_window")):
+        modifier = 0.20
+    return {
+        **base,
+        "note": _eci_note(base),
+        "cone_width_modifier": round(modifier, 4),
+    }
 
 
 def _symbol_settings(symbol: str) -> dict[str, Any]:
@@ -1148,6 +1189,22 @@ def build_history_entry(payload: dict[str, Any], model_prediction: dict[str, Any
             {"timestamp": point.get("timestamp"), "price": _safe_float(point.get("center_price"), anchor_price)}
             for point in cone
         ],
+        "confidence_tier": simulation.get("confidence_tier", "uncertain"),
+        "tier_color": simulation.get("tier_color", "#d50000"),
+        "tier_label": simulation.get("tier_label", "UNCERTAIN - observe only"),
+        "direction": simulation.get("direction", "NEUTRAL"),
+        "cabr_score": _safe_float(simulation.get("cabr_score"), 0.5),
+        "bst_score": _safe_float(simulation.get("bst_score"), 0.5),
+        "cone_width_pips": _safe_float(simulation.get("cone_width_pips"), 0.0),
+        "cpm_score": _safe_float(simulation.get("cpm_score"), 0.5),
+        "crowd_persona": simulation.get("crowd_persona", "mixed"),
+        "minority_path": list(simulation.get("minority_path", [])),
+        "minority_direction": simulation.get("minority_direction", "NEUTRAL"),
+        "mode": simulation.get("mode", "frequency"),
+        "primary_horizon_minutes": int(_safe_float(simulation.get("primary_horizon_minutes"), 15)),
+        "sqt_label": simulation.get("sqt_label", "NEUTRAL"),
+        "sqt_accuracy": _safe_float(simulation.get("sqt_accuracy"), 0.5),
+        "eci": dict(payload.get("eci", {})),
         "model_prediction": model_prediction or {},
     }
     return entry
@@ -1217,6 +1274,10 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
         last_actual_close = _safe_float(actual_future[-1]["close"], entry.get("anchor_price", 0.0)) if actual_future else _safe_float(entry.get("anchor_price"), 0.0)
         realized_direction = "bullish" if last_actual_close >= _safe_float(entry.get("anchor_price"), 0.0) else "bearish"
         direction_match = realized_direction == str(entry.get("scenario_bias", "neutral"))
+        minority_path = list(entry.get("minority_path", []))
+        minority_terminal = _safe_float(minority_path[-1], entry.get("anchor_price", 0.0)) if minority_path else _safe_float(entry.get("anchor_price"), 0.0)
+        center_terminal = _safe_float(entry.get("center_path", [{}])[-1].get("price"), entry.get("anchor_price", 0.0)) if entry.get("center_path") else _safe_float(entry.get("anchor_price"), 0.0)
+        minority_was_closer = abs(last_actual_close - minority_terminal) < abs(last_actual_close - center_terminal) if matched else None
         summary = {
             "generated_at": entry.get("generated_at"),
             "anchor_timestamp": entry.get("anchor_timestamp"),
@@ -1227,6 +1288,10 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
             "hit_rate": round(hits / matched, 4) if matched else None,
             "overall_confidence": _safe_float(entry.get("overall_confidence"), 0.0),
             "dominant_driver": entry.get("dominant_driver", "unknown"),
+            "confidence_tier": entry.get("confidence_tier", "uncertain"),
+            "tier_color": entry.get("tier_color", "#d50000"),
+            "sqt_label": entry.get("sqt_label", "NEUTRAL"),
+            "minority_was_closer": minority_was_closer,
         }
         recent_summaries.append(summary)
 
@@ -1238,6 +1303,7 @@ def build_simulation_comparison(symbol: str, candles: pd.DataFrame, history_limi
                 "hit_rate": round(hits / matched, 4) if matched else None,
                 "direction_match": direction_match if matched else None,
                 "realized_direction": realized_direction if matched else "pending",
+                "minority_was_closer": minority_was_closer,
             }
 
     return {
@@ -1437,7 +1503,12 @@ def _branch_payload(
     }
 
 
-def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provider: str | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+def build_live_sequence(
+    symbol: str,
+    sequence_len: int = SEQUENCE_LEN,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
     candles = fetch_recent_market_candles(symbol)
     price_frame = engineer_price_features(candles)
     quant_frame = build_quant_features(price_frame)
@@ -1474,6 +1545,7 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
     memory_bank_context = _memory_bank_context(fused)
     live_frame = price_frame.iloc[:min_rows].copy()
     latest = live_frame.iloc[-1].to_dict()
+    eci_context = _eci_display_context(live_frame.index[-1])
     latest["macro_bias"] = macro["macro_bias"]
     latest["macro_shock"] = macro["macro_shock"]
     latest["macro_driver"] = macro["driver"]
@@ -1540,7 +1612,7 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
         },
     }
 
-    llm_context = request_market_context(symbol, llm_context_input, provider=llm_provider)
+    llm_context = request_market_context(symbol, llm_context_input, provider=llm_provider, model=llm_model)
     llm_content = _llm_content(llm_context)
     latest["llm_market_bias"] = round((_llm_numeric_prior(llm_content) - 0.5) * 2.0, 4)
     latest["llm_institutional_bias"] = round(_safe_float(llm_content.get("institutional_bias"), 0.0), 4)
@@ -1646,17 +1718,29 @@ def build_live_sequence(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provi
         "public_discussions": discussion_items[:8],
         "market_context": llm_content,
     }
-    swarm_judge = request_swarm_judgment(symbol, judge_input, provider=llm_provider)
+    swarm_judge = request_swarm_judgment(symbol, judge_input, provider=llm_provider, model=llm_model)
     if not swarm_judge.get("available", False):
         swarm_judge = _fallback_swarm_judge(bot_swarm, payload.get("simulation", {}), technical_analysis)
     payload["swarm_judge"] = swarm_judge
     payload["chart_snapshot_120"] = chart_snapshot
     payload["llm_provider"] = llm_provider or "lm_studio"
+    payload["llm_model"] = llm_model or ""
+    payload["eci"] = eci_context
     return fused[-sequence_len:], payload
 
 
-def build_live_simulation(symbol: str, sequence_len: int = SEQUENCE_LEN, llm_provider: str | None = None) -> dict[str, Any]:
-    sequence, payload = build_live_sequence(symbol, sequence_len=sequence_len, llm_provider=llm_provider)
+def build_live_simulation(
+    symbol: str,
+    sequence_len: int = SEQUENCE_LEN,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+) -> dict[str, Any]:
+    sequence, payload = build_live_sequence(
+        symbol,
+        sequence_len=sequence_len,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+    )
     payload["sequence_shape"] = [int(sequence.shape[0]), int(sequence.shape[1])]
     return payload | {"sequence": sequence.tolist()}
 
