@@ -4470,3 +4470,307 @@ The next pass should now split clearly into two tracks instead of mixing them:
 
 - use the hosted V16 UI for real paper-trading accumulation and operator feedback
 - run dedicated V16 Frequency and Precision Backtrader / walk-forward research jobs separately, so the paper-trading product iteration does not get blocked by longer evaluation cycles
+
+## V17 Biological-Memory + Relativistic-Cone Status
+
+### V17 Goal
+
+V17 extends the hosted `15m` product track with the new theoretical layer requested in the V17 prompt:
+
+- Winner-Loser Testosterone Cycle (`WLTC`) state features for crowd behavior
+- Multifractal Market Memory (`MMM`) features for persistence / anti-persistence structure
+- Lee-style chaotic activation (`LeeCOC`) support inside the CABR stack
+- Relativistic Cone boundaries added to the existing live path visualization
+- a restored glassmorphism + neomorphism UI instead of replacing the visual identity with a flat dashboard
+- explicit numeric explainability in the UI
+- full packet logging of what is sent to Kimi every `15m`, including the raw context and a glossary for the numeric values
+
+### Phase 0 Verification
+
+On `2026-04-06`, before any V17 edits were applied, the pre-existing V16 product server was confirmed to still be running locally:
+
+- V16 UI: `http://127.0.0.1:8016/ui`
+- V16 health: `http://127.0.0.1:8016/health`
+
+The V17 pass therefore continued as a separate local host instead of replacing the V16 runtime already in service.
+
+### V17 Implementation Landed
+
+New V17 modules added:
+
+- `src/v17/wltc.py`
+- `src/v17/mmm.py`
+- `src/v17/lee_coc.py`
+- `src/v17/relativistic_cone.py`
+
+Additional scripts and tests added:
+
+- `scripts/build_mmm_features.py`
+- `scripts/run_v16_backtrader_walk_forward.py`
+- `tests/test_v17_wltc.py`
+- `tests/test_v17_mmm.py`
+- `tests/test_v17_lee_coc.py`
+- `tests/test_v17_relativistic_cone.py`
+
+Core integration files updated:
+
+- `src/simulation/personas.py`
+- `src/service/live_data.py`
+- `src/service/llm_sidecar.py`
+- `src/service/app.py`
+- `src/v13/cabr.py`
+- `src/v16/csl.py`
+- `scripts/train_v13_cabr.py`
+- `src/ui/web.py`
+
+What these changes now do:
+
+- build `WLTC` state features from recent bars and feed them into the live context
+- compute live and historical `MMM` features, including `hurst_overall`, `hurst_positive`, `hurst_negative`, and `hurst_asymmetry`
+- allow CABR training to use `MMM` context and optional `LeeCOC` activation for ablation testing
+- replace the old single cone boundary with a relativistic cone structure containing inner band, outer hard boundary, and minority path plausibility
+- restore the website to a glassmorphism + neomorphism presentation while keeping the live trading panels and paper-trading controls
+- add an in-UI `What The Numbers Mean` section so the main displayed numerical values are explained directly in the product
+- log each Kimi / NVIDIA NIM request packet in `15m` buckets with:
+  exact system prompt
+  exact user prompt
+  raw structured context
+  numeric glossary describing the numeric fields
+  provider / model metadata
+  success or error status
+
+### V17 UI and Explainability
+
+The V17 UI was rebuilt specifically to recover the requested visual theme and to make the model state easier to inspect.
+
+What the hosted V17 UI now includes:
+
+- glassmorphism + neomorphism cards instead of the flatter replacement style from the interrupted pass
+- `15m` hero metrics and confidence summary
+- relativistic cone chart with:
+  inner cone
+  dashed outer boundary
+  minority branch
+- paper-trading state with leverage, equity, open positions, closed history, and realized / unrealized PnL
+- recent simulation panels
+- judge / news panels
+- a `What The Numbers Mean` section that explains the displayed numerical metrics
+- a `Kimi 15m Packet` section that shows the logged prompt payload, raw context, and numeric glossary
+
+### Kimi / NVIDIA NIM Logging
+
+V17 now records the exact data package sent to Kimi through the NVIDIA NIM route every time the sidecar is called.
+
+Important implementation details:
+
+- packet logs are stored at `outputs/v17/kimi_packet_log.jsonl`
+- packets are bucketed by `15m` UTC interval
+- the live API now exposes `GET /api/llm/kimi-log`
+- the hosted V17 website renders the latest packet directly in the UI
+
+What the logged packet contains:
+
+- request kind such as `market_context`
+- symbol
+- provider
+- model id
+- base URL
+- exact system prompt
+- exact user prompt
+- raw structured context payload
+- numeric glossary for values such as:
+  `hurst_overall`
+  `hurst_positive`
+  `hurst_negative`
+  `hurst_asymmetry`
+  `cone_width`
+  `cone_c_m`
+  `cone_h_plus`
+  `cone_h_minus`
+  `cabr_score`
+  `bst_proxy`
+  `cpm_display`
+  `agreement`
+  `testosterone_index`
+  `fundamental_tracking`
+  `suggested_lot`
+
+Smoke-status note:
+
+- the first direct NVIDIA NIM packet smoke used model `moonshotai/kimi-k2-instruct`
+- the request returned `HTTP Error 404: Not Found`
+- the packet was still logged successfully, so the observability path is working even when the remote call fails
+
+### MMM Historical Build
+
+Historical `MMM` features were generated and written to:
+
+- `outputs/v17/mmm_features.parquet`
+- `outputs/v17/mmm_summary.json`
+
+Current summary values:
+
+- rows: `8000`
+- timestamp min: `2009-03-15T20:42:00+00:00`
+- timestamp max: `2023-12-29T14:48:00+00:00`
+- mean `hurst_overall`: `1.100902`
+- mean `hurst_positive`: `1.092719`
+- mean `hurst_negative`: `1.093658`
+- mean `hurst_asymmetry`: `-0.000941`
+
+### Deferred V16 Walk-Forward Proxy Results
+
+The V16 research track was finally completed in proxy form over the historical candidate archive so the product track and research track are now both documented.
+
+Artifacts:
+
+- `outputs/v16/backtrader_walkforward_frequency.json`
+- `outputs/v16/backtrader_walkforward_precision.json`
+
+Frequency Mode aggregate results:
+
+- trades: `295`
+- win rate: `0.908475`
+- profit factor: `23.999570`
+- cone hit rate: `0.644068`
+
+Precision Mode aggregate results:
+
+- trades: `60`
+- win rate: `0.933333`
+- profit factor: `74.158842`
+- cone hit rate: `0.933333`
+
+Important interpretation:
+
+- these proxy results are strong on selectivity and path quality
+- they still miss the desired trade-count floor for a higher-frequency `15m` operating style
+
+### V17 CABR Ablation Results
+
+V17 also tested whether the new theoretical additions improved CABR temporal quality versus the V14 temporal baseline.
+
+Artifacts:
+
+- `outputs/v17/cabr_eval_mmm_only.json`
+- `outputs/v17/cabr_eval_lee_only.json`
+- `outputs/v17/cabr_eval_mmm_lee.json`
+- `outputs/v17/cabr_evaluation_report_v17.json`
+
+Temporal comparison:
+
+- V14 temporal baseline: `0.641945`
+- `MMM` only: `0.526448`
+- `LeeCOC` only: `0.493486`
+- `MMM + LeeCOC`: `0.503218`
+
+Interpretation:
+
+- the V17 CABR ablations did not beat the V14 temporal baseline
+- the theory is now wired into the codebase, but the current training outcome is weaker than the best previous temporal checkpoint
+
+### V17 Walk-Forward Proxy Results
+
+V17 proxy walk-forward reports were generated using the V17 CABR variant.
+
+Artifacts:
+
+- `outputs/v17/backtrader_walkforward_frequency_v17.json`
+- `outputs/v17/backtrader_walkforward_precision_v17.json`
+
+Frequency Mode aggregate results:
+
+- trades: `124`
+- win rate: `0.943548`
+- profit factor: `63.726146`
+- cone hit rate: `0.701613`
+
+Precision Mode aggregate results:
+
+- trades: `36`
+- win rate: `0.944444`
+- profit factor: `59.168964`
+- cone hit rate: `0.944444`
+
+Interpretation:
+
+- the V17 proxy layer stayed very selective and statistically strong on the executed subset
+- participation fell even further than the deferred V16 frequency proxy
+- the trade-count objective is still not met
+
+### Local Hosting Status
+
+The V17 app was launched as a separate local product host so the original V16 runtime remained intact.
+
+Current local URLs:
+
+- V17 UI: `http://127.0.0.1:8017/ui`
+- V17 health: `http://127.0.0.1:8017/health`
+- V17 Kimi log API: `http://127.0.0.1:8017/api/llm/kimi-log`
+
+Current runtime logs:
+
+- `outputs/v17/server_8017.out.log`
+- `outputs/v17/server_8017.err.log`
+
+Paper-trading state at the time of journal update:
+
+- balance: `$8081.20`
+- equity: `$8081.20`
+- realized PnL: `$7081.20`
+- total trades: `120`
+- open positions: `0`
+- win rate: `1.000000`
+
+### Local Verification
+
+Verification completed locally:
+
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m py_compile config\\project_config.py src\\v17\\__init__.py src\\v17\\wltc.py src\\v17\\mmm.py src\\v17\\lee_coc.py src\\v17\\relativistic_cone.py src\\simulation\\personas.py src\\service\\llm_sidecar.py src\\service\\live_data.py src\\service\\app.py src\\ui\\web.py src\\v13\\cabr.py src\\v16\\csl.py scripts\\build_mmm_features.py scripts\\run_v16_backtrader_walk_forward.py scripts\\train_v13_cabr.py tests\\test_v17_wltc.py tests\\test_v17_mmm.py tests\\test_v17_lee_coc.py tests\\test_v17_relativistic_cone.py`
+- `C:\\Users\\rfsga\\miniconda3\\python.exe -m unittest tests.test_v17_wltc tests.test_v17_mmm tests.test_v17_lee_coc tests.test_v17_relativistic_cone tests.test_v16_csl`
+- `http://127.0.0.1:8017/health`
+- `http://127.0.0.1:8017/ui`
+- `http://127.0.0.1:8017/api/paper/state?symbol=XAUUSD`
+- `http://127.0.0.1:8017/api/llm/kimi-log?limit=4`
+
+Important runtime note:
+
+- the hosted V17 UI and lightweight endpoints were verified successfully
+- the full `/api/simulate-live` smoke from the shell timed out during the short smoke window, so that endpoint was not re-verified end-to-end in this journal pass
+
+### Honest V17 Read
+
+What is now genuinely true:
+
+- V17 is hosted locally as a separate product pass at `8017`
+- the requested glassmorphism + neomorphism UI style has been restored
+- the product now exposes in-UI explanations for the major numerical values
+- the Kimi packet logging and glossary path is implemented and visible in both the API and the website
+- `WLTC`, `MMM`, and relativistic cone logic are now integrated into the live context and visualization path
+
+What is not yet true:
+
+- the current NVIDIA NIM smoke packet returned `404`, so the remote Kimi route still needs provider-level confirmation
+- the V17 CABR ablations did not outperform the V14 temporal baseline
+- both deferred V16 and V17 proxy walk-forward outputs still under-trade versus the desired high-frequency target
+- the full live `/api/simulate-live` route was not re-verified within the smoke timeout window during this journal update
+
+Bottom line:
+
+- V17 is a real hosted product-and-observability pass
+- V17 is not a research win over V14 yet
+- the system is now easier to inspect, easier to operate, and much better instrumented for the next tuning cycle
+
+### V17 Summary Artifacts
+
+- `outputs/evaluation/v17_summary.json`
+- `outputs/evaluation/v17_summary.md`
+
+### V18 Recommendation
+
+The next cycle should keep the new V17 observability stack, but treat the model work more ruthlessly:
+
+- keep the V17 UI, packet logging, and relativistic cone instrumentation as the operator-facing base
+- verify the exact NVIDIA NIM model id and request contract needed for Kimi before treating that route as production-ready
+- do not promote `MMM` or `LeeCOC` into the main CABR checkpoint unless they beat the V14 temporal baseline in ablation
+- focus the next research pass on recovering `15m` participation without destroying the strong win-rate / cone-hit characteristics already present in the selective proxy outputs
