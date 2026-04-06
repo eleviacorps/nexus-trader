@@ -4076,3 +4076,249 @@ Final V14 deliverables were written to:
 - `outputs/evaluation/v14_summary.md`
 - `outputs/v14/research_paper_outline.md`
 - `outputs/v14/ldrg_status.json`
+
+## V15 Predictability Recovery Status
+
+### V15 Goal
+
+`V15` is the execution-recovery cycle focused on recovering participation without throwing away the temporal CABR gains from `V14`.
+
+Primary target:
+
+- recover participation toward `15-50` trades per month
+- keep win rate above `0.58`
+- keep profit factor above `2.5`
+
+New V15 systems planned and now at least partially implemented locally:
+
+- `PRP` (`Participation Recovery Probe` / participation audit)
+- `CPM` (`Conditional Predictability Mapper`)
+- `PCE` (`Predictability-Conditioned Execution`)
+- `CBWF` (`Calibration Bootstrap From Walk-Forward`)
+- `ECI` (`Economic Calendar Integration`)
+- `PSMP` (`Practical / minimum viable position sizing`)
+
+### What Was Implemented
+
+New V15 modules landed in:
+
+- `src/v15/participation_audit.py`
+- `src/v15/cpm.py`
+- `src/v15/pce.py`
+- `src/v15/cbwf.py`
+- `src/v15/eci.py`
+- `src/v15/policy_utils.py`
+
+Supporting scripts and assets landed in:
+
+- `scripts/run_participation_audit.py`
+- `scripts/build_cpm_labels.py`
+- `scripts/bootstrap_rsc_from_walkforward.py`
+- `scripts/build_eci_historical.py`
+- `scripts/run_v15_backtrader_month_internal.py`
+- `scripts/run_v15_backtrader_walk_forward_internal.py`
+- `data/economic_calendar/README.md`
+
+And V15 extended the existing execution stack in:
+
+- `src/v13/daps.py`
+- `src/v12/backtrader_strategy.py`
+- `scripts/run_v12_backtrader_month.py`
+- `scripts/run_v12_backtrader_walk_forward.py`
+- `config/project_config.py`
+
+Important sizing and leverage note:
+
+- lot sizing is now explicitly proportional to account equity, so growth from `$1000` to `$1100+` can increase allowed lot size
+- a `max_account_leverage` control was added and defaults to `1:200` in the V15 runner path
+- but the actual V15 research replay was still kept at broker leverage `1.0` because the V15 directive explicitly said not to use leverage in the Backtrader validation run
+
+### Phase 0 Participation Audit Result
+
+The V14 walk-forward participation audit is now explicit instead of inferred.
+
+Audit result from `outputs/v15/participation_audit_v14.json`:
+
+- total candidate bars inspected: `1600`
+- final trades: `61`
+- final trade rate: `0.038125`
+- zero-trade months: `5`
+  - `2021-10`
+  - `2022-02`
+  - `2022-09`
+  - `2023-07`
+  - `2023-08`
+
+Primary bottleneck:
+
+- gate: `lrtd_stability`
+- blocked count: `1355`
+- pass rate: `0.119558`
+
+Secondary bottleneck:
+
+- `uts_threshold`
+- blocked count: `184`
+
+Important interpretation:
+
+- the V14 participation collapse was mainly caused by `LRTD`, not by `SSC`, not by `MBEG`, and not by DAPS lot size
+- this validates the V15 theory direction: the previous gate stack was over-suppressing before trade quality even got a chance to act
+
+### CPM Build Result
+
+The full historical CPM label build now exists locally.
+
+From `outputs/v15/cpm_summary.json`:
+
+- labelled rows: `6024602`
+- mean predictability: `0.497008`
+- share above `0.60`: `0.466111`
+- share above `0.70`: `0.149604`
+- share above `0.80`: `0.091289`
+
+Important interpretation:
+
+- predictability is not uniformly absent, but truly high-predictability bars are materially sparser than medium-predictability bars
+- this supports the idea that the system should deploy conditionally, not continuously
+
+### CBWF Bootstrap Result
+
+The V15 calibration bootstrap now loads historical walk-forward trade logs from V13 and V14 and seeds regime-specific RSC state.
+
+Bootstrap result from `checkpoints/v15/rsc_bootstrapped.pkl`:
+
+- total trades bootstrapped: `631`
+- learned regimes:
+  - `panic_shock`
+  - `ranging`
+  - `trending_down`
+  - `trending_up`
+
+Per-regime calibration error after bootstrap:
+
+- `ranging`: `0.456990`
+- `panic_shock`: `0.355881`
+- `trending_down`: `0.124477`
+- `trending_up`: `0.442308`
+
+Max calibration error:
+
+- `0.456990`
+
+Important interpretation:
+
+- `CBWF` materially improves the amount of calibration evidence available
+- but it does not solve calibration on its own
+- `trending_down` is acceptable
+- `ranging`, `panic_shock`, and `trending_up` are still far above the `0.20` target
+
+### ECI Status
+
+The ECI scaffolding is implemented, but the repo does not yet contain a normalized historical event CSV covering the required macro releases.
+
+Current practical state:
+
+- `src/v15/eci.py` is implemented
+- `scripts/build_eci_historical.py` is implemented
+- `data/economic_calendar/README.md` documents the expected input format
+- current V15 replay therefore ran with neutral / empty ECI context rather than a populated event calendar
+
+### December 2023 V15 Pilot Month
+
+The first V15 month replay was run on `2023-12`.
+
+Initial V15 month result:
+
+- month: `2023-12`
+- starting capital: `$1000`
+- final capital: `$1000.00`
+- net profit: `$0.00`
+- return: `0.0%`
+- trades executed: `0`
+- win rate: `0.0`
+- max drawdown: `0.0%`
+- profit factor: `null`
+- Stage 1 vs Stage 2 gap: `0.000479`
+- PCE threshold: `0.666667`
+- skip reason breakdown:
+  - `pce_not_predictable`: `42`
+
+The V15 prompt explicitly required that if trades were too low, one threshold should be adjusted and the month rerun. That was done.
+
+Adjustment 1:
+
+- changed `pce_target_rate` from `0.20` to `0.45`
+- tuned PCE threshold moved from `0.666667` to `0.583333`
+- result: still `0` trades
+
+Adjustment 2:
+
+- changed `pce_target_rate` from `0.45` to `0.60`
+- tuned PCE threshold moved from `0.583333` to `0.500000`
+- result: still `0` trades
+
+Post-adjustment blocking reasons on the same month:
+
+- `low_agreement_0.000`: `19`
+- `low_agreement_0.333`: `8`
+- `regime_unstable_1bars`: `7`
+- `regime_unstable_2bars`: `3`
+- `regime_unstable_6bars`: `2`
+- `regime_unstable_7bars`: `2`
+- `atr_outside_range_13pct`: `1`
+
+Important interpretation:
+
+- after removing the very high CPM cutoff, the remaining blockers are mostly `agreement` and `regime stability`
+- this means the current V15 pilot is still over-abstaining, just in a more transparent and principled way than V14
+- the implementation is in place, but the policy is not yet tuned enough to recover participation
+
+### Current Honest V15 Read
+
+V15 is now structurally implemented, but not yet validated as a successful research pass.
+
+What is now true:
+
+- the V15 participation problem is much better diagnosed than before
+- the previous dominant blocker is now documented explicitly
+- CPM labels exist across the historical archive
+- PCE, CBWF, ECI scaffolding, and PSMP sizing are now wired into the local codebase
+- lot sizing now scales with equity and supports an optional `1:200` leverage ceiling for future execution modes
+- V15 utilities and focused tests run successfully locally
+
+What is still not solved:
+
+- the December 2023 V15 pilot still executed `0` trades
+- participation recovery has therefore not yet been achieved
+- full V15 walk-forward was not run yet because the month pilot is still failing at the participation stage
+- `CBWF` did not reduce max calibration error below `0.20`
+- `ECI` is implemented in code but still lacks populated historical event inputs
+
+Bottom line:
+
+- V15 is a completed implementation pass, not yet a completed research-success pass
+- the codebase is further along
+- the policy calibration is still not there
+
+### V16 Recommendation
+
+The next cycle should not add more model complexity first. It should finish the participation recovery loop already started in V15.
+
+Strongest next moves:
+
+- relax `PCE` agreement and regime-stability requirements carefully, because those are now the dominant blockers after threshold loosening
+- populate real historical `ECI` event data so predictable post-release windows can actually contribute
+- rerun the one-month pilot until the system gets back into the `15-50` trade band before attempting full walk-forward
+- only after month-level participation recovers should full V15-style walk-forward be run and summary artifacts be promoted
+
+### V15 Working Artifacts
+
+Current V15 working artifacts now present locally:
+
+- `outputs/v15/participation_audit_v14.json`
+- `outputs/v15/cpm_labels.parquet`
+- `outputs/v15/cpm_summary.json`
+- `outputs/v15/backtrader_month_2023_12_v15.json`
+- `checkpoints/v15/rsc_bootstrapped.pkl`
+- `checkpoints/v15/rsc_runtime.pkl`
