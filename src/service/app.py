@@ -26,7 +26,14 @@ from config.project_config import (
     TFT_CHECKPOINT_PATH,
 )
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
-from src.service.llm_sidecar import is_nvidia_nim_provider, read_packet_log, request_kimi_judge, request_market_context, sidecar_health
+from src.service.llm_sidecar import (
+    is_nvidia_nim_provider,
+    read_packet_log,
+    request_kimi_judge,
+    request_local_sjd_judge,
+    request_market_context,
+    sidecar_health,
+)
 from src.service.live_data import (
     build_fast_dashboard_payload,
     build_live_monitor,
@@ -42,6 +49,7 @@ from src.v16.csl import build_v16_simulation_result
 from src.v16.paper import PaperTradingEngine
 from src.v16.sqt import SimulationQualityTracker
 from src.v18.websocket_feed import LiveFeedManager
+from src.v19.runtime import build_v19_runtime_state
 
 try:
     import torch  # type: ignore
@@ -528,6 +536,34 @@ def fallback_kimi_judge(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def fallback_local_v19_judge(payload: dict[str, Any]) -> dict[str, Any]:
+    content = fallback_kimi_judge(payload)
+    final_call = str(content.get("final_call", "SKIP")).upper()
+    content["final_summary"] = (
+        f"{final_call} - local V19 fallback is mirroring the live desk values because the distilled student is unavailable."
+    )
+    content["market_only_summary"] = {
+        "call": final_call,
+        "summary": f"Local V19 fallback market-only read is {final_call}.",
+        "reasoning": "The distilled student is unavailable, so this mirror uses the live desk market values only.",
+    }
+    content["v18_summary"] = {
+        "call": final_call,
+        "summary": f"Local V19 fallback is borrowing the desk simulator stance {final_call}.",
+        "reasoning": "This is a temporary mirror of the local desk rather than the trained distilled student.",
+    }
+    content["combined_summary"] = {
+        "call": final_call,
+        "summary": f"Local V19 fallback combined read is {final_call}.",
+        "reasoning": "Use this only as a placeholder while the distilled student is unavailable.",
+    }
+    content["reasoning"] = "Local V19 fallback is active because the distilled SJD model could not be loaded."
+    content["key_risk"] = "This is not the trained local student output; it is only a local desk fallback."
+    content["crowd_note"] = "Crowd context is still present, but the trained V19 student did not score this bar."
+    content["regime_note"] = "The local V19 student is unavailable, so regime handling is mirrored from the desk."
+    return content
+
+
 def _kimi_call_label(content: Mapping[str, Any]) -> str:
     raw = str(content.get("final_call", content.get("stance", "HOLD"))).strip().upper()
     if raw in {"BUY", "SELL", "SKIP"}:
@@ -639,6 +675,45 @@ def _decorate_kimi_judge(payload: dict[str, Any], kimi_judge: Mapping[str, Any])
     decorated["projection_path"] = _build_kimi_projection(payload, normalized_content)
     decorated["separate_from_v18"] = True
     return decorated
+
+
+def _decorate_local_judge(payload: dict[str, Any], local_judge: Mapping[str, Any]) -> dict[str, Any]:
+    decorated = _decorate_kimi_judge(payload, local_judge)
+    decorated["judge_name"] = "local_v19"
+    decorated["independent"] = True
+    return decorated
+
+
+def _judge_comparison(
+    kimi_judge: Mapping[str, Any],
+    local_judge: Mapping[str, Any],
+    v19_runtime: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    kimi_content = dict(kimi_judge.get("content", {}) if isinstance(kimi_judge.get("content"), Mapping) else {})
+    local_content = dict(local_judge.get("content", {}) if isinstance(local_judge.get("content"), Mapping) else {})
+    kimi_call = _kimi_call_label(kimi_content)
+    local_call = _kimi_call_label(local_content)
+    agree = kimi_call == local_call
+    agreement_label = "aligned" if agree else "split"
+    if agree:
+        summary = f"Kimi and the local V19 student both read the current 15-minute bar as {kimi_call}."
+        reasoning = "Both judges are aligned, so this bar is a clean comparison case for manual testing."
+        preferred_source = "aligned"
+    else:
+        summary = f"Kimi is {kimi_call} while the local V19 student is {local_call}."
+        reasoning = "The judges disagree, so this is the exact kind of bar worth tracking to compare real-world accuracy."
+        preferred_source = "manual_compare"
+    return {
+        "agreement": bool(agree),
+        "agreement_label": agreement_label,
+        "kimi_call": kimi_call,
+        "local_call": local_call,
+        "summary": summary,
+        "reasoning": reasoning,
+        "preferred_source": preferred_source,
+        "v19_should_execute": bool((v19_runtime or {}).get("should_execute", False)),
+        "v19_execution_reason": str((v19_runtime or {}).get("execution_reason", "")),
+    }
 
 
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
@@ -852,6 +927,37 @@ def create_app() -> Any:
         payload["manual_trading_mode"] = True
         return payload
 
+    def _resolve_local_judge(payload: dict[str, Any]) -> dict[str, Any]:
+        local_context = build_kimi_context_payload(payload)
+        symbol_name = str(payload.get("symbol", "XAUUSD"))
+        local_judge = request_local_sjd_judge(symbol_name, local_context)
+        if not local_judge.get("available", False):
+            local_judge = {
+                "available": False,
+                "provider": "local_sjd",
+                "model": "v19_sjd_local",
+                "error": local_judge.get("error", "Local V19 student request failed."),
+                "content": fallback_local_v19_judge(payload),
+            }
+        return _decorate_local_judge(payload, local_judge)
+
+    def _attach_v19_runtime(payload: dict[str, Any], local_judge: Mapping[str, Any]) -> dict[str, Any]:
+        runtime = build_v19_runtime_state(payload, local_judge=local_judge)
+        payload["local_judge"] = dict(local_judge)
+        payload["v19_runtime"] = runtime
+        simulation = dict(payload.get("simulation", {}))
+        if runtime.get("available", False):
+            simulation["v19_cabr_score"] = runtime.get("cabr_score")
+            simulation["v19_confidence_tier"] = runtime.get("confidence_tier")
+            simulation["v19_sqt_label"] = runtime.get("sqt_label")
+            simulation["v19_should_execute"] = runtime.get("should_execute")
+            simulation["v19_execution_reason"] = runtime.get("execution_reason")
+            simulation["v19_selected_branch_label"] = runtime.get("selected_branch_label")
+            simulation["v19_selected_branch_id"] = runtime.get("selected_branch_id")
+        payload["simulation"] = simulation
+        payload["stack_mode"] = "v19_live_dual_judge"
+        return payload
+
     def _cached_or_fallback_kimi(payload: dict[str, Any], active_mode: str, llm_provider: str, llm_model: str | None) -> dict[str, Any]:
         cache_key = _kimi_cache_key(payload.get("symbol", "XAUUSD"), active_mode, llm_provider, llm_model)
         cached = kimi_cache.get(cache_key)
@@ -998,6 +1104,7 @@ def create_app() -> Any:
         payload['sqt'] = sqt_tracker.summary()
         payload['paper_trading'] = _paper_state(symbol)
         payload['realtime_chart'] = build_realtime_chart_payload(symbol)
+        payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
         kimi_context = build_kimi_context_payload(payload)
         if is_nvidia_nim_provider(llm_provider):
             kimi_judge = request_kimi_judge(symbol, kimi_context, provider=llm_provider, model=llm_model)
@@ -1018,6 +1125,7 @@ def create_app() -> Any:
                 "content": fallback_kimi_judge(payload),
             }
         payload['kimi_judge'] = _decorate_kimi_judge(payload, kimi_judge)
+        payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
         if paper_trade_accumulator is not None:
             try:
                 market = payload.get('market', {}) if isinstance(payload, dict) else {}
@@ -1057,7 +1165,9 @@ def create_app() -> Any:
         active_mode = (mode or default_mode).strip().lower() or "frequency"
         payload = _base_dashboard_payload(symbol, active_mode)
         payload["history_entry"] = record_simulation_history(payload, None)
+        payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
         payload["kimi_judge"] = _cached_or_fallback_kimi(payload, active_mode, llm_provider, llm_model)
+        payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
         return payload
 
     @app.get('/api/chart/realtime')
@@ -1078,12 +1188,39 @@ def create_app() -> Any:
     ):
         active_mode = (mode or default_mode).strip().lower() or "frequency"
         payload = _base_dashboard_payload(symbol, active_mode)
+        payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
         payload["kimi_judge"] = _resolve_kimi_judge(payload, active_mode, llm_provider, llm_model, force=bool(force))
+        payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
         return {
             "symbol": payload.get("symbol", symbol),
             "mode": active_mode,
             "kimi_judge": payload["kimi_judge"],
+            "local_judge": payload["local_judge"],
+            "judge_comparison": payload["judge_comparison"],
+            "v19_runtime": payload.get("v19_runtime", {}),
             "fallback_judge": fallback_kimi_judge(payload),
+        }
+
+    @app.get('/api/llm/judges-live')
+    def judges_live(
+        symbol: str = 'XAUUSD',
+        llm_provider: str = 'nvidia_nim',
+        llm_model: str | None = None,
+        mode: str | None = None,
+        force: bool = False,
+    ):
+        active_mode = (mode or default_mode).strip().lower() or "frequency"
+        payload = _base_dashboard_payload(symbol, active_mode)
+        payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
+        payload["kimi_judge"] = _resolve_kimi_judge(payload, active_mode, llm_provider, llm_model, force=bool(force))
+        payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
+        return {
+            "symbol": payload.get("symbol", symbol),
+            "mode": active_mode,
+            "kimi_judge": payload["kimi_judge"],
+            "local_judge": payload["local_judge"],
+            "judge_comparison": payload["judge_comparison"],
+            "v19_runtime": payload.get("v19_runtime", {}),
         }
 
     @app.get('/api/llm/context')

@@ -150,6 +150,42 @@ export interface DashboardPayload {
     points?: ForecastPoint[]
   }
   kimi_judge?: JudgeEnvelope
+  local_judge?: JudgeEnvelope
+  judge_comparison?: {
+    agreement?: boolean
+    agreement_label?: string
+    kimi_call?: TradeDirection | string
+    local_call?: TradeDirection | string
+    summary?: string
+    reasoning?: string
+    preferred_source?: string
+    v19_should_execute?: boolean
+    v19_execution_reason?: string
+  }
+  v19_runtime?: {
+    available?: boolean
+    selected_branch_id?: number
+    selected_branch_label?: string
+    decision_direction?: TradeDirection | string
+    cabr_score?: number
+    cabr_raw_score?: number
+    cpm_score?: number
+    confidence_tier?: string
+    sqt_label?: string
+    cone_width_pips?: number
+    lepl_action?: string
+    lepl_probabilities?: Record<string, number>
+    lepl_features?: Record<string, number | string | boolean>
+    should_execute?: boolean
+    execution_reason?: string
+    branch_scores?: Array<{
+      branch_id?: number
+      branch_label?: string
+      decision_direction?: TradeDirection | string
+      cabr_score?: number
+      cabr_raw_score?: number
+    }>
+  }
   feeds?: {
     news?: Array<{ title?: string; source?: string; sentiment?: number }>
     public_discussions?: Array<{ title?: string; source?: string; sentiment?: number }>

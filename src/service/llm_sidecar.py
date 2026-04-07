@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -18,6 +21,7 @@ from config.project_config import (
     NVIDIA_NIM_API_KEY,
     NVIDIA_NIM_BASE_URL,
     NVIDIA_NIM_ENABLED,
+    NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE,
     NVIDIA_NIM_MODEL,
     NVIDIA_NIM_TIMEOUT_SECONDS,
     V17_KIMI_PACKET_LOG_PATH,
@@ -43,6 +47,7 @@ class LlmSidecarConfig:
 
 
 NVIDIA_NIM_MODEL_FALLBACK_CHAIN = [
+    "moonshotai/kimi-k2-instruct",
     "moonshotai/kimi-k2-5",
     "nvidia/llama-3.3-nemotron-super-49b-v1",
     "meta/llama-3.1-70b-instruct",
@@ -105,6 +110,8 @@ NUMERIC_FIELD_MEANINGS: dict[str, str] = {
 
 _LOCAL_SJD_BUNDLE: Any | None = None
 _LOCAL_SJD_LOAD_ERROR: str | None = None
+_NIM_REQUEST_TIMESTAMPS: deque[float] = deque()
+_NIM_RATE_LIMIT_LOCK = RLock()
 
 
 def is_nvidia_nim_provider(provider: str | None) -> bool:
@@ -228,6 +235,43 @@ def _packet_bucket_utc(timestamp: datetime | None = None) -> str:
     return snapped.isoformat()
 
 
+def _nim_rate_limit_snapshot(*, now_monotonic: float | None = None) -> dict[str, Any]:
+    limit = max(int(NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE), 1)
+    now_value = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    with _NIM_RATE_LIMIT_LOCK:
+        while _NIM_REQUEST_TIMESTAMPS and (now_value - _NIM_REQUEST_TIMESTAMPS[0]) >= 60.0:
+            _NIM_REQUEST_TIMESTAMPS.popleft()
+        used = len(_NIM_REQUEST_TIMESTAMPS)
+        remaining = max(limit - used, 0)
+        wait_seconds = 0.0
+        if used >= limit and _NIM_REQUEST_TIMESTAMPS:
+            wait_seconds = max(0.0, 60.0 - (now_value - _NIM_REQUEST_TIMESTAMPS[0]))
+    return {
+        "limit_per_minute": limit,
+        "used_in_current_window": used,
+        "remaining_in_current_window": remaining,
+        "retry_after_seconds": round(float(wait_seconds), 3),
+    }
+
+
+def nim_rate_limit_snapshot() -> dict[str, Any]:
+    return _nim_rate_limit_snapshot()
+
+
+def _reserve_nim_request_slot() -> tuple[bool, dict[str, Any]]:
+    limit = max(int(NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE), 1)
+    now_value = float(time.monotonic())
+    with _NIM_RATE_LIMIT_LOCK:
+        while _NIM_REQUEST_TIMESTAMPS and (now_value - _NIM_REQUEST_TIMESTAMPS[0]) >= 60.0:
+            _NIM_REQUEST_TIMESTAMPS.popleft()
+        if len(_NIM_REQUEST_TIMESTAMPS) >= limit:
+            snapshot = _nim_rate_limit_snapshot(now_monotonic=now_value)
+            return False, snapshot
+        _NIM_REQUEST_TIMESTAMPS.append(now_value)
+        snapshot = _nim_rate_limit_snapshot(now_monotonic=now_value)
+    return True, snapshot
+
+
 def _append_packet_log(entry: Mapping[str, Any], path: Path = V17_KIMI_PACKET_LOG_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -312,6 +356,21 @@ def _predict_local_sjd(symbol: str, context: Mapping[str, Any]) -> dict[str, Any
         }
     except Exception:
         return None
+
+
+def request_local_sjd_judge(
+    symbol: str,
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    local_sjd = _predict_local_sjd(symbol, context)
+    if local_sjd is not None:
+        return local_sjd
+    return {
+        "available": False,
+        "provider": "local_sjd",
+        "model": "v19_sjd_local",
+        "error": _LOCAL_SJD_LOAD_ERROR or "local_sjd_unavailable",
+    }
 
 
 def _cached_row_similarity(context: Mapping[str, Any], row: Mapping[str, Any]) -> float:
@@ -502,9 +561,15 @@ def sidecar_health(
             )
             models = payload.get("data", []) if isinstance(payload, dict) else []
             model_ids = [item.get("id") for item in models if isinstance(item, dict)]
-        return {"ok": True, "enabled": True, "models": model_ids, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider}
+        payload = {"ok": True, "enabled": True, "models": model_ids, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider}
+        if resolved.provider == "nvidia_nim":
+            payload["rate_limit"] = nim_rate_limit_snapshot()
+        return payload
     except Exception as exc:  # pragma: no cover
-        return {"ok": False, "enabled": True, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider, "error": str(exc)}
+        payload = {"ok": False, "enabled": True, "base_url": resolved.base_url, "active_model": resolved.model, "provider": resolved.provider, "error": str(exc)}
+        if resolved.provider == "nvidia_nim":
+            payload["rate_limit"] = nim_rate_limit_snapshot()
+        return payload
 
 
 def _chat_json_request(
@@ -556,6 +621,16 @@ def _chat_json_request(
                 message = response.get("message", {}) if isinstance(response, dict) else {}
                 content = message.get("content", "")
             else:
+                rate_limit_snapshot = None
+                if resolved.provider == "nvidia_nim":
+                    allowed, rate_limit_snapshot = _reserve_nim_request_slot()
+                    if not allowed:
+                        raise RuntimeError(
+                            "local_nim_rate_limit_guard:"
+                            f" limit={rate_limit_snapshot['limit_per_minute']}/min"
+                            f" used={rate_limit_snapshot['used_in_current_window']}"
+                            f" retry_after={rate_limit_snapshot['retry_after_seconds']}s"
+                        )
                 payload = {
                     "model": chosen_model,
                     "messages": [
@@ -588,6 +663,7 @@ def _chat_json_request(
                 "base_url": resolved.base_url,
                 "provider": resolved.provider,
                 "content": parsed,
+                "rate_limit": nim_rate_limit_snapshot() if resolved.provider == "nvidia_nim" else None,
             }
         except Exception as exc:  # pragma: no cover
             errors.append(f"{chosen_model}: {exc}")
@@ -602,6 +678,7 @@ def _chat_json_request(
         "base_url": resolved.base_url,
         "provider": resolved.provider,
         "error": error_text,
+        "rate_limit": nim_rate_limit_snapshot() if resolved.provider == "nvidia_nim" else None,
     }
 
 
@@ -737,9 +814,6 @@ def request_kimi_judge(
     provider: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    local_sjd = _predict_local_sjd(symbol, context)
-    if local_sjd is not None:
-        return local_sjd
     nim_response = query_nvidia_nim(
         context=context,
         model=model,

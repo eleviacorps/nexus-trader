@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.service.llm_sidecar import _nim_model_chain, _openai_compat_url, parse_json_text, resolve_config
+from src.service.llm_sidecar import _nim_model_chain, _openai_compat_url, nim_rate_limit_snapshot, parse_json_text, resolve_config
 
 
 class LlmSidecarTests(unittest.TestCase):
@@ -31,6 +31,17 @@ class LlmSidecarTests(unittest.TestCase):
 
     def test_explicit_nim_model_disables_silent_fallback(self):
         self.assertEqual(_nim_model_chain("moonshotai/kimi-k2-instruct"), ["moonshotai/kimi-k2-instruct"])
+
+    def test_default_nim_chain_starts_with_kimi_instruct(self):
+        chain = _nim_model_chain(None)
+        self.assertGreaterEqual(len(chain), 1)
+        self.assertEqual(chain[0], "moonshotai/kimi-k2-instruct")
+
+    def test_rate_limit_snapshot_contains_budget_fields(self):
+        snapshot = nim_rate_limit_snapshot()
+        self.assertIn("limit_per_minute", snapshot)
+        self.assertIn("used_in_current_window", snapshot)
+        self.assertIn("remaining_in_current_window", snapshot)
 
 
 if __name__ == "__main__":

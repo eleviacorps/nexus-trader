@@ -5063,3 +5063,138 @@ Bottom line:
 - V19 is a strong infrastructure and research-enablement pass
 - V19 has real artifacts, real local routing improvements, real remote environment bootstrap, and real smoke checkpoints
 - V19 is not yet the finished research win that the prompt targets, because the distillation corpus is still tiny and CABR recovery has not cleared the required accuracy threshold
+
+---
+
+## V19 Native Month Runner + Dual-Judge Live Host Update
+
+This follow-up V19 pass was focused on three things:
+
+1. build a native month runner instead of leaning on the older V16 proxy path
+2. host a real V19 live desk without changing the current glass / neumorphic UI style
+3. keep Kimi and the local distilled judge independent so they can be compared side by side
+
+### Files Added / Updated
+
+Added:
+
+- `src/v19/runtime.py`
+- `scripts/run_v19_backtrader_month.py`
+- `tests/test_v19_runtime.py`
+- `outputs/v19/backtrader_month_2023_12_frequency_native.json`
+
+Updated:
+
+- `config/project_config.py`
+- `src/service/llm_sidecar.py`
+- `src/service/app.py`
+- `ui/frontend/src/types.ts`
+- `ui/frontend/src/App.tsx`
+- `tests/test_llm_sidecar.py`
+
+### Native V19 Month Result
+
+The new native month runner now uses:
+
+- `outputs/v19/branch_archive_100k.parquet`
+- `checkpoints/v19/cabr_v19.pt`
+- `checkpoints/v19/lepl.pkl`
+- `checkpoints/v19/sjd_best.npz`
+
+It no longer depends on the older V16 month proxy script. The current verified run was:
+
+- command:
+  - `C:\Users\rfsga\miniconda3\python.exe scripts\run_v19_backtrader_month.py --month 2023-12 --mode frequency`
+- artifact:
+  - `outputs/v19/backtrader_month_2023_12_frequency_native.json`
+
+Verified December 2023 native V19 Frequency result:
+
+- candidate rows: `510`
+- top-branch rows: `143`
+- trades executed: `21`
+- final capital: `$1005.52` from `$1000.00`
+- net profit: `$5.515845`
+- return: `0.551584%`
+- win rate: `0.476190`
+- profit factor: `1.082804`
+- max drawdown: `2.918482%`
+- net pips: `11.031690`
+- lots stayed at the low-risk floor:
+  - min / max / avg lot: `0.05 / 0.05 / 0.05`
+
+Important nuance:
+
+- the local distilled SJD still abstained on the sampled December bars (`SKIP`), so the native month runner now uses the V19 branch / CABR / LEPL runtime for trade execution while keeping the local SJD as an independent comparison judge
+- this is more faithful to the user request because Kimi and the local student are now comparison layers, not hidden fallbacks for one another
+
+### Live V19 Hosting
+
+V19 is now hosted locally at:
+
+- `http://127.0.0.1:8019/ui`
+
+The live host was started with:
+
+- NVIDIA NIM model: `moonshotai/kimi-k2-instruct`
+- NVIDIA NIM local guardrail: `40` requests / minute
+- independent local judge: `local_sjd`
+- independent remote judge: `nvidia_nim`
+
+Live endpoints verified:
+
+- `GET /health`
+- `GET /api/dashboard/live`
+- `GET /api/llm/kimi-live`
+- `GET /api/llm/judges-live`
+- `GET /api/paper/state`
+- `GET /ui`
+
+Verified live dual-judge state:
+
+- Kimi provider: `nvidia_nim`
+- Kimi model: `moonshotai/kimi-k2-instruct`
+- local provider: `local_sjd`
+- V19 runtime action: `ENTER`
+- V19 runtime call: `BUY`
+- judge comparison label: `aligned`
+
+Paper-trade host smoke was completed end to end:
+
+- paper desk reset back to `$1000`
+- one `XAUUSD` paper trade opened at `0.05` lot
+- the same trade was closed successfully
+- resulting balance returned to `$1000`
+
+### UI Preservation
+
+The visual language was intentionally preserved.
+
+- the existing dark glassmorphism / neumorphism terminal theme was kept
+- no theme rewrite was done
+- the only UI change was functional: the existing glass cards now expose
+  - Kimi
+  - Local V19 Student
+  - Judge Comparison
+  - V19 Runtime
+- the execution console now has both:
+  - `Apply Kimi Setup`
+  - `Apply Local V19`
+
+This preserves the same style while making the V19 comparison workflow usable.
+
+### Honest Status After This Update
+
+What is now true:
+
+- V19 has a real native month runner instead of only a proxy month artifact
+- V19 live hosting is real on `8019`
+- the desk now carries both independent judges at the same time
+- NVIDIA NIM is capped locally at `40` requests per minute
+- Kimi is no longer replaced by the local student; both can be observed independently
+
+What is still not true:
+
+- the local distilled SJD is still too abstention-heavy to be trusted as the sole execution gate
+- the month result is now non-zero and usable, but it is still a small edge rather than a deployment-grade result
+- V19 still has not cleared the larger CABR research target from the original V19 prompt
