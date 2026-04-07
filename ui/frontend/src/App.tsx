@@ -1,8 +1,8 @@
 import {
   startTransition,
+  useCallback,
   useDeferredValue,
   useEffect,
-  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -284,7 +284,7 @@ function App() {
     return () => window.clearInterval(timer)
   }, [])
 
-  const refreshDesk = useEffectEvent(async (forceKimi = false) => {
+  const refreshDesk = useCallback(async (forceKimi = false) => {
     const startedAt = performance.now()
     setLoading(true)
     try {
@@ -334,7 +334,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  })
+  }, [mode, model, provider, symbol])
 
   useEffect(() => {
     if (initialLoadRef.current) return
@@ -349,7 +349,7 @@ function App() {
     return () => window.clearInterval(interval)
   }, [tradeFrequency, refreshDesk])
 
-  const handleSocketMessage = useEffectEvent((payload: {
+  const handleSocketMessage = useCallback((payload: {
     price?: number
     bar_countdown?: number
     positions?: PaperPosition[]
@@ -362,7 +362,7 @@ function App() {
         positions: payload.positions ?? current.positions,
       }))
     })
-  })
+  }, [])
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
