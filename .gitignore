@@ -9,3 +9,7 @@ __pycache__/
 .mypy_cache/
 SimilarExistingSolutions/
 cloud/
+.tmp/
+ui/frontend/node_modules/
+ui/frontend/dist/
+ui/frontend/*.tsbuildinfo

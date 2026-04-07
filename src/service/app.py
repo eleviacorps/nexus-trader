@@ -4,6 +4,8 @@ import asyncio
 import copy
 import json
 import os
+import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +52,7 @@ try:
     from fastapi import FastAPI, HTTPException  # type: ignore
     from fastapi import WebSocket, WebSocketDisconnect  # type: ignore
     from fastapi.responses import HTMLResponse  # type: ignore
+    from fastapi.staticfiles import StaticFiles  # type: ignore
     from pydantic import BaseModel, Field  # type: ignore
 except ImportError:  # pragma: no cover
     FastAPI = None
@@ -58,6 +61,7 @@ except ImportError:  # pragma: no cover
     WebSocketDisconnect = RuntimeError  # type: ignore
     BaseModel = object  # type: ignore
     HTMLResponse = str  # type: ignore
+    StaticFiles = Any  # type: ignore
 
     def Field(default: Any, **_: Any):  # type: ignore
         return default
@@ -106,6 +110,61 @@ class PaperModifyRequest(BaseModel):  # type: ignore[misc]
     trade_id: str
     stop_loss: float | None = None
     take_profit: float | None = None
+
+
+FRONTEND_DIST_PATH = Path(__file__).resolve().parents[2] / "ui" / "frontend" / "dist"
+
+
+def read_system_telemetry() -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "gpu_available": False,
+        "gpu_name": "GPU unavailable",
+        "gpu_utilization_pct": None,
+        "gpu_memory_used_mb": None,
+        "gpu_memory_total_mb": None,
+        "gpu_temperature_c": None,
+        "broker_connection": "Local paper broker ready",
+        "local_runtime": str(get_torch_device()),
+    }
+    query = shutil.which("nvidia-smi")
+    if query:
+        try:
+            result = subprocess.run(
+                [
+                    query,
+                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+                check=False,
+            )
+            line = next((item.strip() for item in result.stdout.splitlines() if item.strip()), "")
+            if line:
+                name, util, mem_used, mem_total, temperature = [part.strip() for part in line.split(",")[:5]]
+                payload.update(
+                    {
+                        "gpu_available": True,
+                        "gpu_name": name or payload["gpu_name"],
+                        "gpu_utilization_pct": float(util),
+                        "gpu_memory_used_mb": float(mem_used),
+                        "gpu_memory_total_mb": float(mem_total),
+                        "gpu_temperature_c": float(temperature),
+                    }
+                )
+                return payload
+        except Exception:
+            pass
+    if torch is not None:
+        try:
+            if bool(torch.cuda.is_available()):
+                payload["gpu_available"] = True
+                payload["gpu_name"] = str(torch.cuda.get_device_name(0))
+        except Exception:
+            pass
+    return payload
 
 
 def llm_numeric_prior(payload: dict[str, Any]) -> float:
@@ -722,6 +781,10 @@ def create_app() -> Any:
 
     server = ModelServer()
     app = FastAPI(title='Nexus Trader Inference API', version='0.2.0')
+    frontend_served = False
+    if FRONTEND_DIST_PATH.exists():
+        app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIST_PATH), html=True), name="nexus_ui")
+        frontend_served = True
     default_mode = os.getenv("NEXUS_V16_MODE", "frequency").strip().lower() or "frequency"
     s3pta_enabled = os.getenv("NEXUS_S3PTA_ENABLED", "0") == "1"
     paper_trade_accumulator = PaperTradeAccumulator() if s3pta_enabled else None
@@ -872,6 +935,10 @@ def create_app() -> Any:
     @app.get('/health')
     def health():
         return {'status': 'ok', 'sequence_len': server.sequence_len, 'feature_dim': server.feature_dim}
+
+    @app.get('/api/system/telemetry')
+    def system_telemetry():
+        return read_system_telemetry()
 
     @app.get('/metadata')
     def metadata():
@@ -1126,8 +1193,13 @@ def create_app() -> Any:
             task.cancel()
             app.state.v18_feed_task = None
 
-    @app.get('/ui', response_class=HTMLResponse)
-    def ui():
+    if not frontend_served:
+        @app.get('/ui', response_class=HTMLResponse)
+        def ui():
+            return render_web_app_html()
+
+    @app.get('/ui-legacy', response_class=HTMLResponse)
+    def ui_legacy():
         return render_web_app_html()
 
     @app.post('/predict', response_model=PredictResponse)

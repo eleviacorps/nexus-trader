@@ -1240,12 +1240,22 @@ def _candles_to_records(price_frame: pd.DataFrame, limit: int = 240) -> list[dic
 
 
 def build_realtime_chart_payload(symbol: str, bars: int = 240) -> dict[str, Any]:
-    frame = fetch_recent_market_candles(symbol, interval="1m", range_="1d", ttl_seconds=5)
+    try:
+        frame = fetch_recent_market_candles(symbol, interval="1m", range_="1d", ttl_seconds=5)
+    except Exception:
+        frame = pd.DataFrame()
+    interval = "1m"
     if frame.empty:
-        return {"symbol": str(symbol).upper(), "interval": "1m", "candles": []}
+        try:
+            frame = fetch_recent_market_candles(symbol, interval="5m", range_="5d", ttl_seconds=15)
+            interval = "5m"
+        except Exception:
+            frame = pd.DataFrame()
+    if frame.empty:
+        return {"symbol": str(symbol).upper(), "interval": interval, "candles": []}
     return {
         "symbol": str(symbol).upper(),
-        "interval": "1m",
+        "interval": interval,
         "source": str(frame.attrs.get("market_source", "unknown")),
         "candles": _candles_to_records(frame, limit=bars),
     }
