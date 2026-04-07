@@ -162,6 +162,7 @@ class PaperTradingEngine:
         take_profit_pips: float = 30.0,
         stop_loss: float | None = None,
         take_profit: float | None = None,
+        manual_lot: float | None = None,
         note: str = "",
     ) -> dict[str, Any]:
         payload = self._read_state()
@@ -184,7 +185,10 @@ class PaperTradingEngine:
             price_per_ounce=float(entry_price),
             contract_size_oz=spec["contract_size"],
         )
-        lot = float(min(raw_lot, leverage_cap)) if leverage_cap is not None else float(raw_lot)
+        requested_lot = _safe_float(manual_lot, 0.0)
+        lot_source = "manual" if requested_lot > 0.0 else "auto"
+        base_lot = requested_lot if requested_lot > 0.0 else float(raw_lot)
+        lot = float(min(base_lot, leverage_cap)) if leverage_cap is not None else float(base_lot)
         if lot <= 0.0:
             raise ValueError("Leverage cap and risk sizing produced a zero lot.")
         direction_upper = str(direction).upper()
@@ -207,6 +211,10 @@ class PaperTradingEngine:
             "entry_price": round(float(entry_price), 5),
             "entry_time": _utc_now(),
             "lot": round(lot, 2),
+            "lot_source": lot_source,
+            "requested_lot": None if requested_lot <= 0.0 else round(requested_lot, 2),
+            "auto_lot": round(float(raw_lot), 2),
+            "leverage_cap_lot": None if leverage_cap is None else round(float(leverage_cap), 2),
             "leverage": float(leverage),
             "stop_pips": float(stop_pips),
             "take_profit_pips": float(take_profit_pips),

@@ -44,15 +44,37 @@ RULES:
 6. Stop loss should be beyond a structural level (support/resistance or order block).
 7. Take profit should target the next structural level.
 8. The default hold time is the current 15-minute bar.
+9. Provide THREE written summary blocks:
+   - market_only_summary: ignore V18 simulator metrics and judge using live market/news/crowd only
+   - v18_summary: ignore the live-news narrative and judge using the V18 simulator values only
+   - combined_summary: combine both views into the final desk call
+10. final_call must be BUY, SELL, or SKIP. If stance is HOLD then final_call must be SKIP.
 
 OUTPUT FORMAT - respond with ONLY this JSON, no other text:
 {
   "stance": "BUY",
   "confidence": "MODERATE",
+  "final_call": "BUY",
+  "final_summary": "BUY - live market and V18 both support the long idea for this bar.",
   "entry_zone": [4668.50, 4672.00],
   "stop_loss": 4655.00,
   "take_profit": 4691.00,
   "hold_time": "current_bar",
+  "market_only_summary": {
+    "call": "BUY",
+    "summary": "Live market/news only lean bullish.",
+    "reasoning": "Price is holding above equilibrium, headline tone is supportive, and nearby resistance is still open."
+  },
+  "v18_summary": {
+    "call": "BUY",
+    "summary": "V18-only read is bullish.",
+    "reasoning": "CABR, CPM, Hurst asymmetry, and the V18 path structure all lean long."
+  },
+  "combined_summary": {
+    "call": "BUY",
+    "summary": "Combined desk call is BUY for the current 15-minute bar.",
+    "reasoning": "The live market/news read and the V18 simulator align well enough to act."
+  },
   "reasoning": "Institutional order block at 4668-4672 aligns with positive Hurst asymmetry. CABR 62% in discount zone supports bounce.",
   "key_risk": "Break and close below 4655 invalidates. COLD SQT overrides all signals.",
   "crowd_note": "Retail testosterone low. Institutional leading. Favorable for precision entries.",
@@ -96,7 +118,9 @@ def build_kimi_user_message(context: Mapping[str, Any], symbol: str) -> str:
     sqt = dict(context.get("sqt", {}) if isinstance(context, Mapping) else {})
     market = dict(context.get("market", {}) if isinstance(context, Mapping) else {})
     mfg = dict(context.get("mfg", {}) if isinstance(context, Mapping) else {})
+    v18_paths = dict(context.get("v18_paths", {}) if isinstance(context, Mapping) else {})
     news = list(context.get("news_feed", []) if isinstance(context, Mapping) else [])
+    crowd_items = list(context.get("public_discussions", []) if isinstance(context, Mapping) else [])
     top_news = []
     for item in news[:3]:
         if not isinstance(item, Mapping):
@@ -109,9 +133,25 @@ def build_kimi_user_message(context: Mapping[str, Any], symbol: str) -> str:
             f"- {title} ({_clean_text(item.get('source', 'unknown'))}, sentiment {_signed_pct(item.get('sentiment', 0.0))})"
         )
     headlines = "\n".join(top_news) if top_news else "No significant headlines."
+    top_crowd = []
+    for item in crowd_items[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        title = _clean_text(item.get("title"))
+        if not title:
+            continue
+        top_crowd.append(
+            f"- {title} ({_clean_text(item.get('source', 'unknown'))}, sentiment {_signed_pct(item.get('sentiment', 0.0))})"
+        )
+    crowd_lines = "\n".join(top_crowd) if top_crowd else "No meaningful public-discussion items."
     entry_zone = sim.get("entry_zone") if isinstance(sim.get("entry_zone"), list) else []
 
     return f"""XAUUSD 15-minute simulation update for {symbol}.
+
+You must produce:
+1. a market_only_summary using ONLY live market/news/crowd and ignoring V18 simulator metrics
+2. a v18_summary using ONLY the V18 simulator metrics and ignoring the live-news narrative
+3. a combined_summary that merges both views into the final desk call
 
 SIMULATION SUMMARY:
 - Direction: {_clean_text(sim.get('scenario_bias', sim.get('direction', 'unknown'))).upper()}
@@ -150,6 +190,12 @@ BOT SWARM:
 - Bullish probability: {float(bots.get('bullish_probability', 0.5) or 0.5):.1%}
 - Disagreement: {float(bots.get('disagreement', 0.0) or 0.0):.3f}
 
+V18 PATH SNAPSHOT:
+- Consensus path: {json.dumps(v18_paths.get('consensus_path', []), ensure_ascii=True)}
+- Minority path: {json.dumps(v18_paths.get('minority_path', []), ensure_ascii=True)}
+- Outer upper path: {json.dumps(v18_paths.get('outer_upper', []), ensure_ascii=True)}
+- Outer lower path: {json.dumps(v18_paths.get('outer_lower', []), ensure_ascii=True)}
+
 CURRENT LEVELS:
 - Current price: {_price(market.get('current_price'))}
 - Suggested lot: {float(sim.get('suggested_lot', 0.0) or 0.0):.2f}
@@ -157,5 +203,8 @@ CURRENT LEVELS:
 
 KEY NEWS:
 {headlines}
+
+PUBLIC DISCUSSION:
+{crowd_lines}
 
 Provide your trade decision in the exact JSON format specified."""

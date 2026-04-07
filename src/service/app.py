@@ -5,8 +5,9 @@ import copy
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from config.project_config import (
     FEATURE_DIM_TOTAL,
@@ -88,6 +89,7 @@ class PaperOpenRequest(BaseModel):  # type: ignore[misc]
     take_profit_pips: float = 30.0
     stop_loss: float | None = None
     take_profit: float | None = None
+    manual_lot: float | None = None
     note: str = ""
 
 
@@ -371,6 +373,12 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
     reduced_bot_swarm = {
         "aggregate": dict((bot_swarm.get("aggregate") or {}) if isinstance(bot_swarm, dict) else {}),
     }
+    v18_paths = {
+        "consensus_path": list(simulation.get("consensus_path", []))[:4],
+        "minority_path": list(simulation.get("minority_path", []))[:4],
+        "outer_upper": list(simulation.get("cone_outer_upper", []))[:4],
+        "outer_lower": list(simulation.get("cone_outer_lower", []))[:4],
+    }
     return {
         "symbol": payload.get("symbol", "XAUUSD"),
         "market": market_context,
@@ -399,6 +407,7 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "public_discussions": list((feeds.get("public_discussions") or []))[:8],
         "sqt": sqt,
         "mfg": payload.get("mfg", {}),
+        "v18_paths": v18_paths,
     }
 
 
@@ -435,12 +444,142 @@ def fallback_kimi_judge(payload: dict[str, Any]) -> dict[str, Any]:
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "hold_time": "current_bar" if direction in {"BUY", "SELL"} else "skip",
+        "final_call": "BUY" if direction == "BUY" else "SELL" if direction == "SELL" else "SKIP",
+        "final_summary": f"{'BUY' if direction == 'BUY' else 'SELL' if direction == 'SELL' else 'SKIP'} - fallback judge is using the live V18 desk values because the remote Kimi packet is unavailable.",
+        "market_only_summary": {
+            "call": "BUY" if direction == "BUY" else "SELL" if direction == "SELL" else "SKIP",
+            "summary": f"Live market-only read is {'bullish' if direction == 'BUY' else 'bearish' if direction == 'SELL' else 'mixed'}, using current price and structure.",
+            "reasoning": f"Current price is {current_price:.2f}, structure is {technical_analysis.get('structure', 'unknown')}, and support/resistance are framing the bar.",
+        },
+        "v18_summary": {
+            "call": "BUY" if direction == "BUY" else "SELL" if direction == "SELL" else "SKIP",
+            "summary": f"V18-only read follows the simulator direction {direction}.",
+            "reasoning": f"CABR is {_safe_float(simulation.get('cabr_score'), 0.0):.1%}, confidence tier is {simulation.get('confidence_tier', 'LOW')}, and SQT is {sqt_label}.",
+        },
+        "combined_summary": {
+            "call": "BUY" if direction == "BUY" else "SELL" if direction == "SELL" else "SKIP",
+            "summary": f"Combined read is {'actionable' if direction in {'BUY', 'SELL'} else 'a skip for now'} for the current 15-minute bar.",
+            "reasoning": f"Fallback combines price structure, V18 direction {direction}, and risk gates such as SQT {sqt_label}.",
+        },
         "reasoning": f"Fallback judge derived from the simulator direction {direction}, CABR {_safe_float(simulation.get('cabr_score'), 0.0):.1%}, and current structure.",
         "key_risk": "This is a local fallback because the remote Kimi response is unavailable.",
         "crowd_note": "Crowd state is being proxied locally from WLTC and bot swarm data.",
         "regime_note": f"Structure is {technical_analysis.get('structure', 'unknown')} in {technical_analysis.get('location', 'unknown')} location.",
         "invalidation": stop_loss,
     }
+
+
+def _kimi_call_label(content: Mapping[str, Any]) -> str:
+    raw = str(content.get("final_call", content.get("stance", "HOLD"))).strip().upper()
+    if raw in {"BUY", "SELL", "SKIP"}:
+        return raw
+    if raw == "HOLD":
+        return "SKIP"
+    return "SKIP"
+
+
+def _normalize_kimi_summary_block(block: Any, *, fallback_call: str, fallback_summary: str, fallback_reasoning: str) -> dict[str, str]:
+    if isinstance(block, dict):
+        call = str(block.get("call", fallback_call)).strip().upper() or fallback_call
+        if call == "HOLD":
+            call = "SKIP"
+        summary = str(block.get("summary", fallback_summary)).strip() or fallback_summary
+        reasoning = str(block.get("reasoning", fallback_reasoning)).strip() or fallback_reasoning
+        return {"call": call, "summary": summary, "reasoning": reasoning}
+    return {"call": fallback_call, "summary": fallback_summary, "reasoning": fallback_reasoning}
+
+
+def _normalize_kimi_content(payload: dict[str, Any], raw_content: Mapping[str, Any]) -> dict[str, Any]:
+    content = dict(raw_content)
+    stance = str(content.get("stance", "HOLD")).strip().upper() or "HOLD"
+    if stance not in {"BUY", "SELL", "HOLD"}:
+        stance = "HOLD"
+    call = _kimi_call_label({"final_call": content.get("final_call"), "stance": stance})
+    reasoning = str(content.get("reasoning", "No Kimi reasoning available.")).strip() or "No Kimi reasoning available."
+    key_risk = str(content.get("key_risk", "No Kimi risk note available.")).strip() or "No Kimi risk note available."
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    simulation = payload.get("simulation", {}) if isinstance(payload, dict) else {}
+    technical_analysis = payload.get("technical_analysis", {}) if isinstance(payload, dict) else {}
+    current_price = _safe_float(market.get("current_price"), 0.0)
+    v18_summary = _normalize_kimi_summary_block(
+        content.get("v18_summary"),
+        fallback_call=call,
+        fallback_summary=f"V18-only read is {call}.",
+        fallback_reasoning=f"Direction {simulation.get('direction', 'HOLD')} with CABR {_safe_float(simulation.get('cabr_score'), 0.0):.1%} and Hurst {_safe_float(simulation.get('hurst_asymmetry'), 0.0):.3f}.",
+    )
+    market_summary = _normalize_kimi_summary_block(
+        content.get("market_only_summary"),
+        fallback_call=call,
+        fallback_summary=f"Market-only read is {call}.",
+        fallback_reasoning=f"Live price is {current_price:.2f}, structure is {technical_analysis.get('structure', 'unknown')}, and key risk is {key_risk}",
+    )
+    combined_summary = _normalize_kimi_summary_block(
+        content.get("combined_summary"),
+        fallback_call=call,
+        fallback_summary=f"Combined read is {call}.",
+        fallback_reasoning=reasoning,
+    )
+    content["stance"] = stance
+    content["confidence"] = str(content.get("confidence", "VERY_LOW")).strip().upper() or "VERY_LOW"
+    content["final_call"] = call
+    content["final_summary"] = str(content.get("final_summary", f"{call} - {combined_summary['summary']}")).strip() or f"{call} - {combined_summary['summary']}"
+    content["market_only_summary"] = market_summary
+    content["v18_summary"] = v18_summary
+    content["combined_summary"] = combined_summary
+    content["reasoning"] = reasoning
+    content["key_risk"] = key_risk
+    content["crowd_note"] = str(content.get("crowd_note", "No crowd note available.")).strip() or "No crowd note available."
+    content["regime_note"] = str(content.get("regime_note", "No regime note available.")).strip() or "No regime note available."
+    return content
+
+
+def _build_kimi_projection(payload: dict[str, Any], content: Mapping[str, Any]) -> dict[str, Any]:
+    market = payload.get("market", {}) if isinstance(payload, dict) else {}
+    current_price = _safe_float(market.get("current_price"), 0.0)
+    stance = str(content.get("stance", "HOLD")).upper()
+    entry_zone = content.get("entry_zone", [])
+    stop_loss = content.get("stop_loss")
+    take_profit = content.get("take_profit")
+    if stance not in {"BUY", "SELL"}:
+        return {"label": "Kimi path unavailable for HOLD/SKIP.", "points": []}
+    if not isinstance(entry_zone, list) or len(entry_zone) != 2:
+        return {"label": "Kimi path unavailable because entry zone is incomplete.", "points": []}
+    entry_mid = (_safe_float(entry_zone[0], current_price) + _safe_float(entry_zone[1], current_price)) / 2.0
+    target = _safe_float(take_profit, current_price)
+    stop = _safe_float(stop_loss, current_price)
+    midpoint = current_price + ((target - current_price) * 0.55)
+    candles = list(market.get("candles", []) if isinstance(market, dict) else [])
+    base_timestamp = str(candles[-1].get("timestamp")) if candles else ""
+    if base_timestamp:
+        try:
+            base_dt = datetime.fromisoformat(base_timestamp.replace("Z", "+00:00"))
+        except Exception:
+            base_dt = datetime.now(timezone.utc)
+    else:
+        base_dt = datetime.now(timezone.utc)
+    points = [
+        {"minutes": 0, "timestamp": base_dt.isoformat(), "price": round(current_price, 5)},
+        {"minutes": 5, "timestamp": (base_dt + timedelta(minutes=5)).isoformat(), "price": round(entry_mid, 5)},
+        {"minutes": 10, "timestamp": (base_dt + timedelta(minutes=10)).isoformat(), "price": round(midpoint, 5)},
+        {"minutes": 15, "timestamp": (base_dt + timedelta(minutes=15)).isoformat(), "price": round(target, 5)},
+    ]
+    return {
+        "label": f"Kimi {stance} path",
+        "entry_mid": round(entry_mid, 5),
+        "target": round(target, 5),
+        "stop_loss": round(stop, 5),
+        "points": points,
+    }
+
+
+def _decorate_kimi_judge(payload: dict[str, Any], kimi_judge: Mapping[str, Any]) -> dict[str, Any]:
+    decorated = dict(kimi_judge)
+    raw_content = decorated.get("content", {}) if isinstance(decorated.get("content"), Mapping) else {}
+    normalized_content = _normalize_kimi_content(payload, raw_content)
+    decorated["content"] = normalized_content
+    decorated["projection_path"] = _build_kimi_projection(payload, normalized_content)
+    decorated["separate_from_v18"] = True
+    return decorated
 
 
 def validate_sequence_shape(sequence: list[list[float]], sequence_len: int, feature_dim: int) -> None:
@@ -655,13 +794,14 @@ def create_app() -> Any:
         cached = kimi_cache.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
-        return {
+        fallback = {
             "available": False,
             "provider": llm_provider,
             "model": llm_model or "",
             "reason": "awaiting_15m_kimi_refresh",
             "content": fallback_kimi_judge(payload),
         }
+        return _decorate_kimi_judge(payload, fallback)
 
     def _resolve_kimi_judge(payload: dict[str, Any], active_mode: str, llm_provider: str, llm_model: str | None, *, force: bool = False) -> dict[str, Any]:
         cache_key = _kimi_cache_key(payload.get("symbol", "XAUUSD"), active_mode, llm_provider, llm_model)
@@ -687,8 +827,9 @@ def create_app() -> Any:
                 "reason": "provider_not_nim",
                 "content": fallback_kimi_judge(payload),
             }
-        kimi_cache[cache_key] = copy.deepcopy(kimi_judge)
-        return kimi_judge
+        decorated = _decorate_kimi_judge(payload, kimi_judge)
+        kimi_cache[cache_key] = copy.deepcopy(decorated)
+        return decorated
 
     def _refresh_sqt(symbol: str) -> dict[str, Any]:
         monitor = build_live_monitor(symbol)
@@ -809,7 +950,7 @@ def create_app() -> Any:
                 "reason": "provider_not_nim",
                 "content": fallback_kimi_judge(payload),
             }
-        payload['kimi_judge'] = kimi_judge
+        payload['kimi_judge'] = _decorate_kimi_judge(payload, kimi_judge)
         if paper_trade_accumulator is not None:
             try:
                 market = payload.get('market', {}) if isinstance(payload, dict) else {}
@@ -919,6 +1060,7 @@ def create_app() -> Any:
                 take_profit_pips=request.take_profit_pips,
                 stop_loss=request.stop_loss,
                 take_profit=request.take_profit,
+                manual_lot=request.manual_lot,
                 note=request.note,
             )
         except Exception as exc:

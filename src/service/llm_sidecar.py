@@ -273,15 +273,69 @@ def parse_json_text(raw_text: str) -> dict[str, Any]:
     return payload
 
 
+def _normalize_kimi_summary(block: Any, fallback_call: str, fallback_summary: str, fallback_reasoning: str) -> dict[str, str]:
+    if isinstance(block, Mapping):
+        call = str(block.get("call", fallback_call)).strip().upper() or fallback_call
+        if call == "HOLD":
+            call = "SKIP"
+        return {
+            "call": call,
+            "summary": str(block.get("summary", fallback_summary)).strip() or fallback_summary,
+            "reasoning": str(block.get("reasoning", fallback_reasoning)).strip() or fallback_reasoning,
+        }
+    return {"call": fallback_call, "summary": fallback_summary, "reasoning": fallback_reasoning}
+
+
+def _normalize_kimi_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    output = dict(payload)
+    stance = str(output.get("stance", "HOLD")).strip().upper() or "HOLD"
+    if stance not in {"BUY", "SELL", "HOLD"}:
+        stance = "HOLD"
+    final_call = str(output.get("final_call", stance)).strip().upper() or stance
+    if final_call == "HOLD":
+        final_call = "SKIP"
+    if final_call not in {"BUY", "SELL", "SKIP"}:
+        final_call = "SKIP"
+    reasoning = str(output.get("reasoning", "No Kimi reasoning supplied.")).strip() or "No Kimi reasoning supplied."
+    output["stance"] = stance
+    output["confidence"] = str(output.get("confidence", "VERY_LOW")).strip().upper() or "VERY_LOW"
+    output["final_call"] = final_call
+    output["final_summary"] = str(output.get("final_summary", f"{final_call} - {reasoning}")).strip() or f"{final_call} - {reasoning}"
+    output["market_only_summary"] = _normalize_kimi_summary(
+        output.get("market_only_summary"),
+        final_call,
+        f"Market-only read is {final_call}.",
+        "This block was not returned explicitly by the model, so the main reasoning is being reused.",
+    )
+    output["v18_summary"] = _normalize_kimi_summary(
+        output.get("v18_summary"),
+        final_call,
+        f"V18-only read is {final_call}.",
+        "This block was not returned explicitly by the model, so the main reasoning is being reused.",
+    )
+    output["combined_summary"] = _normalize_kimi_summary(
+        output.get("combined_summary"),
+        final_call,
+        f"Combined read is {final_call}.",
+        reasoning,
+    )
+    output["reasoning"] = reasoning
+    output["key_risk"] = str(output.get("key_risk", "No risk note supplied.")).strip() or "No risk note supplied."
+    output["crowd_note"] = str(output.get("crowd_note", "No crowd note supplied.")).strip() or "No crowd note supplied."
+    output["regime_note"] = str(output.get("regime_note", "No regime note supplied.")).strip() or "No regime note supplied."
+    return output
+
+
 def parse_kimi_response(raw_response: str) -> dict[str, Any]:
     clean = re.sub(r"```(?:json)?", "", str(raw_response or ""), flags=re.IGNORECASE).strip().strip("`").strip()
     if clean:
         try:
             payload = parse_json_text(clean)
-            return payload
+            return _normalize_kimi_fields(payload)
         except Exception:
             pass
-    return {
+    return _normalize_kimi_fields(
+        {
         "stance": "HOLD",
         "confidence": "VERY_LOW",
         "entry_zone": [],
@@ -294,7 +348,8 @@ def parse_kimi_response(raw_response: str) -> dict[str, Any]:
         "regime_note": "Unavailable due to parsing failure.",
         "invalidation": None,
         "error": True,
-    }
+        }
+    )
 
 
 def sidecar_health(

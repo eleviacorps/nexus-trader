@@ -1396,6 +1396,49 @@ def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
         "quant_fair_value_z": round(float((current_price - equilibrium) / max(atr, 1e-9)), 6),
     }
 
+    try:
+        news_items = fetch_live_news(symbol, limit=6)
+    except Exception:
+        news_items = []
+    try:
+        discussion_items = fetch_public_discussions(symbol, limit=6)
+    except Exception:
+        discussion_items = []
+    try:
+        fear_greed = fetch_fear_greed_snapshot()
+    except Exception:
+        fear_greed = {"value": 50.0, "classification": "neutral", "history": []}
+    try:
+        macro_context = fetch_macro_context()
+    except Exception:
+        macro_context = {"macro_bias": 0.0, "macro_shock": 0.0, "driver": "macro_neutral", "components": {}}
+
+    news_scores = np.asarray([_safe_float(item.get("sentiment"), 0.0) for item in news_items], dtype=np.float64)
+    discussion_scores = np.asarray([_safe_float(item.get("sentiment"), 0.0) for item in discussion_items], dtype=np.float64)
+    news_bias = float(np.clip(news_scores.mean() if news_scores.size else 0.0, -1.0, 1.0))
+    news_intensity = float(np.clip(np.abs(news_scores).mean() if news_scores.size else 0.0, 0.0, 1.0))
+    fear_value = _safe_float(fear_greed.get("value"), 50.0)
+    fear_bias = float(np.tanh((50.0 - fear_value) / 18.0))
+    crowd_bias = float(
+        np.clip(
+            (0.65 * (discussion_scores.mean() if discussion_scores.size else 0.0)) + (0.35 * fear_bias),
+            -1.0,
+            1.0,
+        )
+    )
+    crowd_extreme = float(
+        np.clip(
+            max(
+                abs(discussion_scores).mean() if discussion_scores.size else 0.0,
+                abs(fear_value - 50.0) / 50.0,
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    macro_bias = float(np.clip(_safe_float(macro_context.get("macro_bias"), 0.0), -1.0, 1.0))
+    macro_shock = float(np.clip(_safe_float(macro_context.get("macro_shock"), 0.0), 0.0, 1.0))
+
     retail_t = float(np.clip((0.55 * abs(momentum)) + (0.45 * abs((rsi - 50.0) / 50.0)), 0.0, 1.0))
     institutional_t = float(np.clip((0.62 * abs(trend_strength)) + (0.20 * min(volume_ratio / 2.0, 1.0)) + (0.18 * abs(price_stretch)), 0.0, 1.0))
     noise_t = float(np.clip(0.45 * disagreement + 0.20 * abs(price_stretch), 0.0, 1.0))
@@ -1434,6 +1477,10 @@ def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
     for index, scale in enumerate(horizon_scales, start=1):
         drift = directional_bias * atr * scale
         center_price = current_price + drift
+        minority_bias = float(np.clip((0.55 * price_stretch) - (0.30 * directional_bias) + (0.15 * macro_bias) - (0.10 * news_bias), -0.60, 0.60))
+        minority_center = current_price + (atr * scale * minority_bias)
+        if abs(minority_center - center_price) < (0.08 * atr):
+            minority_center = current_price + (atr * scale * (minority_bias - (0.18 * np.sign(directional_bias or 1.0))))
         band = atr * (0.78 + ((1.0 - confidence) * 1.10) + (0.15 * index))
         future_ts = (last_time + pd.Timedelta(minutes=5 * index)).isoformat()
         future_points.append(
@@ -1446,7 +1493,7 @@ def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
             }
         )
         consensus_prices.append(round(center_price, 5))
-        minority_prices.append(round(current_price - (drift * 0.75), 5))
+        minority_prices.append(round(minority_center, 5))
 
     top_branch = {
         "path_id": 1,
@@ -1510,6 +1557,10 @@ def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
             "mfg_disagreement": round(_safe_float(mfg_context.get("disagreement"), 0.0), 8),
             "mfg_consensus_drift": round(_safe_float(mfg_context.get("consensus_drift"), 0.0), 8),
             "testosterone_index": testosterone_index,
+            "macro_bias": round(macro_bias, 6),
+            "news_bias": round(news_bias, 6),
+            "crowd_bias": round(crowd_bias, 6),
+            "crowd_extreme": round(crowd_extreme, 6),
         },
         "cone": future_points,
         "branches": [top_branch, minority_branch],
@@ -1528,15 +1579,20 @@ def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
             "wltc_testosterone_noise": round(noise_t, 6),
             "wltc_fundamental_tracking_retail": round(float(wltc_context["retail"]["fundamental_tracking"]), 6),
             "wltc_fundamental_tracking_institutional": round(float(wltc_context["institutional"]["fundamental_tracking"]), 6),
-            "macro_bias": 0.0,
-            "macro_shock": 0.0,
-            "news_bias": 0.0,
-            "news_intensity": 0.0,
-            "crowd_bias": round(float(np.clip(directional_bias * 0.45, -1.0, 1.0)), 6),
-            "crowd_extreme": round(float(np.clip(retail_t, 0.0, 1.0)), 6),
+            "macro_bias": round(macro_bias, 6),
+            "macro_shock": round(macro_shock, 6),
+            "news_bias": round(news_bias, 6),
+            "news_intensity": round(news_intensity, 6),
+            "crowd_bias": round(crowd_bias, 6),
+            "crowd_extreme": round(crowd_extreme, 6),
         },
         "technical_analysis": technical_analysis,
-        "feeds": {"news": [], "public_discussions": [], "fear_greed": {}, "macro": {}},
+        "feeds": {
+            "news": news_items,
+            "public_discussions": discussion_items,
+            "fear_greed": fear_greed,
+            "macro": macro_context,
+        },
         "bot_swarm": {
             "aggregate": {
                 "signal": "bullish" if direction == "BUY" else "bearish" if direction == "SELL" else "neutral",
