@@ -21,6 +21,9 @@ from config.project_config import (
     NVIDIA_NIM_MODEL,
     NVIDIA_NIM_TIMEOUT_SECONDS,
     V17_KIMI_PACKET_LOG_PATH,
+    V18_KIMI_PACKET_LOG_PATH,
+    V19_SJD_MODEL_NPZ_PATH,
+    V19_SJD_MODEL_PATH,
     OLLAMA_BASE_URL,
     OLLAMA_ENABLED,
     OLLAMA_MODEL,
@@ -40,9 +43,8 @@ class LlmSidecarConfig:
 
 
 NVIDIA_NIM_MODEL_FALLBACK_CHAIN = [
-    "moonshotai/kimi-k2-instruct",
     "moonshotai/kimi-k2-5",
-    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "nvidia/llama-3.3-nemotron-super-49b-v1",
     "meta/llama-3.1-70b-instruct",
 ]
 
@@ -100,6 +102,9 @@ NUMERIC_FIELD_MEANINGS: dict[str, str] = {
     "mfg.disagreement": "Cross-persona disagreement in expected drift; higher values imply more conflict between sub-populations.",
     "mfg.consensus_drift": "Weighted mean-field drift estimate implied by the persona belief states.",
 }
+
+_LOCAL_SJD_BUNDLE: Any | None = None
+_LOCAL_SJD_LOAD_ERROR: str | None = None
 
 
 def is_nvidia_nim_provider(provider: str | None) -> bool:
@@ -206,6 +211,16 @@ def build_numeric_glossary(context: Mapping[str, Any]) -> dict[str, dict[str, An
     return glossary
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+        if number != number or number in {float("inf"), float("-inf")}:
+            return float(default)
+        return number
+    except Exception:
+        return float(default)
+
+
 def _packet_bucket_utc(timestamp: datetime | None = None) -> str:
     now = timestamp or datetime.now(timezone.utc)
     bucket_minute = (now.minute // 15) * 15
@@ -232,6 +247,120 @@ def read_packet_log(limit: int = 20, path: Path = V17_KIMI_PACKET_LOG_PATH) -> l
         except Exception:
             continue
     return rows[-max(int(limit), 1) :]
+
+
+def _read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _load_local_sjd_bundle() -> Any | None:
+    global _LOCAL_SJD_BUNDLE, _LOCAL_SJD_LOAD_ERROR
+    if _LOCAL_SJD_BUNDLE is not None:
+        return _LOCAL_SJD_BUNDLE
+    if _LOCAL_SJD_LOAD_ERROR is not None:
+        return None
+    if not V19_SJD_MODEL_PATH.exists() and not V19_SJD_MODEL_NPZ_PATH.exists():
+        _LOCAL_SJD_LOAD_ERROR = "missing_v19_sjd_checkpoint"
+        return None
+    try:
+        if V19_SJD_MODEL_NPZ_PATH.exists():
+            from src.v19.sjd_numpy import load_sjd_npz_bundle
+
+            _LOCAL_SJD_BUNDLE = load_sjd_npz_bundle(path=V19_SJD_MODEL_NPZ_PATH)
+        else:
+            from src.v19.sjd_model import load_sjd_bundle
+
+            _LOCAL_SJD_BUNDLE = load_sjd_bundle(path=V19_SJD_MODEL_PATH, device="cpu")
+        return _LOCAL_SJD_BUNDLE
+    except Exception as exc:
+        _LOCAL_SJD_LOAD_ERROR = str(exc)
+        return None
+
+
+def _predict_local_sjd(symbol: str, context: Mapping[str, Any]) -> dict[str, Any] | None:
+    bundle = _load_local_sjd_bundle()
+    if bundle is None:
+        return None
+    try:
+        if hasattr(bundle, "weights"):
+            from src.v19.sjd_numpy import predict_sjd_from_context_numpy
+
+            content = predict_sjd_from_context_numpy(bundle, context, symbol=symbol, pip_size=0.1)
+        else:
+            from src.v19.sjd_model import predict_sjd_from_context
+
+            content = predict_sjd_from_context(bundle, context, symbol=symbol, pip_size=0.1)
+        return {
+            "available": True,
+            "provider": "local_sjd",
+            "model": "v19_sjd_local",
+            "content": content,
+            "source": "local_sjd",
+        }
+    except Exception:
+        return None
+
+
+def _cached_row_similarity(context: Mapping[str, Any], row: Mapping[str, Any]) -> float:
+    candidate_context = row.get("context", {}) if isinstance(row, Mapping) else {}
+    if not isinstance(candidate_context, Mapping):
+        return float("inf")
+    left_market = dict(context.get("market", {}) if isinstance(context, Mapping) else {})
+    right_market = dict(candidate_context.get("market", {}) if isinstance(candidate_context, Mapping) else {})
+    left_sim = dict(context.get("simulation", {}) if isinstance(context, Mapping) else {})
+    right_sim = dict(candidate_context.get("simulation", {}) if isinstance(candidate_context, Mapping) else {})
+    left_mfg = dict(context.get("mfg", {}) if isinstance(context, Mapping) else {})
+    right_mfg = dict(candidate_context.get("mfg", {}) if isinstance(candidate_context, Mapping) else {})
+    price_gap = abs(_safe_float(left_market.get("current_price"), 0.0) - _safe_float(right_market.get("current_price"), 0.0))
+    cabr_gap = abs(_safe_float(left_sim.get("cabr_score"), 0.0) - _safe_float(right_sim.get("cabr_score"), 0.0))
+    cpm_gap = abs(_safe_float(left_sim.get("cpm_score"), 0.0) - _safe_float(right_sim.get("cpm_score"), 0.0))
+    hurst_gap = abs(_safe_float(left_sim.get("hurst_asymmetry"), 0.0) - _safe_float(right_sim.get("hurst_asymmetry"), 0.0))
+    disagreement_gap = abs(_safe_float(left_mfg.get("disagreement"), 0.0) - _safe_float(right_mfg.get("disagreement"), 0.0))
+    left_direction = str(left_sim.get("direction", left_sim.get("scenario_bias", "HOLD"))).upper()
+    right_direction = str(right_sim.get("direction", right_sim.get("scenario_bias", "HOLD"))).upper()
+    direction_penalty = 0.0 if left_direction == right_direction else 0.5
+    left_regime = str(left_sim.get("detected_regime", "unknown")).lower()
+    right_regime = str(right_sim.get("detected_regime", "unknown")).lower()
+    regime_penalty = 0.0 if left_regime == right_regime else 0.25
+    return price_gap + (10.0 * cabr_gap) + (10.0 * cpm_gap) + (5.0 * hurst_gap) + (1000.0 * disagreement_gap) + direction_penalty + regime_penalty
+
+
+def _cached_packet_fallback(symbol: str, context: Mapping[str, Any]) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for path in (V18_KIMI_PACKET_LOG_PATH, V17_KIMI_PACKET_LOG_PATH):
+        for row in _read_jsonl_rows(path):
+            if str(row.get("status", "")).lower() != "ok":
+                continue
+            content = row.get("response_content")
+            if not isinstance(content, Mapping):
+                continue
+            if row.get("request_kind") not in {None, "", "kimi_judge"}:
+                continue
+            candidates.append({"path": path, "row": row})
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda item: _cached_row_similarity(context, item["row"]))
+    content = _normalize_kimi_fields(best["row"].get("response_content", {}))
+    return {
+        "available": True,
+        "provider": "cached_packet",
+        "model": str(best["row"].get("model", "")),
+        "content": content,
+        "source": f"cached_packet:{best['path'].parent.name}",
+    }
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int, api_key: str = "") -> dict[str, Any]:
@@ -581,6 +710,26 @@ def request_swarm_judgment(
     )
 
 
+def query_nvidia_nim(
+    *,
+    context: Mapping[str, Any],
+    model: str | None = None,
+    symbol: str = "XAUUSD",
+    config: LlmSidecarConfig | None = None,
+) -> dict[str, Any]:
+    return _chat_json_request(
+        system_prompt=KIMI_SYSTEM_PROMPT,
+        user_prompt=build_kimi_user_message(context, symbol),
+        config=config,
+        provider="nvidia_nim",
+        model=model,
+        request_kind="kimi_judge",
+        symbol=symbol,
+        context=context,
+        response_parser=parse_kimi_response,
+    )
+
+
 def request_kimi_judge(
     symbol: str,
     context: Mapping[str, Any],
@@ -588,14 +737,18 @@ def request_kimi_judge(
     provider: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    return _chat_json_request(
-        system_prompt=KIMI_SYSTEM_PROMPT,
-        user_prompt=build_kimi_user_message(context, symbol),
-        config=config,
-        provider=provider or "nvidia_nim",
-        model=model,
-        request_kind="kimi_judge",
-        symbol=symbol,
+    local_sjd = _predict_local_sjd(symbol, context)
+    if local_sjd is not None:
+        return local_sjd
+    nim_response = query_nvidia_nim(
         context=context,
-        response_parser=parse_kimi_response,
+        model=model,
+        symbol=symbol,
+        config=config if is_nvidia_nim_provider(provider or "nvidia_nim") else None,
     )
+    if nim_response.get("available", False):
+        return nim_response | {"source": "nvidia_nim"}
+    cached = _cached_packet_fallback(symbol, context)
+    if cached is not None:
+        return cached
+    return nim_response

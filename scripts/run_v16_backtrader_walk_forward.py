@@ -20,6 +20,7 @@ from config.project_config import (
     V16_BACKTRADER_WALKFORWARD_PRECISION_PATH,
     V17_CABR_MODEL_PATH,
     V17_MMM_FEATURES_PATH,
+    V19_CABR_MODEL_PATH,
 )
 from src.v12.tctl import replay_candidates_with_online_bcfe
 from src.v13.cabr import augment_cabr_context, load_cabr_model, load_v13_candidate_frames, score_cabr_model
@@ -62,6 +63,8 @@ def _report_path(mode: str) -> Path:
 def _checkpoint_path(version: str) -> Path:
     if str(version).strip().lower() == "v17":
         return V17_CABR_MODEL_PATH
+    if str(version).strip().lower() == "v19":
+        return V19_CABR_MODEL_PATH
     return V14_CABR_TEMPORAL_MODEL_PATH
 
 
@@ -79,7 +82,7 @@ def _prepare_holdout_frame(cabr_version: str) -> tuple[pd.DataFrame, str]:
         n_context_bars=12,
     )
     replay = replay_candidates_with_online_bcfe(valid_frame)
-    replay = augment_cabr_context(replay, mmm_features=_mmm_frame() if str(cabr_version).strip().lower() == "v17" else None)
+    replay = augment_cabr_context(replay, mmm_features=_mmm_frame() if str(cabr_version).strip().lower() in {"v17", "v19"} else None)
 
     checkpoint = _checkpoint_path(cabr_version)
     if not checkpoint.exists():

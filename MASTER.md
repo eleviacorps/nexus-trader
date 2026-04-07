@@ -4894,3 +4894,172 @@ Bottom line:
 
 - `outputs/evaluation/v18_summary.json`
 - `outputs/evaluation/v18_summary.md`
+
+## V19
+
+V19.1 was executed as a real NVIDIA NIM distillation and CABR-recovery implementation pass centered on three tracks:
+
+1. replace the brittle live Kimi dependency with a local distilled judgment path
+2. regenerate a larger CABR training archive with the V17/V18-style feature stack
+3. bootstrap the remote MI300X Jupyter environment so V19 training can continue off the local machine
+
+The guiding inputs were the user-provided V19.1 rewrite prompt plus the V19 core concept/theory files. The older V19 prompt was also used for the concrete artifact list, especially LEPL and the test requirements.
+
+### V19 Implementation
+
+New V19 modules added:
+
+- `src/v19/context_sampler.py`
+- `src/v19/distillation_dataset.py`
+- `src/v19/sjd_model.py`
+- `src/v19/sjd_numpy.py`
+- `src/v19/curriculum_pairs.py`
+- `src/v19/lepl.py`
+- `src/v19/mamba_backbone.py`
+- `research/v19_mamba_xlstm.md`
+
+New V19 scripts added:
+
+- `scripts/build_sjd_dataset.py`
+- `scripts/train_sjd.py`
+- `scripts/train_v19_sjd.py`
+- `scripts/build_branch_archive_v19.py`
+- `scripts/train_cabr_v19.py`
+- `scripts/train_v19_cabr.py`
+- `scripts/rl_finetune_cabr.py`
+- `scripts/train_v19_lepl.py`
+
+Existing runtime and support files updated:
+
+- `config/project_config.py`
+- `src/service/llm_sidecar.py`
+- `src/v16/paper.py`
+- `src/v13/cabr.py`
+- `scripts/run_v16_backtrader_walk_forward.py`
+- `scripts/jupyter_remote_exec.py`
+
+What changed in behavior:
+
+- the live judge routing in `src/service/llm_sidecar.py` is now `local_sjd -> NVIDIA NIM -> cached_packet`
+- the NVIDIA NIM teacher chain was shifted to the V19.1 directive:
+  - `moonshotai/kimi-k2-5`
+  - `nvidia/llama-3.3-nemotron-super-49b-v1`
+  - `meta/llama-3.1-70b-instruct`
+- local SJD can now load from a NumPy export (`checkpoints/v19/sjd_best.npz`) so the local runtime can still use V19 judgment inference even if local Torch import is blocked
+- `src/v16/paper.py` now enforces:
+  - `MAX_CONCURRENT_POSITIONS = 3`
+  - no new same-direction paper position once `2` are already open
+  - a helper to close positions whose unrealized PnL is below a loss cutoff
+- `scripts/run_v16_backtrader_walk_forward.py` now recognizes `cabr_version=v19`
+
+### V19 Artifacts
+
+Generated local artifacts:
+
+- `outputs/v19/sjd_dataset.parquet`
+- `outputs/v19/sjd_feature_names.json`
+- `outputs/v19/sjd_dataset_report.json`
+- `outputs/v19/branch_archive_100k.parquet`
+- `outputs/v19/branch_archive_100k.report.json`
+- `outputs/v19/lepl_training_report.json`
+- `outputs/v19/cabr_v19_training_report.json`
+- `checkpoints/v19/sjd_best.pt`
+- `checkpoints/v19/sjd_best.npz`
+- `checkpoints/v19/lepl.pkl`
+- `checkpoints/v19/cabr_v19_base.pt`
+- `checkpoints/v19/cabr_v19.pt`
+- `checkpoints/v19/cabr_v19_rl.pt`
+- `outputs/evaluation/v19_summary.json`
+- `outputs/evaluation/v19_summary.md`
+
+Remote Jupyter/MI300X bootstrap status:
+
+- server reachable and usable through the provided token-auth Jupyter endpoint
+- `rocm-smi` showed:
+  - GPU: `AMD Instinct MI300X VF`
+  - VRAM total: `205822885888` bytes
+- remote Python environment was bootstrapped with:
+  - `numpy`
+  - `pandas`
+  - `pyarrow`
+  - `scikit-learn`
+  - `requests`
+  - `websocket-client`
+  - `torch 2.9.1+rocm6.4`
+- remote `torch.cuda.is_available()` returned `True`
+
+### Verified V19 Results
+
+SJD:
+
+- dataset rows: `34`
+- feature count: `1542`
+- teacher mix:
+  - `moonshotai/kimi-k2-instruct`: `33`
+  - `meta/llama-3.1-70b-instruct`: `1`
+- stance mix:
+  - `HOLD`: `30`
+  - `SELL`: `3`
+  - `BUY`: `1`
+- SQT mix:
+  - `COLD`: `22`
+  - `GOOD`: `5`
+  - `NEUTRAL`: `4`
+  - `HOT`: `3`
+- local SJD validation stance accuracy: `0.857143`
+- local SJD TP / SL MAE: `39765.152384 / 39788.224651` pips
+- local `request_kimi_judge()` smoke on the Windows machine resolved through `provider=local_sjd`, proving the NumPy fallback path is active
+
+Branch archive:
+
+- `100000` rows generated into `outputs/v19/branch_archive_100k.parquet`
+- `77817` source rows came from `outputs/v10/branch_archive_v10_full.parquet`
+- `22183` rows were resampled to reach the 100k target
+
+LEPL:
+
+- validation accuracy: `0.934783`
+- train rows: `368`
+- validation rows: `92`
+
+CABR smoke training:
+
+- remote CPU smoke pass completed and saved:
+  - `checkpoints/v19/cabr_v19_base.pt`
+  - `checkpoints/v19/cabr_v19.pt`
+  - `checkpoints/v19/cabr_v19_rl.pt`
+- warmup smoke accuracy: `0.620619`
+- full-stage smoke accuracy: `0.463918`
+- final smoke pairwise accuracy: `0.463918`
+- per-regime smoke accuracy:
+  - `panic_shock`: `0.510870`
+  - `ranging`: `0.467949`
+  - `trending_down`: `0.283019`
+  - `trending_up`: `0.607143`
+- RL fine-tune smoke completed for `500` episodes with mean reward `0.0000637725`
+
+Remote verification completed:
+
+- remote `python -m unittest discover -s tests -p test_v19*.py` passed
+- remote CABR smoke training passed on CPU
+
+### Honest V19 Read
+
+What is now genuinely true:
+
+- V19 is no longer just a prompt idea; the repo now contains the real distillation dataset builder, local SJD training/inference stack, branch-archive builder, LEPL trainer, CABR recovery trainer, RL fine-tune script, and research-only Mamba/xLSTM scaffold
+- the local judge path is materially better than before because it can resolve through a local V19 student without needing the live NVIDIA NIM call
+- the remote MI300X environment is real and usable for V19 work
+
+What is not yet true:
+
+- the SJD dataset is still only `34` rows, which is far below the intended `5000` / `50000` scale targets
+- the CABR recovery target `>= 0.70` pairwise accuracy is not met; the smoke result is `0.463918`
+- full V19 walk-forward Frequency / Precision mode results were not completed in this cycle
+- the first remote GPU CABR attempt failed with a MIOpen / HIPRTC compile error in the GRU path, so the verified CABR smoke checkpointing used remote CPU instead of a successful MI300X training run
+
+Bottom line:
+
+- V19 is a strong infrastructure and research-enablement pass
+- V19 has real artifacts, real local routing improvements, real remote environment bootstrap, and real smoke checkpoints
+- V19 is not yet the finished research win that the prompt targets, because the distillation corpus is still tiny and CABR recovery has not cleared the required accuracy threshold

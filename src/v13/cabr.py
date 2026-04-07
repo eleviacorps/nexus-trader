@@ -14,9 +14,13 @@ from torch.utils.data import DataLoader, Dataset
 
 from config.project_config import V12_FEATURE_CONSISTENCY_REPORT_PATH, V13_CABR_MODEL_PATH
 from src.v12.crowd_emotional_momentum import build_crowd_emotional_momentum
-from src.v12.tctl import prepare_tctl_candidates
 from src.v12.wfri import REGIME_CLASSES, map_regime_class
 from src.v17.lee_coc import LeeCOC
+
+try:
+    from src.v12.tctl import prepare_tctl_candidates
+except Exception:  # pragma: no cover
+    prepare_tctl_candidates = None
 
 
 GEOMETRY_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -265,11 +269,11 @@ def augment_cabr_context(frame: pd.DataFrame, mmm_features: pd.DataFrame | None 
         ]
         working = working.merge(mmm[merge_cols].drop_duplicates(subset=['timestamp']), on='timestamp', how='left')
     working['regime_class'] = working.get('dominant_regime', 'ranging').map(map_regime_class)
-    working['context_regime_confidence'] = working.get('hmm_regime_probability', 0.5).astype(float)
-    working['context_rsi_14'] = working.get('bcfe_rsi_14', 50.0).astype(float)
-    working['context_macd_hist'] = working.get('bcfe_macd_hist', 0.0).astype(float)
-    working['context_bb_pct'] = working.get('bcfe_bb_pct', 0.5).astype(float)
-    working['context_atr_percentile_30d'] = _rolling_percentile(working.get('bcfe_atr_pct', pd.Series(0.0, index=working.index)).astype(float))
+    working['context_regime_confidence'] = _series_or_default(working, 'hmm_regime_probability', 0.5)
+    working['context_rsi_14'] = _series_or_default(working, 'bcfe_rsi_14', 50.0)
+    working['context_macd_hist'] = _series_or_default(working, 'bcfe_macd_hist', 0.0)
+    working['context_bb_pct'] = _series_or_default(working, 'bcfe_bb_pct', 0.5)
+    working['context_atr_percentile_30d'] = _rolling_percentile(_series_or_default(working, 'bcfe_atr_pct', 0.0))
     working['context_days_since_regime_change'] = _days_since_regime_change(working['regime_class'], working['timestamp'])
 
     cem = build_crowd_emotional_momentum(working)
@@ -331,6 +335,8 @@ def load_v13_candidate_frames(
     use_temporal_context: bool = False,
     n_context_bars: int = 12,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], tuple[str, ...]]:
+    if prepare_tctl_candidates is None:
+        raise ImportError("prepare_tctl_candidates is unavailable in this environment.")
     train_frame, valid_frame, _ = prepare_tctl_candidates(archive, validation_fraction=validation_fraction)
     train_frame = augment_cabr_context(train_frame)
     valid_frame = augment_cabr_context(valid_frame)

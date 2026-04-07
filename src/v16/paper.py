@@ -19,6 +19,9 @@ SYMBOL_SPECS = {
     "BTCUSD": {"contract_size": 1.0, "pip_size": 1.0, "pip_value_per_lot": 1.0},
 }
 
+MAX_CONCURRENT_POSITIONS = 3
+MAX_SAME_DIRECTION_POSITIONS = 2
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -167,6 +170,15 @@ class PaperTradingEngine:
     ) -> dict[str, Any]:
         payload = self._read_state()
         state = self.state()
+        open_positions = list(payload.get("open_positions", []))
+        if len(open_positions) >= MAX_CONCURRENT_POSITIONS:
+            raise ValueError(f"Paper position limit reached ({MAX_CONCURRENT_POSITIONS}).")
+        direction_upper = str(direction).upper()
+        same_direction = sum(1 for item in open_positions if str(item.get("direction", "")).upper() == direction_upper)
+        if same_direction >= MAX_SAME_DIRECTION_POSITIONS:
+            raise ValueError(
+                f"Same-direction paper position limit reached for {direction_upper} ({MAX_SAME_DIRECTION_POSITIONS})."
+            )
         equity = _safe_float(state["summary"].get("equity"), self.starting_balance)
         symbol_upper = str(symbol).upper()
         spec = _symbol_spec(symbol_upper)
@@ -191,7 +203,6 @@ class PaperTradingEngine:
         lot = float(min(base_lot, leverage_cap)) if leverage_cap is not None else float(base_lot)
         if lot <= 0.0:
             raise ValueError("Leverage cap and risk sizing produced a zero lot.")
-        direction_upper = str(direction).upper()
         direction_sign = 1.0 if direction_upper == "BUY" else -1.0
         notional_usd = lot * spec["contract_size"] * float(entry_price)
         margin_used = notional_usd / max(float(leverage), 1.0)
@@ -229,6 +240,23 @@ class PaperTradingEngine:
         payload["open_positions"].append(position)
         self._write_state(payload)
         return position
+
+    def close_positions_below_unrealized(
+        self,
+        *,
+        current_prices: dict[str, float],
+        loss_limit_usd: float = -200.0,
+    ) -> list[dict[str, Any]]:
+        state = self.state(current_prices=current_prices)
+        closed: list[dict[str, Any]] = []
+        for position in list(state.get("open_positions", [])):
+            if _safe_float(position.get("unrealized_pnl_usd"), 0.0) <= float(loss_limit_usd):
+                symbol = str(position.get("symbol", "XAUUSD")).upper()
+                exit_price = _safe_float(current_prices.get(symbol), _safe_float(position.get("current_price"), 0.0))
+                if exit_price <= 0.0:
+                    continue
+                closed.append(self.close_position(str(position.get("trade_id")), exit_price=exit_price))
+        return closed
 
     def modify_position(
         self,
