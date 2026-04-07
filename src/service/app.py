@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from config.project_config import (
 from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
 from src.service.llm_sidecar import is_nvidia_nim_provider, read_packet_log, request_kimi_judge, request_market_context, sidecar_health
 from src.service.live_data import (
+    build_fast_dashboard_payload,
     build_live_monitor,
     build_live_simulation,
     build_realtime_chart_payload,
@@ -334,12 +337,43 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
             simulation.get("market_memory_regime", ((model_prediction.get("model_diagnostics") or {}).get("dominant_regime", "unknown"))),
         )
     )
+    candles = list(market.get("candles", []) if isinstance(market, dict) else [])
+    recent_candles = [
+        {
+            "timestamp": item.get("timestamp"),
+            "open": round(_safe_float(item.get("open"), 0.0), 5),
+            "high": round(_safe_float(item.get("high"), 0.0), 5),
+            "low": round(_safe_float(item.get("low"), 0.0), 5),
+            "close": round(_safe_float(item.get("close"), 0.0), 5),
+        }
+        for item in candles[-24:]
+        if isinstance(item, dict)
+    ]
+    recent_closes = [_safe_float(item.get("close"), current_price) for item in recent_candles]
+    market_context = {
+        "current_price": round(current_price, 5),
+        "recent_5m_candles": recent_candles,
+        "session_high": round(max([_safe_float(item.get("high"), current_price) for item in recent_candles], default=current_price), 5),
+        "session_low": round(min([_safe_float(item.get("low"), current_price) for item in recent_candles], default=current_price), 5),
+        "recent_close_change": round((recent_closes[-1] - recent_closes[0]) if len(recent_closes) >= 2 else 0.0, 5),
+    }
+    reduced_technical_analysis = {
+        "structure": technical_analysis.get("structure"),
+        "location": technical_analysis.get("location"),
+        "rsi_14": round(_safe_float(technical_analysis.get("rsi_14"), 50.0), 4),
+        "atr_14": round(_safe_float(technical_analysis.get("atr_14"), 0.0), 5),
+        "equilibrium": round(_safe_float(technical_analysis.get("equilibrium"), current_price), 5),
+        "nearest_support": technical_analysis.get("nearest_support"),
+        "nearest_resistance": technical_analysis.get("nearest_resistance"),
+        "order_blocks": list(technical_analysis.get("order_blocks", []))[:3],
+        "fair_value_gaps": list(technical_analysis.get("fair_value_gaps", []))[:3],
+    }
+    reduced_bot_swarm = {
+        "aggregate": dict((bot_swarm.get("aggregate") or {}) if isinstance(bot_swarm, dict) else {}),
+    }
     return {
         "symbol": payload.get("symbol", "XAUUSD"),
-        "market": {
-            "current_price": round(current_price, 5),
-            "candles": market.get("candles", []),
-        },
+        "market": market_context,
         "simulation": {
             "scenario_bias": str(simulation.get("direction", simulation.get("scenario_bias", "neutral"))).lower(),
             "direction": simulation.get("direction"),
@@ -359,8 +393,8 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "cone_c_m": round(_safe_float(simulation.get("cone_c_m"), 0.0), 6),
             "entry_zone": simulation.get("entry_zone", []),
         },
-        "technical_analysis": technical_analysis,
-        "bot_swarm": bot_swarm,
+        "technical_analysis": reduced_technical_analysis,
+        "bot_swarm": reduced_bot_swarm,
         "news_feed": list((feeds.get("news") or []))[:8],
         "public_discussions": list((feeds.get("public_discussions") or []))[:8],
         "sqt": sqt,
@@ -557,6 +591,19 @@ def create_app() -> Any:
     paper_trader = PaperTradingEngine(starting_balance=float(os.getenv("NEXUS_PAPER_START_BALANCE", "1000")))
     feed_manager = LiveFeedManager()
     feed_manager.set_paper_engine(paper_trader)
+    kimi_cache: dict[str, dict[str, Any]] = {}
+
+    def _kimi_cache_key(symbol: str, active_mode: str, llm_provider: str, llm_model: str | None) -> str:
+        bucket = str(int(time.time() // 900))
+        return "|".join(
+            [
+                str(symbol).upper(),
+                str(active_mode).strip().lower() or "frequency",
+                str(llm_provider).strip().lower() or "nvidia_nim",
+                (llm_model or "").strip() or "",
+                bucket,
+            ]
+        )
 
     def _current_prices(symbols: set[str]) -> dict[str, float]:
         prices: dict[str, float] = {}
@@ -579,6 +626,69 @@ def create_app() -> Any:
 
     def _live_price(symbol: str) -> float:
         return _current_prices({str(symbol).upper()}).get(str(symbol).upper(), 0.0)
+
+    def _base_dashboard_payload(symbol: str, active_mode: str) -> dict[str, Any]:
+        payload = build_fast_dashboard_payload(symbol)
+        payload["paper_trading"] = _paper_state(symbol)
+        payload["realtime_chart"] = build_realtime_chart_payload(symbol)
+        payload["sqt"] = sqt_tracker.summary()
+        v16_payload = build_v16_simulation_result(
+            payload,
+            None,
+            mode=active_mode,
+            sqt=sqt_tracker,
+            eci_context=payload.get("eci"),
+        )
+        payload["simulation"] = dict(payload.get("simulation", {})) | dict(v16_payload.get("simulation", {}))
+        payload["cone"] = v16_payload.get("cone", payload.get("cone", {}))
+        payload["relativistic_cone"] = v16_payload.get("relativistic_cone", {})
+        payload["final_forecast"] = v16_payload.get("final_forecast", {})
+        payload["v16"] = v16_payload
+        payload["ensemble_prediction"] = _v16_ensemble(payload)
+        payload["stack_mode"] = "dashboard_fast_path"
+        payload["mode"] = active_mode
+        payload["manual_trading_mode"] = True
+        return payload
+
+    def _cached_or_fallback_kimi(payload: dict[str, Any], active_mode: str, llm_provider: str, llm_model: str | None) -> dict[str, Any]:
+        cache_key = _kimi_cache_key(payload.get("symbol", "XAUUSD"), active_mode, llm_provider, llm_model)
+        cached = kimi_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+        return {
+            "available": False,
+            "provider": llm_provider,
+            "model": llm_model or "",
+            "reason": "awaiting_15m_kimi_refresh",
+            "content": fallback_kimi_judge(payload),
+        }
+
+    def _resolve_kimi_judge(payload: dict[str, Any], active_mode: str, llm_provider: str, llm_model: str | None, *, force: bool = False) -> dict[str, Any]:
+        cache_key = _kimi_cache_key(payload.get("symbol", "XAUUSD"), active_mode, llm_provider, llm_model)
+        if not force and cache_key in kimi_cache:
+            return copy.deepcopy(kimi_cache[cache_key])
+        kimi_context = build_kimi_context_payload(payload)
+        payload_symbol = str(payload.get("symbol", "XAUUSD"))
+        if is_nvidia_nim_provider(llm_provider):
+            kimi_judge = request_kimi_judge(payload_symbol, kimi_context, provider=llm_provider, model=llm_model)
+            if not kimi_judge.get("available", False):
+                kimi_judge = {
+                    "available": False,
+                    "provider": llm_provider,
+                    "model": llm_model or "",
+                    "error": kimi_judge.get("error", "Kimi request failed."),
+                    "content": fallback_kimi_judge(payload),
+                }
+        else:
+            kimi_judge = {
+                "available": False,
+                "provider": llm_provider,
+                "model": llm_model or "",
+                "reason": "provider_not_nim",
+                "content": fallback_kimi_judge(payload),
+            }
+        kimi_cache[cache_key] = copy.deepcopy(kimi_judge)
+        return kimi_judge
 
     def _refresh_sqt(symbol: str) -> dict[str, Any]:
         monitor = build_live_monitor(symbol)
@@ -728,6 +838,20 @@ def create_app() -> Any:
     def live_monitor(symbol: str = 'XAUUSD'):
         return _refresh_sqt(symbol)
 
+    @app.get('/api/dashboard/live')
+    def dashboard_live(
+        symbol: str = 'XAUUSD',
+        llm_provider: str = 'nvidia_nim',
+        llm_model: str | None = None,
+        mode: str | None = None,
+    ):
+        _refresh_sqt(symbol)
+        active_mode = (mode or default_mode).strip().lower() or "frequency"
+        payload = _base_dashboard_payload(symbol, active_mode)
+        payload["history_entry"] = record_simulation_history(payload, None)
+        payload["kimi_judge"] = _cached_or_fallback_kimi(payload, active_mode, llm_provider, llm_model)
+        return payload
+
     @app.get('/api/chart/realtime')
     def realtime_chart(symbol: str = 'XAUUSD', bars: int = 240):
         return build_realtime_chart_payload(symbol, bars=max(60, min(int(bars), 720)))
@@ -735,6 +859,24 @@ def create_app() -> Any:
     @app.get('/api/llm/health')
     def llm_health(provider: str = 'lm_studio', model: str | None = None):
         return sidecar_health(provider=provider, model=model)
+
+    @app.get('/api/llm/kimi-live')
+    def kimi_live(
+        symbol: str = 'XAUUSD',
+        llm_provider: str = 'nvidia_nim',
+        llm_model: str | None = None,
+        mode: str | None = None,
+        force: bool = False,
+    ):
+        active_mode = (mode or default_mode).strip().lower() or "frequency"
+        payload = _base_dashboard_payload(symbol, active_mode)
+        payload["kimi_judge"] = _resolve_kimi_judge(payload, active_mode, llm_provider, llm_model, force=bool(force))
+        return {
+            "symbol": payload.get("symbol", symbol),
+            "mode": active_mode,
+            "kimi_judge": payload["kimi_judge"],
+            "fallback_judge": fallback_kimi_judge(payload),
+        }
 
     @app.get('/api/llm/context')
     def llm_context(symbol: str = 'XAUUSD', llm_provider: str = 'lm_studio', llm_model: str | None = None):

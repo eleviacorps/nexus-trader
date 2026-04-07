@@ -114,6 +114,9 @@ def get_nim_model(requested_model: str | None) -> str:
 
 
 def _nim_model_chain(requested_model: str | None) -> list[str]:
+    explicit = (requested_model or "").strip()
+    if explicit:
+        return [explicit]
     chain = [get_nim_model(requested_model)]
     chain.extend(NVIDIA_NIM_MODEL_FALLBACK_CHAIN)
     output: list[str] = []

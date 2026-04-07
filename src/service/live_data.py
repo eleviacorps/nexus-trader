@@ -1251,6 +1251,319 @@ def build_realtime_chart_payload(symbol: str, bars: int = 240) -> dict[str, Any]
     }
 
 
+def build_fast_dashboard_payload(symbol: str) -> dict[str, Any]:
+    candles = fetch_recent_market_candles(symbol, interval="5m", range_="5d", ttl_seconds=15)
+    if candles.empty:
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": str(symbol).upper(),
+            "market": {"candles": [], "current_price": 0.0, "source": "fast_dashboard_proxy"},
+            "simulation": {},
+            "cone": [],
+            "branches": [],
+            "highlighted_branches": {"top_branch_id": 1, "minority_branch_id": 2},
+            "current_row": {},
+            "technical_analysis": {},
+            "feeds": {"news": [], "public_discussions": [], "fear_greed": {}, "macro": {}},
+            "bot_swarm": {"aggregate": {}, "bots": [], "persona_reactions": {}},
+            "llm_context": {"available": False, "provider": "fast_dashboard_proxy", "content": {}},
+            "wltc": {},
+            "mmm": {},
+            "mfg": {},
+        }
+
+    frame = candles.copy().tail(480)
+    for column in ["open", "high", "low", "close", "volume"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=["open", "high", "low", "close"]).copy()
+    frame["volume"] = frame["volume"].fillna(0.0)
+
+    close = frame["close"]
+    high = frame["high"]
+    low = frame["low"]
+    open_ = frame["open"]
+    volume = frame["volume"]
+    prev_close = close.shift(1).fillna(close)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr_series = tr.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean()
+    rsi_series = _compute_rsi(close, 14)
+    ema_fast = close.ewm(span=21, adjust=False).mean()
+    ema_slow = close.ewm(span=55, adjust=False).mean()
+    ema_cross_series = ((ema_fast - ema_slow) / close.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    equilibrium_series = ((high.rolling(20, min_periods=1).max()) + (low.rolling(20, min_periods=1).min())) / 2.0
+    returns = close.pct_change().fillna(0.0)
+    momentum_series = returns.rolling(6, min_periods=1).sum()
+    volume_ma = volume.rolling(20, min_periods=1).mean().replace(0.0, np.nan)
+    volume_ratio_series = (volume / volume_ma).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+
+    current_price = _safe_float(close.iloc[-1], 0.0)
+    last_time = frame.index[-1]
+    atr = max(_safe_float(atr_series.iloc[-1], current_price * 0.0012), 0.25)
+    rsi = _safe_float(rsi_series.iloc[-1], 50.0)
+    ema_cross = _safe_float(ema_cross_series.iloc[-1], 0.0)
+    equilibrium = _safe_float(equilibrium_series.iloc[-1], current_price)
+    volume_ratio = _safe_float(volume_ratio_series.iloc[-1], 1.0)
+    price_stretch = float(np.tanh((current_price - equilibrium) / max(atr * 2.0, 1e-9)))
+    trend_strength = float(np.tanh((ema_fast.iloc[-1] - ema_slow.iloc[-1]) / max(atr * 2.0, 1e-9)))
+    momentum = float(np.tanh(_safe_float(momentum_series.iloc[-1], 0.0) * 45.0))
+
+    hurst_overall = float(np.clip(0.5 + (0.18 * trend_strength) + (0.07 * momentum), 0.28, 0.74))
+    hurst_positive = float(np.clip(hurst_overall + (0.06 if trend_strength >= 0.0 else -0.03), 0.25, 0.82))
+    hurst_negative = float(np.clip(hurst_overall + (-0.03 if trend_strength >= 0.0 else 0.06), 0.25, 0.82))
+    hurst_asymmetry = float(np.clip(hurst_positive - hurst_negative, -0.25, 0.25))
+
+    directional_bias = float(
+        np.clip(
+            (0.44 * trend_strength)
+            + (0.24 * np.tanh((rsi - 50.0) / 9.0))
+            + (0.18 * price_stretch)
+            + (0.14 * momentum),
+            -0.95,
+            0.95,
+        )
+    )
+    confidence = float(
+        np.clip(
+            0.30
+            + (0.36 * abs(directional_bias))
+            + (0.08 * abs(hurst_asymmetry))
+            + (0.06 * min(volume_ratio, 2.0))
+            - (0.08 * abs(price_stretch)),
+            0.24,
+            0.88,
+        )
+    )
+    scenario_bias = "bullish" if directional_bias > 0.03 else "bearish" if directional_bias < -0.03 else "neutral"
+    direction = "BUY" if directional_bias > 0.08 else "SELL" if directional_bias < -0.08 else "HOLD"
+    disagreement = float(np.clip(0.10 + (0.32 * (1.0 - confidence)), 0.10, 0.46))
+
+    recent_window = frame.tail(48)
+    lower_candidates = recent_window[recent_window["low"] <= current_price]["low"]
+    upper_candidates = recent_window[recent_window["high"] >= current_price]["high"]
+    support_price = _safe_float(lower_candidates.tail(12).mean(), _safe_float(low.tail(12).min(), current_price - atr))
+    resistance_price = _safe_float(upper_candidates.tail(12).mean(), _safe_float(high.tail(12).max(), current_price + atr))
+
+    order_block_rows = recent_window.assign(
+        body=(recent_window["close"] - recent_window["open"]).abs(),
+        volume_ratio=(volume_ratio_series.tail(len(recent_window)).values),
+    ).sort_values(["volume_ratio", "body"], ascending=[False, False]).head(4)
+    order_blocks = [
+        {
+            "low": round(float(min(row["low"], row["open"], row["close"])), 5),
+            "high": round(float(max(row["high"], row["open"], row["close"])), 5),
+            "strength": round(float(np.clip(row.get("volume_ratio", 1.0) / 2.0, 0.2, 1.0)), 4),
+        }
+        for _, row in order_block_rows.iterrows()
+    ]
+
+    fair_value_gaps: list[dict[str, Any]] = []
+    tail_rows = frame.tail(40).reset_index(drop=False)
+    for index in range(2, len(tail_rows)):
+        prev_prev = tail_rows.iloc[index - 2]
+        current = tail_rows.iloc[index]
+        if current["low"] > prev_prev["high"]:
+            fair_value_gaps.append(
+                {
+                    "low": round(float(prev_prev["high"]), 5),
+                    "high": round(float(current["low"]), 5),
+                    "size": round(float(current["low"] - prev_prev["high"]), 5),
+                }
+            )
+        elif current["high"] < prev_prev["low"]:
+            fair_value_gaps.append(
+                {
+                    "low": round(float(current["high"]), 5),
+                    "high": round(float(prev_prev["low"]), 5),
+                    "size": round(float(prev_prev["low"] - current["high"]), 5),
+                }
+            )
+        if len(fair_value_gaps) >= 4:
+            break
+
+    technical_analysis = {
+        "structure": "bullish" if ema_fast.iloc[-1] >= ema_slow.iloc[-1] else "bearish",
+        "location": "discount" if current_price <= equilibrium else "premium",
+        "rsi_14": round(rsi, 4),
+        "atr_14": round(atr, 5),
+        "equilibrium": round(equilibrium, 5),
+        "nearest_support": {"price": round(support_price, 5), "distance": round(current_price - support_price, 5)},
+        "nearest_resistance": {"price": round(resistance_price, 5), "distance": round(resistance_price - current_price, 5)},
+        "order_blocks": order_blocks,
+        "fair_value_gaps": fair_value_gaps,
+        "quant_regime_strength": round(confidence, 6),
+        "quant_transition_risk": round(1.0 - confidence, 6),
+        "quant_vol_realism": round(float(np.clip(1.0 - abs(price_stretch), 0.0, 1.0)), 6),
+        "quant_fair_value_z": round(float((current_price - equilibrium) / max(atr, 1e-9)), 6),
+    }
+
+    retail_t = float(np.clip((0.55 * abs(momentum)) + (0.45 * abs((rsi - 50.0) / 50.0)), 0.0, 1.0))
+    institutional_t = float(np.clip((0.62 * abs(trend_strength)) + (0.20 * min(volume_ratio / 2.0, 1.0)) + (0.18 * abs(price_stretch)), 0.0, 1.0))
+    noise_t = float(np.clip(0.45 * disagreement + 0.20 * abs(price_stretch), 0.0, 1.0))
+    wltc_context = {
+        "retail": {"testosterone_index": round(retail_t, 4), "fundamental_tracking": round(float(np.clip(1.0 - retail_t, 0.05, 1.0)), 4)},
+        "institutional": {"testosterone_index": round(institutional_t, 4), "fundamental_tracking": round(float(np.clip(1.0 - institutional_t * 0.65, 0.12, 1.0)), 4)},
+        "noise": {"testosterone_index": round(noise_t, 4), "fundamental_tracking": round(float(np.clip(1.0 - noise_t, 0.05, 1.0)), 4)},
+    }
+    mmm_context = {
+        "hurst_overall": round(hurst_overall, 4),
+        "hurst_positive": round(hurst_positive, 4),
+        "hurst_negative": round(hurst_negative, 4),
+        "hurst_asymmetry": round(hurst_asymmetry, 4),
+        "market_memory_regime": "trend_following" if abs(trend_strength) >= 0.12 else "balanced_range",
+    }
+    mfg_context = {
+        "disagreement": round(disagreement, 8),
+        "consensus_drift": round(float(directional_bias * atr / max(current_price, 1e-9)), 8),
+    }
+
+    recent_bars = [
+        {
+            "timestamp": index.isoformat(),
+            "open": round(float(row["open"]), 5),
+            "high": round(float(row["high"]), 5),
+            "low": round(float(row["low"]), 5),
+            "close": round(float(row["close"]), 5),
+            "volume": round(float(row["volume"]), 2),
+        }
+        for index, row in frame.tail(72).iterrows()
+    ]
+    horizon_scales = [0.45, 0.85, 1.15]
+    future_points: list[dict[str, Any]] = []
+    consensus_prices = [round(current_price, 5)]
+    minority_prices = [round(current_price, 5)]
+    for index, scale in enumerate(horizon_scales, start=1):
+        drift = directional_bias * atr * scale
+        center_price = current_price + drift
+        band = atr * (0.78 + ((1.0 - confidence) * 1.10) + (0.15 * index))
+        future_ts = (last_time + pd.Timedelta(minutes=5 * index)).isoformat()
+        future_points.append(
+            {
+                "timestamp": future_ts,
+                "horizon": index,
+                "center_price": round(center_price, 5),
+                "lower_price": round(center_price - band, 5),
+                "upper_price": round(center_price + band, 5),
+            }
+        )
+        consensus_prices.append(round(center_price, 5))
+        minority_prices.append(round(current_price - (drift * 0.75), 5))
+
+    top_branch = {
+        "path_id": 1,
+        "probability": round(float(0.5 + (0.5 * directional_bias)), 6),
+        "selector_score": round(confidence, 6),
+        "predicted_prices": [point["center_price"] for point in future_points],
+        "timestamps": [point["timestamp"] for point in future_points],
+        "dominant_persona": "institutional" if abs(trend_strength) >= 0.12 else "mixed",
+        "dominant_driver": "fast_dashboard_proxy",
+        "branch_label": "consensus_path",
+    }
+    minority_branch = {
+        "path_id": 2,
+        "probability": round(float(1.0 - top_branch["probability"]), 6),
+        "selector_score": round(float(np.clip(1.0 - confidence, 0.05, 0.95)), 6),
+        "predicted_prices": minority_prices[1:],
+        "timestamps": [point["timestamp"] for point in future_points],
+        "dominant_persona": "retail",
+        "dominant_driver": "minority_case",
+        "branch_label": "minority_path",
+    }
+
+    testosterone_index = {
+        name: round(_safe_float(summary.get("testosterone_index"), 0.0), 4)
+        for name, summary in wltc_context.items()
+    }
+    market_source = str(frame.attrs.get("market_source", candles.attrs.get("market_source", "fast_dashboard_proxy")))
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": str(symbol).upper(),
+        "market": {
+            "candles": _candles_to_records(frame, limit=240),
+            "current_price": round(current_price, 5),
+            "source": market_source,
+        },
+        "simulation": {
+            "mean_probability": round(float(0.5 + (0.5 * directional_bias)), 6),
+            "consensus_score": round(confidence * 0.72, 6),
+            "overall_confidence": round(confidence, 6),
+            "dominant_driver": "fast_dashboard_proxy",
+            "scenario_bias": scenario_bias,
+            "analog_bias": round(price_stretch, 6),
+            "analog_confidence": round(confidence * 0.68, 6),
+            "analog_support": 72,
+            "memory_bank_bias": round(directional_bias * 0.60, 6),
+            "memory_bank_confidence": round(confidence * 0.54, 6),
+            "branch_count": 2,
+            "detected_regime": str(mmm_context.get("market_memory_regime", "balanced_range")),
+            "regime_confidence": round(confidence * 0.78, 6),
+            "retrieval_similarity": round(0.52 + (0.18 * abs(directional_bias)), 6),
+            "selector_top_branch_id": 1,
+            "selector_top_score": round(confidence, 6),
+            "contradiction_type": "agreement_bull" if direction == "BUY" else "agreement_bear" if direction == "SELL" else "balanced",
+            "contradiction_confidence": round(1.0 - disagreement, 6),
+            "cone_treatment": "normal_cone",
+            "hurst_overall": round(hurst_overall, 6),
+            "hurst_positive": round(hurst_positive, 6),
+            "hurst_negative": round(hurst_negative, 6),
+            "hurst_asymmetry": round(hurst_asymmetry, 6),
+            "market_memory_regime": str(mmm_context.get("market_memory_regime", "balanced_range")),
+            "mfg_disagreement": round(_safe_float(mfg_context.get("disagreement"), 0.0), 8),
+            "mfg_consensus_drift": round(_safe_float(mfg_context.get("consensus_drift"), 0.0), 8),
+            "testosterone_index": testosterone_index,
+        },
+        "cone": future_points,
+        "branches": [top_branch, minority_branch],
+        "highlighted_branches": {"top_branch_id": 1, "minority_branch_id": 2},
+        "current_row": {
+            "close": round(current_price, 5),
+            "atr_14": round(atr, 5),
+            "rsi_14": round(rsi, 4),
+            "ema_cross": round(ema_cross, 6),
+            "volume_ratio": round(volume_ratio, 6),
+            "hurst_overall": round(hurst_overall, 6),
+            "hurst_positive": round(hurst_positive, 6),
+            "hurst_negative": round(hurst_negative, 6),
+            "hurst_asymmetry": round(hurst_asymmetry, 6),
+            "wltc_testosterone_retail": round(retail_t, 6),
+            "wltc_testosterone_noise": round(noise_t, 6),
+            "wltc_fundamental_tracking_retail": round(float(wltc_context["retail"]["fundamental_tracking"]), 6),
+            "wltc_fundamental_tracking_institutional": round(float(wltc_context["institutional"]["fundamental_tracking"]), 6),
+            "macro_bias": 0.0,
+            "macro_shock": 0.0,
+            "news_bias": 0.0,
+            "news_intensity": 0.0,
+            "crowd_bias": round(float(np.clip(directional_bias * 0.45, -1.0, 1.0)), 6),
+            "crowd_extreme": round(float(np.clip(retail_t, 0.0, 1.0)), 6),
+        },
+        "technical_analysis": technical_analysis,
+        "feeds": {"news": [], "public_discussions": [], "fear_greed": {}, "macro": {}},
+        "bot_swarm": {
+            "aggregate": {
+                "signal": "bullish" if direction == "BUY" else "bearish" if direction == "SELL" else "neutral",
+                "bullish_probability": round(float(0.5 + (0.5 * directional_bias)), 6),
+                "bearish_probability": round(float(0.5 - (0.5 * directional_bias)), 6),
+                "confidence": round(confidence * 0.88, 6),
+                "disagreement": round(disagreement, 6),
+                "horizon_predictions": [
+                    {
+                        "minutes": index * 5,
+                        "bullish_probability": round(float(0.5 + (0.5 * directional_bias)), 6),
+                        "target_price": point["center_price"],
+                    }
+                    for index, point in enumerate(future_points, start=1)
+                ],
+            },
+            "bots": [],
+            "persona_reactions": {},
+        },
+        "llm_context": {"available": False, "provider": "fast_dashboard_proxy", "content": {}},
+        "wltc": wltc_context,
+        "mmm": mmm_context,
+        "mfg": mfg_context,
+        "recent_bars": recent_bars,
+    }
+
+
 def _read_simulation_history(limit: int = 200) -> list[dict[str, Any]]:
     if not LIVE_SIMULATION_HISTORY_PATH.exists():
         return []

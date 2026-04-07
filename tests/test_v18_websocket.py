@@ -41,6 +41,7 @@ class V18WebSocketTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ws.sent)
         self.assertEqual(ws.sent[-1]["type"], "tick")
         self.assertEqual(ws.sent[-1]["symbol"], "XAUUSD")
+        self.assertIn("paper_summary", ws.sent[-1])
 
     def test_seconds_to_next_15m_is_bounded(self) -> None:
         remaining = seconds_to_next_15m()

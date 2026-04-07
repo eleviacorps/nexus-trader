@@ -60,7 +60,7 @@ class V18KimiPromptTests(unittest.TestCase):
 
     def test_get_nim_model_prefers_requested_model(self) -> None:
         self.assertEqual(get_nim_model("meta/llama-3.1-70b-instruct"), "meta/llama-3.1-70b-instruct")
-        self.assertEqual(get_nim_model(""), "moonshotai/kimi-k2-5")
+        self.assertEqual(get_nim_model(""), "moonshotai/kimi-k2-instruct")
 
 
 if __name__ == "__main__":
