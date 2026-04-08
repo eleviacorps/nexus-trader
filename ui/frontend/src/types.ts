@@ -161,6 +161,8 @@ export interface DashboardPayload {
     preferred_source?: string
     v19_should_execute?: boolean
     v19_execution_reason?: string
+    v20_should_execute?: boolean
+    v20_execution_reason?: string
   }
   v19_runtime?: {
     available?: boolean
@@ -186,6 +188,7 @@ export interface DashboardPayload {
       cabr_raw_score?: number
     }>
   }
+  v20_runtime?: DashboardPayload['v19_runtime']
   feeds?: {
     news?: Array<{ title?: string; source?: string; sentiment?: number }>
     public_discussions?: Array<{ title?: string; source?: string; sentiment?: number }>

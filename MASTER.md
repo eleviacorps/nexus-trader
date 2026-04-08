@@ -5198,3 +5198,271 @@ What is still not true:
 - the local distilled SJD is still too abstention-heavy to be trusted as the sole execution gate
 - the month result is now non-zero and usable, but it is still a small edge rather than a deployment-grade result
 - V19 still has not cleared the larger CABR research target from the original V19 prompt
+
+---
+
+## V20 Enhanced Implementation, Local Host, and Remote Jupyter Launch
+
+This V20 pass was executed against the enhanced V20 prompt and theory set, with the honest constraint that the local machine is an `RTX 4070` box with roughly `12.9 GB` VRAM rather than the prompt's `>= 180 GB` target. Phase 0 was completed: the V20 prompt and core concept documents were read, required files were checked, CUDA / AMP / non-blocking transfer smoke all passed locally, and the missing-file audit found that `outputs/v18/kimi_packet_log.jsonl` was not present. The prompt's VRAM requirement was not met locally, so V20 was implemented in a research-structured local fallback mode and the heavier continuation pipeline was also launched on the remote Jupyter server.
+
+### V20 Files Added / Updated
+
+Added `src/v20` modules:
+
+- `src/v20/__init__.py`
+- `src/v20/wavelet_denoiser.py`
+- `src/v20/macro_features.py`
+- `src/v20/frequency_features.py`
+- `src/v20/regime_detector.py`
+- `src/v20/feature_builder.py`
+- `src/v20/mamba_backbone.py`
+- `src/v20/branch_decoder.py`
+- `src/v20/cabr_v20.py`
+- `src/v20/sjd_v20.py`
+- `src/v20/rl_executor.py`
+- `src/v20/trade_env.py`
+- `src/v20/conformal_cone.py`
+- `src/v20/runtime.py`
+- `src/v20/walkforward_v20.py`
+
+Added / updated scripts:
+
+- `scripts/build_macro_features.py`
+- `scripts/train_regime_hmm.py`
+- `scripts/build_v20_features.py`
+- `scripts/build_branch_pairs_1m.py`
+- `scripts/train_mamba_backbone.py`
+- `scripts/train_branch_decoder.py`
+- `scripts/train_cabr_v20.py`
+- `scripts/generate_sjd_dataset_v20.py`
+- `scripts/train_sjd_v20.py`
+- `scripts/train_rl_executor.py`
+- `scripts/run_v20_backtrader_month.py`
+- `scripts/run_walkforward_v20.py`
+- `scripts/build_v20_summary.py`
+- `scripts/remote_v20_train.py`
+- `scripts/launch_remote_v20_jupyter.py`
+- `scripts/check_remote_v20_status_jupyter.py`
+
+Other updated files:
+
+- `config/project_config.py`
+- `src/service/app_v20.py`
+- `ui/frontend/src/App.tsx`
+- `ui/frontend/src/types.ts`
+- new V20 tests:
+  - `tests/test_v20_conformal.py`
+  - `tests/test_v20_runtime.py`
+  - `tests/test_v20_sjd.py`
+
+### V20 Artifacts Created
+
+Local V20 artifacts now present:
+
+- `data/features/macro_features.parquet`
+- `data/features/regime_labels.parquet`
+- `data/features/v20_ohlcv_denoised.parquet`
+- `data/features/v20_features.parquet`
+- `data/features/v20_features_metadata.json`
+- `outputs/v20/branch_pairs_1m.parquet`
+- `outputs/v20/sjd_dataset_v20.parquet`
+- `outputs/v20/sjd_dataset_v20_report.json`
+- `outputs/v20/sjd_v20_training_report.json`
+- `outputs/v20/cabr_v20_training_report.json`
+- `outputs/v20/rl_executor_training_report.json`
+- `outputs/v20/backtest_month_2023_12_v20.json`
+- `outputs/v20/walkforward_results.json`
+- `outputs/v20/walkforward_summary.md`
+- `outputs/evaluation/v20_summary.json`
+- `outputs/evaluation/v20_summary.md`
+
+V20 checkpoints now present:
+
+- `checkpoints/v20/hmm_6state.pkl`
+- `checkpoints/v20/conformal_cone.pkl`
+- `checkpoints/v20/mamba_best.pt`
+- `checkpoints/v20/branch_decoder_best.pt`
+- `checkpoints/v20/cabr_v20_final.pt`
+- `checkpoints/v20/sjd_v20_best.pt`
+- `checkpoints/v20/rl_hyper_agent.pt`
+- `checkpoints/v20/rl_sub_agents/`
+
+### Local V20 Build Notes
+
+The local V20 feature build completed enough to save the required artifacts, but the long-running builder process had to be manually stopped after the parquet and metadata were already written. The resulting local V20 feature frame contains:
+
+- `6766` rows
+- `214` columns
+- time span:
+  - `2023-10-01 18:00:00+00:00`
+  - `2024-01-14 23:45:00+00:00`
+
+This means the local data available to the V20 feature stack was much narrower than the prompt's intended multi-year training horizon. That directly limited the local SJD and RL passes.
+
+### V20 Local Training Results
+
+CABR fallback training:
+
+- dataset rows: `56000`
+- feature count: `7`
+- reported pairwise accuracy: `0.999982`
+- target `>= 0.75`: technically met
+
+Honest caveat:
+
+- this CABR number came from the compressed local fallback pair set, not from the prompt-target `1,000,000` real branch pairs
+- it should not be interpreted as a like-for-like research win against the real V20 target
+
+SJD V20 fallback training:
+
+- dataset rows: `50000`
+- source unique rows: `6766`
+- train / validation rows: `45000 / 5000`
+- feature count: `199`
+- macro feature count: `8`
+- best validation stance accuracy: `0.6652`
+- target `> 0.82`: not met
+
+RL fallback pass:
+
+- trained regime profiles: `5`
+- saved sub-agent profiles into `checkpoints/v20/rl_sub_agents`
+- saved hyper-agent checkpoint into `checkpoints/v20/rl_hyper_agent.pt`
+
+This RL phase is an offline regime-profile fallback, not the full MacroHFT PPO training target from the prompt.
+
+### Native V20 Month Backtest
+
+Verified command:
+
+- `C:\Users\rfsga\miniconda3\python.exe scripts\run_v20_backtrader_month.py --month 2023-12 --mode frequency`
+
+Verified artifact:
+
+- `outputs/v20/backtest_month_2023_12_v20.json`
+
+Verified December 2023 result:
+
+- final capital: `$974.824` from `$1000.00`
+- net profit: `-$25.176`
+- return: `-2.5176%`
+- trades executed: `25`
+- win rate: `0.400000`
+- profit factor: `0.799554`
+- max drawdown: `5.756527%`
+- net pips: `-31.47`
+- average lot: `0.08`
+
+The local V20 month runner is therefore real and non-zero, but it is currently losing money and does not meet the prompt's research target.
+
+### V20 Walk-Forward Proxy
+
+Verified command:
+
+- `C:\Users\rfsga\miniconda3\python.exe scripts\run_walkforward_v20.py --mode frequency`
+
+Verified artifact:
+
+- `outputs/v20/walkforward_results.json`
+
+This local V20 walk-forward is a December-window proxy across `2019-2024`, not the full expanding-window study requested by the prompt.
+
+Proxy summary:
+
+- completed windows: `6`
+- average return: `-1.4044%`
+- average trades: `11.833333`
+- average win rate: `0.302778`
+- deflated Sharpe proxy: `-1.911519`
+
+This is a clear local research miss against the full V20 target.
+
+### V20 Hosting
+
+V20 is now hosted locally at:
+
+- `http://127.0.0.1:8020/ui`
+
+Verified endpoints:
+
+- `GET /health`
+- `GET /ui`
+- `GET /api/dashboard/live`
+- `GET /api/paper/state`
+- `GET /api/llm/kimi-live?force=true`
+- `GET /ws/live`
+
+Verified live status:
+
+- `/health` returned `200`
+- `/ui` returned `200`
+- `/api/dashboard/live` returned `200`
+- `/api/paper/state` returned `200`
+- `/api/llm/kimi-live?force=true` returned `200`
+- live WebSocket payload received with symbol `XAUUSD`
+
+The V20 host is using the current production UI bundle and serves the V20 runtime through `src/service/app_v20.py`.
+
+### Remote Jupyter Launch
+
+Because the local machine does not satisfy the prompt's intended GPU footprint, a heavier V20 continuation pipeline was launched on the remote Jupyter machine using the existing repo-side Jupyter executor.
+
+Remote V20 pipeline:
+
+- Jupyter base URL:
+  - `http://129.212.181.117`
+- remote workspace:
+  - `/home/rocm-user/jupyter/nexus`
+- launched script:
+  - `python scripts/remote_v20_train.py`
+- remote log:
+  - `/home/rocm-user/jupyter/nexus/outputs/logs/remote_v20_pipeline.log`
+- remote PID file:
+  - `/home/rocm-user/jupyter/nexus/outputs/logs/remote_v20_pipeline.pid`
+
+This remote pipeline was started after the V20 source tree and scripts were uploaded into the Jupyter workspace.
+
+Post-interruption continuation note:
+
+- the local V20 host had to be restarted after the power interruption
+- the remote V20 pipeline was retried multiple times, including a wider dependency sync for `src/v12`, `src/v16`, and `src/v17`
+- the remote summary still showed workspace / import-sync failures, so no remote V20 metrics were promoted into the final V20 result set in this pass
+- the latest remote relaunch wrote the same `remote_v20_train_summary.json` failure pattern rather than a clean research completion
+
+### Verification Completed
+
+Local verification completed:
+
+- `C:\Users\rfsga\miniconda3\python.exe -m py_compile src\service\app_v20.py src\v20\branch_decoder.py src\v20\runtime.py scripts\build_v20_summary.py`
+- `npm run build` in `ui/frontend`
+- `C:\Users\rfsga\miniconda3\python.exe -m pytest tests\test_v20_conformal.py tests\test_v20_runtime.py tests\test_v20_sjd.py -v`
+
+Result:
+
+- V20 pytest: `6 passed`
+
+### Honest V20 Read
+
+What is now genuinely true:
+
+- V20 is no longer just a prompt; the repo now contains the full V20 module tree, dedicated V20 host app, month runner, walk-forward proxy, conformal cone, HMM regime detector, macro features, frequency features, RL fallback executor, SJD fallback trainer, CABR fallback trainer, branch decoder, and BiMamba fallback backbone
+- V20 is hosted locally on `8020`
+- the native December 2023 V20 backtest is real
+- the repo now contains a real remote Jupyter continuation path for the heavier follow-up work
+
+What is not yet true:
+
+- the local box did not meet the V20 prompt's hardware target
+- the local feature history was only `6766` rows, far below the intended multi-year scale
+- the local SJD target `> 0.82` was not met; actual best validation stance accuracy was `0.6652`
+- the local month backtest is negative
+- the local walk-forward proxy is negative
+- the local walk-forward is not the full prompt-target expanding-window evaluation
+- the local CABR accuracy number should not be treated as a real prompt-target win because it came from the compressed fallback pair dataset
+- the remote Jupyter retries did not yet produce a clean V20 remote research run because the remote workspace is still missing enough of the legacy repo state to satisfy all V20 dependencies
+
+Bottom line:
+
+- V20 is a real implementation, local host, and research scaffold
+- V20 is not yet the finished research win described by the enhanced prompt
+- the repo now has both the local V20 runtime and the remote Jupyter launch path needed to continue the heavier training work honestly

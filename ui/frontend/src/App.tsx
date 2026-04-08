@@ -311,6 +311,7 @@ function App() {
           local_judge?: DashboardPayload['local_judge']
           judge_comparison?: DashboardPayload['judge_comparison']
           v19_runtime?: DashboardPayload['v19_runtime']
+          v20_runtime?: DashboardPayload['v20_runtime']
         }>(
           `/api/llm/kimi-live?${kimiQuery.toString()}`,
         )
@@ -320,6 +321,7 @@ function App() {
           local_judge: kimiResponse.local_judge ?? deskPayload.local_judge,
           judge_comparison: kimiResponse.judge_comparison ?? deskPayload.judge_comparison,
           v19_runtime: kimiResponse.v19_runtime ?? deskPayload.v19_runtime,
+          v20_runtime: kimiResponse.v20_runtime ?? deskPayload.v20_runtime,
         }
       }
 
@@ -413,7 +415,7 @@ function App() {
   const judge = dashboard?.kimi_judge?.content
   const localJudge = dashboard?.local_judge?.content
   const judgeComparison = dashboard?.judge_comparison
-  const v19Runtime = dashboard?.v19_runtime
+  const runtimeState = dashboard?.v20_runtime ?? dashboard?.v19_runtime
   const latestPacket = packetLog.entries[packetLog.entries.length - 1]
   const currentSession = sessionForDate(clock)
 
@@ -490,7 +492,7 @@ function App() {
 
   const applyJudgeToExecution = (
     candidate: typeof judge | typeof localJudge,
-    sourceLabel: 'Kimi' | 'Local V19',
+    sourceLabel: 'Kimi' | 'Local V20',
   ) => {
     if (!candidate) return
     const stance = String(candidate.stance ?? '').toUpperCase()
@@ -514,7 +516,7 @@ function App() {
   }
 
   const applyKimiToExecution = () => applyJudgeToExecution(judge, 'Kimi')
-  const applyLocalV19ToExecution = () => applyJudgeToExecution(localJudge, 'Local V19')
+  const applyLocalV20ToExecution = () => applyJudgeToExecution(localJudge, 'Local V20')
 
   const openPaperTrade = async () => {
     try {
@@ -766,8 +768,8 @@ function App() {
                 <button type="button" className="terminal-button terminal-button-green" onClick={applyKimiToExecution}>
                   Apply Kimi Setup
                 </button>
-                <button type="button" className="terminal-button terminal-button-blue" onClick={applyLocalV19ToExecution}>
-                  Apply Local V19
+                <button type="button" className="terminal-button terminal-button-blue" onClick={applyLocalV20ToExecution}>
+                  Apply Local V20
                 </button>
                 <button type="button" className="terminal-button terminal-button-blue" onClick={() => void openPaperTrade()}>
                   Open Paper Trade
@@ -876,7 +878,7 @@ function App() {
 
           <GlassCard
             title="Neural Briefing"
-            subtitle="Kimi, the local V19 student, and the live comparison layer in one premium local intelligence pane."
+            subtitle="Kimi, the local V20 judge, and the live comparison layer in one premium local intelligence pane."
             icon={<Newspaper size={20} />}
             className={clsx(focusedPanel === 'briefing' && 'panel-focused', 'xl:flex xl:h-[420px] xl:flex-col')}
             contentClassName="xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1"
@@ -900,15 +902,15 @@ function App() {
               </div>
               <div className="grid gap-3">
                 <div className="summary-card">
-                  <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Local V19 Student</div>
+                  <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Local V20 Judge</div>
                   <div className={`mt-2 text-lg font-semibold ${toneClassFromValue(localJudge?.final_call)}`}>
                     {localJudge?.final_call ?? 'SKIP'}
                   </div>
                   <p className="text-sm text-white/72">
-                    {localJudge?.final_summary ?? 'Waiting for the local V19 student.'}
+                    {localJudge?.final_summary ?? 'Waiting for the local V20 judge.'}
                   </p>
                   <p className="text-xs leading-6 text-white/48">
-                    {localJudge?.reasoning ?? 'Local V19 reasoning is not available yet.'}
+                    {localJudge?.reasoning ?? 'Local V20 reasoning is not available yet.'}
                   </p>
                 </div>
                 <div className="summary-card">
@@ -917,22 +919,22 @@ function App() {
                     {judgeComparison?.agreement ? 'ALIGNED' : 'SPLIT'}
                   </div>
                   <p className="text-sm text-white/72">
-                    {judgeComparison?.summary ?? 'Waiting for both Kimi and the local V19 student.'}
+                    {judgeComparison?.summary ?? 'Waiting for both Kimi and the local V20 judge.'}
                   </p>
                   <p className="text-xs leading-6 text-white/48">
                     {judgeComparison?.reasoning ?? 'The desk will show whether the two judges agree on this 15-minute bar.'}
                   </p>
                 </div>
                 <div className="summary-card">
-                  <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">V19 Runtime</div>
-                  <div className={`mt-2 text-lg font-semibold ${toneClassFromValue(v19Runtime?.decision_direction)}`}>
-                    {v19Runtime?.lepl_action ?? 'NOTHING'}
+                  <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">V20 Runtime</div>
+                  <div className={`mt-2 text-lg font-semibold ${toneClassFromValue(runtimeState?.decision_direction)}`}>
+                    {runtimeState?.lepl_action ?? 'NOTHING'}
                   </div>
                   <p className="text-sm text-white/72">
-                    Branch {v19Runtime?.selected_branch_label ?? '-'} â€¢ CABR {formatPercent(v19Runtime?.cabr_score)} â€¢ CPM {formatPercent(v19Runtime?.cpm_score)}
+                    Branch {runtimeState?.selected_branch_label ?? '-'} • CABR {formatPercent(runtimeState?.cabr_score)} • CPM {formatPercent(runtimeState?.cpm_score)}
                   </p>
                   <p className="text-xs leading-6 text-white/48">
-                    {v19Runtime?.execution_reason ?? 'V19 runtime execution context is not available yet.'}
+                    {runtimeState?.execution_reason ?? 'V20 runtime execution context is not available yet.'}
                   </p>
                 </div>
               </div>
