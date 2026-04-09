@@ -48,8 +48,12 @@ export function BranchExplorer({
   const width = 760
   const height = 260
   const merged = [...consensusPath, ...minorityPath, ...outerUpper, ...outerLower].filter(Number.isFinite)
-  const min = Math.min(...merged, 0)
-  const max = Math.max(...merged, 1)
+  const domainMin = merged.length ? Math.min(...merged) : 0
+  const domainMax = merged.length ? Math.max(...merged) : 1
+  const span = Math.max(domainMax - domainMin, 1)
+  const padding = span * 0.14
+  const min = domainMin - padding
+  const max = domainMax + padding
   const upperPoints = buildPoints(outerUpper, width, height, min, max)
   const lowerPoints = buildPoints(outerLower, width, height, min, max)
   const consensusPoints = buildPoints(consensusPath, width, height, min, max)
@@ -71,7 +75,7 @@ export function BranchExplorer({
     <motion.section
       whileHover={{ y: -3 }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className="glass-card branch-card"
+      className="glass-card branch-card xl:flex xl:h-[520px] xl:flex-col"
     >
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -95,9 +99,9 @@ export function BranchExplorer({
         </div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_320px]">
-        <div className="rounded-[26px] border border-white/8 bg-black/30 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-          <svg viewBox={`0 0 ${width} ${height}`} className="h-[260px] w-full">
+      <div className="grid gap-6 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1.3fr)_320px]">
+        <div className="rounded-[26px] border border-white/8 bg-black/30 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] xl:min-h-0">
+          <svg viewBox={`0 0 ${width} ${height}`} className="h-[260px] w-full xl:h-full">
             <defs>
               <linearGradient id="coneFill" x1="0" x2="0" y1="0" y2="1">
                 <stop offset="0%" stopColor="rgba(91,167,255,0.24)" />
@@ -129,7 +133,7 @@ export function BranchExplorer({
           </svg>
         </div>
 
-        <div className="grid gap-4">
+        <div className="grid gap-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
           <div className="rounded-[26px] border border-white/8 bg-white/[0.04] p-4">
             <div className="mb-3 flex items-center gap-3">
               <Target size={16} className="text-[#00E38C]" />
