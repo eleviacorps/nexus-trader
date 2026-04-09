@@ -200,6 +200,28 @@ export interface DashboardPayload {
     consensus_drift?: number
   }
   paper_trading?: PaperState
+  broker?: {
+    installed?: boolean
+    connected?: boolean
+    login?: number | null
+    server?: string
+    path?: string
+    symbol_prefix?: string
+    symbol_suffix?: string
+    symbol_overrides?: Record<string, string>
+    autotrade_enabled?: boolean
+    last_error?: string
+    last_action?: string
+    last_order?: Record<string, unknown> | null
+  }
+  auto_trade?: {
+    enabled?: boolean
+    broker_connected?: boolean
+    symbol?: string
+    last_action?: string
+    last_order?: Record<string, unknown> | null
+    last_error?: string
+  }
   sqt?: {
     label?: string
     rolling_accuracy?: number

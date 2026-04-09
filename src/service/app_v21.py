@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -9,6 +10,7 @@ from typing import Any, Mapping
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.service.app import (
     FRONTEND_DIST_PATH,
@@ -21,6 +23,7 @@ from src.service.app import (
     fallback_kimi_judge,
     read_system_telemetry,
 )
+from src.service.mt5_bridge import MT5Bridge
 from src.service.live_data import build_fast_dashboard_payload, build_realtime_chart_payload, fetch_live_quote
 from src.service.llm_sidecar import is_nvidia_nim_provider, read_packet_log, request_kimi_judge
 from src.ui.web import render_web_app_html
@@ -89,6 +92,80 @@ def _build_v21_forecast(payload: Mapping[str, Any], runtime: Mapping[str, Any]) 
     return {"points": points}
 
 
+class BrokerConnectRequest(BaseModel):
+    login: int
+    password: str
+    server: str
+    path: str = ""
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    symbol_overrides: dict[str, str] = {}
+
+
+class BrokerOrderRequest(BaseModel):
+    symbol: str = "XAUUSD"
+    direction: str
+    volume: float
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    comment: str = "NexusTrader Manual"
+
+
+class AutoTradeToggleRequest(BaseModel):
+    enabled: bool
+    symbol: str = "XAUUSD"
+
+
+def _quick_runtime_from_payload(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+    simulation = dict(payload.get("simulation", {}) if isinstance(payload.get("simulation"), Mapping) else {})
+    technical = dict(payload.get("technical_analysis", {}) if isinstance(payload.get("technical_analysis"), Mapping) else {})
+    market = dict(payload.get("market", {}) if isinstance(payload.get("market"), Mapping) else {})
+    direction = str(simulation.get("direction", "HOLD")).upper()
+    confidence = str(simulation.get("confidence_tier", "low")).lower()
+    should_execute = direction in {"BUY", "SELL"} and confidence in {"moderate", "high", "very_high"}
+    cone_width = float(simulation.get("cone_width_pips", 0.0) or 0.0)
+    return {
+        "available": True,
+        "runtime_version": "v21_local_fast",
+        "selected_branch_id": 1,
+        "selected_branch_label": "fast_dashboard_proxy",
+        "decision_direction": direction if should_execute else "HOLD",
+        "raw_stance": direction,
+        "cabr_score": float(simulation.get("cabr_score", 0.0) or 0.0),
+        "cabr_raw_score": float(simulation.get("cabr_score", 0.0) or 0.0),
+        "cpm_score": float(simulation.get("cpm_score", 0.0) or 0.0),
+        "confidence_tier": confidence,
+        "sqt_label": str(simulation.get("sqt_label", "NEUTRAL")),
+        "cone_width_pips": cone_width,
+        "lepl_action": direction,
+        "lepl_probabilities": {"execute": 0.55 if should_execute else 0.35, "hold": 0.45 if should_execute else 0.65},
+        "lepl_features": {
+            "kelly_fraction": 0.02 if should_execute else 0.0,
+            "suggested_lot": float(simulation.get("suggested_lot", 0.05) or 0.05),
+            "conformal_confidence": float(simulation.get("overall_confidence", 0.0) or 0.0),
+            "dangerous_branch_count": 0,
+            "paper_equity": 1000.0,
+        },
+        "should_execute": should_execute,
+        "execution_reason": "Fast cached desk runtime is active while the full local V21 stack warms in the background.",
+        "branch_scores": [],
+        "consensus_path": list(simulation.get("consensus_path", []) or []),
+        "minority_path": list(simulation.get("minority_path", []) or []),
+        "cone_upper": list(simulation.get("cone_outer_upper", []) or []),
+        "cone_lower": list(simulation.get("cone_outer_lower", []) or []),
+        "regime_probs": [],
+        "v21_mode": "research" if str(mode).lower() == "frequency" else "production",
+        "v21_dir_15m_prob": 0.5,
+        "v21_bimamba_prob": 0.5,
+        "v21_ensemble_prob": 0.5,
+        "v21_disagree_prob": 0.0,
+        "v21_meta_label_prob": float(simulation.get("overall_confidence", 0.0) or 0.0),
+        "v21_dangerous_branch_count": 0,
+        "v21_top_vsn_features": [],
+        "v21_regime_label": str(simulation.get("detected_regime", technical.get("structure", "unknown"))),
+    }
+
+
 def create_app_v21() -> FastAPI:
     app = FastAPI(title="Nexus Trader V21 API", version="0.21.0")
     frontend_served = False
@@ -99,11 +176,17 @@ def create_app_v21() -> FastAPI:
     paper_trader = PaperTradingEngine(starting_balance=1000.0)
     feed_manager = LiveFeedManager()
     feed_manager.set_paper_engine(paper_trader)
+    broker_bridge = MT5Bridge()
     kimi_cache: dict[str, dict[str, Any]] = {}
+    runtime_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    runtime_inflight: set[str] = set()
 
     def _cache_key(symbol: str, mode: str, provider: str, model: str | None) -> str:
         bucket = str(int(time.time() // 900))
         return "|".join([str(symbol).upper(), str(mode).lower(), str(provider).lower(), (model or "").strip(), bucket])
+
+    def _runtime_key(symbol: str, mode: str) -> str:
+        return f"{str(symbol).upper()}|{str(mode).lower()}"
 
     def _paper_state(symbol: str | None = None) -> dict[str, Any]:
         open_positions = paper_trader.state().get("open_positions", [])
@@ -131,11 +214,58 @@ def create_app_v21() -> FastAPI:
         decorated["model"] = "v21_xlstm_bimamba"
         return decorated
 
+    def _autotrade_state(symbol: str = "XAUUSD") -> dict[str, Any]:
+        broker = broker_bridge.status()
+        return {
+            "enabled": bool(broker.get("autotrade_enabled", False)),
+            "broker_connected": bool(broker.get("connected", False)),
+            "symbol": str(symbol).upper(),
+            "last_action": broker.get("last_action", "idle"),
+            "last_order": broker.get("last_order"),
+            "last_error": broker.get("last_error", ""),
+        }
+
+    def _telemetry_with_broker() -> dict[str, Any]:
+        telemetry = read_system_telemetry()
+        broker = broker_bridge.status()
+        if broker.get("connected"):
+            auto = "Auto ON" if broker.get("autotrade_enabled") else "Auto OFF"
+            server = broker.get("server") or "MT5"
+            telemetry["broker_connection"] = f"MT5 {server} • {auto}"
+        elif broker.get("installed"):
+            telemetry["broker_connection"] = "MT5 ready • disconnected"
+        else:
+            telemetry["broker_connection"] = "Paper broker • MT5 package missing"
+        return telemetry
+
+    def _resolve_runtime(payload: dict[str, Any], symbol: str, mode: str) -> dict[str, Any]:
+        now = time.time()
+        key = _runtime_key(symbol, mode)
+        cached = runtime_cache.get(key)
+        if cached is not None and now - cached[0] <= 30:
+            return copy.deepcopy(cached[1])
+
+        def _worker(snapshot: dict[str, Any], snapshot_key: str) -> None:
+            try:
+                runtime = build_v21_runtime_state(snapshot, mode=mode)
+                if runtime.get("available", False):
+                    runtime_cache[snapshot_key] = (time.time(), runtime)
+            except Exception:
+                pass
+            finally:
+                runtime_inflight.discard(snapshot_key)
+
+        if key not in runtime_inflight:
+            runtime_inflight.add(key)
+            threading.Thread(target=_worker, args=(copy.deepcopy(payload), key), daemon=True).start()
+
+        return _quick_runtime_from_payload(payload, mode=mode)
+
     def _dashboard_payload(symbol: str, mode: str, llm_provider: str, llm_model: str | None, *, with_kimi: bool = False, force_kimi: bool = False) -> dict[str, Any]:
         payload = build_fast_dashboard_payload(symbol)
         payload["paper_trading"] = _paper_state(symbol)
         payload["realtime_chart"] = build_realtime_chart_payload(symbol)
-        runtime = build_v21_runtime_state(payload, mode=mode)
+        runtime = _resolve_runtime(payload, symbol, mode)
         local_judge = _decorate_local_v21(payload, build_v21_local_judge(payload, runtime))
         simulation = dict(payload.get("simulation", {}))
         simulation.update(
@@ -164,6 +294,8 @@ def create_app_v21() -> FastAPI:
         payload["v21_runtime"] = runtime
         payload["v20_runtime"] = runtime
         payload["v19_runtime"] = runtime
+        payload["broker"] = broker_bridge.status()
+        payload["auto_trade"] = _autotrade_state(symbol)
         payload["final_forecast"] = _build_v21_forecast(payload, runtime)
         payload["stack_mode"] = "v21_local_dual_judge"
         cache_key = _cache_key(symbol, mode, llm_provider, llm_model)
@@ -207,7 +339,7 @@ def create_app_v21() -> FastAPI:
 
     @app.get("/api/system/telemetry")
     def system_telemetry():
-        return read_system_telemetry()
+        return _telemetry_with_broker()
 
     @app.get("/api/chart/realtime")
     def realtime_chart(symbol: str = "XAUUSD", bars: int = 240):
@@ -252,6 +384,52 @@ def create_app_v21() -> FastAPI:
     @app.get("/api/paper/state")
     def paper_state(symbol: str = "XAUUSD"):
         return _paper_state(symbol)
+
+    @app.get("/api/broker/status")
+    def broker_status():
+        return broker_bridge.status()
+
+    @app.post("/api/broker/connect")
+    def broker_connect(request: BrokerConnectRequest):
+        status = broker_bridge.connect(
+            login=request.login,
+            password=request.password,
+            server=request.server,
+            path=request.path,
+            symbol_prefix=request.symbol_prefix,
+            symbol_suffix=request.symbol_suffix,
+            symbol_overrides=request.symbol_overrides,
+        )
+        if not status.get("ok", False):
+            raise HTTPException(status_code=400, detail=str(status.get("detail", "Broker connect failed.")))
+        return status
+
+    @app.post("/api/broker/disconnect")
+    def broker_disconnect():
+        return broker_bridge.disconnect()
+
+    @app.post("/api/broker/order")
+    def broker_order(request: BrokerOrderRequest):
+        if not broker_bridge.can_trade():
+            raise HTTPException(status_code=400, detail="MT5 is not connected.")
+        try:
+            order = broker_bridge.place_market_order(
+                symbol=request.symbol,
+                direction=request.direction,
+                volume=request.volume,
+                stop_loss=request.stop_loss,
+                take_profit=request.take_profit,
+                comment=request.comment,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "order": order, "broker": broker_bridge.status()}
+
+    @app.post("/api/autotrade/toggle")
+    def autotrade_toggle(request: AutoTradeToggleRequest):
+        if bool(request.enabled) and not broker_bridge.can_trade():
+            raise HTTPException(status_code=400, detail="Connect MT5 before enabling auto trader.")
+        return {"ok": True, "auto_trade": broker_bridge.set_autotrade(bool(request.enabled))}
 
     @app.post("/api/paper/open")
     def paper_open(request: PaperOpenRequest):
@@ -318,12 +496,77 @@ def create_app_v21() -> FastAPI:
         if getattr(app.state, "v21_feed_task", None) is None:
             app.state.v21_feed_task = asyncio.create_task(feed_manager.heartbeat_loop(price_fn=_live_price, sqt_fn=lambda: {"label": "V21"}))
 
+        async def _autotrade_loop() -> None:
+            while True:
+                try:
+                    broker = broker_bridge.status()
+                    if broker.get("autotrade_enabled") and broker.get("connected"):
+                        symbol = "XAUUSD"
+                        payload = build_fast_dashboard_payload(symbol)
+                        payload["paper_trading"] = _paper_state(symbol)
+                        payload["realtime_chart"] = build_realtime_chart_payload(symbol)
+                        runtime = _resolve_runtime(payload, symbol, "frequency")
+                        judge = build_v21_local_judge(payload, runtime)
+                        content = dict(judge.get("content", {}))
+                        stance = str(content.get("stance", runtime.get("raw_stance", "HOLD"))).upper()
+                        bucket = int(time.time() // 900)
+                        last_order = broker.get("last_order") or {}
+                        last_bucket = int(((broker_bridge._read_state().get("last_bucket_by_symbol", {}) or {}).get(symbol, -1)))
+                        if (
+                            runtime.get("should_execute", False)
+                            and stance in {"BUY", "SELL"}
+                            and not broker_bridge.has_open_position(symbol)
+                            and bucket != last_bucket
+                        ):
+                            volume = float((runtime.get("lepl_features") or {}).get("suggested_lot", 0.01) or 0.01)
+                            order = broker_bridge.place_market_order(
+                                symbol=symbol,
+                                direction=stance,
+                                volume=max(round(volume, 2), 0.01),
+                                stop_loss=content.get("stop_loss"),
+                                take_profit=content.get("take_profit"),
+                                comment="NexusTrader V21 Auto",
+                            )
+                            state = broker_bridge._read_state()
+                            last_by_symbol = dict(state.get("last_bucket_by_symbol", {}) or {})
+                            last_by_symbol[symbol] = bucket
+                            broker_bridge._patch_state(last_bucket_by_symbol=last_by_symbol, last_order=order, last_action="autotrade_order_sent", last_error="")
+                        elif runtime.get("should_execute", False) and stance in {"BUY", "SELL"} and broker_bridge.has_open_position(symbol):
+                            broker_bridge._patch_state(last_action="autotrade_skipped_existing_position")
+                        elif not runtime.get("should_execute", False):
+                            broker_bridge._patch_state(last_action="autotrade_waiting")
+                        else:
+                            broker_bridge._patch_state(last_action=f"autotrade_no_action_{stance.lower()}")
+                    await asyncio.sleep(20)
+                except Exception as exc:
+                    broker_bridge._patch_state(last_error=str(exc), last_action="autotrade_error")
+                    await asyncio.sleep(20)
+
+        if getattr(app.state, "v21_autotrade_task", None) is None:
+            app.state.v21_autotrade_task = asyncio.create_task(_autotrade_loop())
+
+        # Warm the default desk payload once so the first browser load does not sit on the initializing banner.
+        def _warm_default() -> None:
+            try:
+                payload = build_fast_dashboard_payload("XAUUSD")
+                payload["paper_trading"] = _paper_state("XAUUSD")
+                payload["realtime_chart"] = build_realtime_chart_payload("XAUUSD")
+                runtime_cache[_runtime_key("XAUUSD", "frequency")] = (time.time(), build_v21_runtime_state(payload, mode="frequency"))
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm_default, daemon=True).start()
+
     @app.on_event("shutdown")
     async def shutdown_tasks():
         task = getattr(app.state, "v21_feed_task", None)
         if task is not None:
             task.cancel()
             app.state.v21_feed_task = None
+        autotrade_task = getattr(app.state, "v21_autotrade_task", None)
+        if autotrade_task is not None:
+            autotrade_task.cancel()
+            app.state.v21_autotrade_task = None
 
     if not frontend_served:
         @app.get("/ui", response_class=HTMLResponse)

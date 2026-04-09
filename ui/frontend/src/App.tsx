@@ -267,6 +267,12 @@ function App() {
   const [positionSize, setPositionSize] = useState(5)
   const [confidenceThreshold, setConfidenceThreshold] = useState(58)
   const [tradeFrequency, setTradeFrequency] = useState(15)
+  const [brokerLogin, setBrokerLogin] = useState('')
+  const [brokerPassword, setBrokerPassword] = useState('')
+  const [brokerServer, setBrokerServer] = useState('')
+  const [brokerPath, setBrokerPath] = useState('')
+  const [brokerPrefix, setBrokerPrefix] = useState('')
+  const [brokerSuffix, setBrokerSuffix] = useState('')
   const [liveState, setLiveState] = useState({
     connected: false,
     price: null as number | null,
@@ -302,11 +308,29 @@ function App() {
         jsonFetch<SystemTelemetry>('/api/system/telemetry').catch(() => EMPTY_TELEMETRY),
       ])
 
-      let nextPayload = deskPayload
+      const latency = Math.round(performance.now() - startedAt)
+      startTransition(() => {
+        setDashboard(deskPayload)
+        setPaperState(paperPayload)
+        setPacketLog(logPayload)
+        setTelemetry(telemetryPayload)
+        setApiLatencyMs(latency)
+        setBanner({
+          tone: deskPayload.kimi_judge?.available ? 'green' : 'amber',
+          text: deskPayload.kimi_judge?.available
+            ? `Desk refreshed on ${deskPayload.kimi_judge.model ?? model}.`
+            : deskPayload.kimi_judge?.error ||
+              deskPayload.kimi_judge?.reason ||
+              'Simulator updated with cached Kimi context.',
+        })
+      })
+
+      setLoading(false)
+
       if (forceKimi || !deskPayload.kimi_judge?.available) {
         const kimiQuery = new URLSearchParams(baseQuery)
         if (forceKimi) kimiQuery.set('force', '1')
-        const kimiResponse = await jsonFetch<{
+        void jsonFetch<{
           kimi_judge: JudgeEnvelope
           local_judge?: DashboardPayload['local_judge']
           judge_comparison?: DashboardPayload['judge_comparison']
@@ -315,32 +339,34 @@ function App() {
         }>(
           `/api/llm/kimi-live?${kimiQuery.toString()}`,
         )
-        nextPayload = {
-          ...deskPayload,
-          kimi_judge: kimiResponse.kimi_judge,
-          local_judge: kimiResponse.local_judge ?? deskPayload.local_judge,
-          judge_comparison: kimiResponse.judge_comparison ?? deskPayload.judge_comparison,
-          v19_runtime: kimiResponse.v19_runtime ?? deskPayload.v19_runtime,
-          v20_runtime: kimiResponse.v20_runtime ?? deskPayload.v20_runtime,
-        }
+          .then((kimiResponse) => {
+            startTransition(() => {
+              setDashboard((current) => {
+                const base = current ?? deskPayload
+                return {
+                  ...base,
+                  kimi_judge: kimiResponse.kimi_judge,
+                  local_judge: kimiResponse.local_judge ?? base.local_judge,
+                  judge_comparison: kimiResponse.judge_comparison ?? base.judge_comparison,
+                  v19_runtime: kimiResponse.v19_runtime ?? base.v19_runtime,
+                  v20_runtime: kimiResponse.v20_runtime ?? base.v20_runtime,
+                }
+              })
+              setBanner({
+                tone: kimiResponse.kimi_judge?.available ? 'green' : 'amber',
+                text: kimiResponse.kimi_judge?.available
+                  ? `Desk refreshed on ${kimiResponse.kimi_judge.model ?? model}.`
+                  : kimiResponse.kimi_judge?.error ||
+                    kimiResponse.kimi_judge?.reason ||
+                    'Simulator updated with cached Kimi context.',
+              })
+            })
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : 'Kimi refresh error'
+            setBanner({ tone: 'amber', text: message })
+          })
       }
-
-      const latency = Math.round(performance.now() - startedAt)
-      startTransition(() => {
-        setDashboard(nextPayload)
-        setPaperState(paperPayload)
-        setPacketLog(logPayload)
-        setTelemetry(telemetryPayload)
-        setApiLatencyMs(latency)
-        setBanner({
-          tone: nextPayload.kimi_judge?.available ? 'green' : 'amber',
-          text: nextPayload.kimi_judge?.available
-            ? `Desk refreshed on ${nextPayload.kimi_judge.model ?? model}.`
-            : nextPayload.kimi_judge?.error ||
-              nextPayload.kimi_judge?.reason ||
-              'Simulator updated with cached Kimi context.',
-        })
-      })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown refresh error'
       setBanner({ tone: 'red', text: message })
@@ -418,6 +444,8 @@ function App() {
   const runtimeState = dashboard?.v20_runtime ?? dashboard?.v19_runtime
   const latestPacket = packetLog.entries[packetLog.entries.length - 1]
   const currentSession = sessionForDate(clock)
+  const brokerState = dashboard?.broker
+  const autoTrade = dashboard?.auto_trade
 
   const confidenceLabel =
     judge?.confidence ??
@@ -458,6 +486,26 @@ function App() {
       case 'risk-settings':
       case 'broker-link':
         setFocusedPanel('execution')
+        return
+      case 'auto-trader':
+        try {
+          const nextEnabled = !Boolean(autoTrade?.enabled)
+          await jsonFetch('/api/autotrade/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: nextEnabled, symbol }),
+          })
+          setBanner({
+            tone: nextEnabled ? 'green' : 'amber',
+            text: nextEnabled ? 'Auto trader armed for MT5 execution.' : 'Auto trader disabled. Manual simulation trading remains active.',
+          })
+          await refreshDesk(false)
+        } catch (error) {
+          setBanner({
+            tone: 'red',
+            text: error instanceof Error ? error.message : 'Unable to toggle auto trader.',
+          })
+        }
         return
       case 'strategy-config':
         setMode((current) => (current === 'frequency' ? 'precision' : 'frequency'))
@@ -517,6 +565,74 @@ function App() {
 
   const applyKimiToExecution = () => applyJudgeToExecution(judge, 'Kimi')
   const applyLocalV20ToExecution = () => applyJudgeToExecution(localJudge, 'Local V20')
+
+  const connectBroker = async () => {
+    try {
+      await jsonFetch('/api/broker/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          login: Number(brokerLogin),
+          password: brokerPassword,
+          server: brokerServer,
+          path: brokerPath,
+          symbol_prefix: brokerPrefix,
+          symbol_suffix: brokerSuffix,
+          symbol_overrides: {},
+        }),
+      })
+      setBanner({ tone: 'green', text: 'MT5 broker connected.' })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({
+        tone: 'red',
+        text: error instanceof Error ? error.message : 'Unable to connect MT5.',
+      })
+    }
+  }
+
+  const disconnectBroker = async () => {
+    try {
+      await jsonFetch('/api/broker/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      setBanner({ tone: 'amber', text: 'MT5 broker disconnected.' })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({
+        tone: 'red',
+        text: error instanceof Error ? error.message : 'Unable to disconnect MT5.',
+      })
+    }
+  }
+
+  const openMt5Trade = async () => {
+    try {
+      const pipSize = symbol === 'EURUSD' ? 0.0001 : symbol === 'BTCUSD' ? 1 : 0.1
+      const stopLoss = currentPrice == null ? null : direction === 'BUY' ? currentPrice - (stopPips * pipSize) : currentPrice + (stopPips * pipSize)
+      const takeProfit = currentPrice == null ? null : direction === 'BUY' ? currentPrice + (takeProfitPips * pipSize) : currentPrice - (takeProfitPips * pipSize)
+      await jsonFetch('/api/broker/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol,
+          direction,
+          volume: manualLot ? Number(manualLot) : Number(dashboard?.simulation?.suggested_lot ?? 0.05),
+          stop_loss: stopLoss,
+          take_profit: takeProfit,
+          comment: 'NexusTrader Manual',
+        }),
+      })
+      setBanner({ tone: 'green', text: `${direction} MT5 order sent on ${symbol}.` })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({
+        tone: 'red',
+        text: error instanceof Error ? error.message : 'Unable to place MT5 order.',
+      })
+    }
+  }
 
   const openPaperTrade = async () => {
     try {
@@ -587,7 +703,8 @@ function App() {
     { id: 'data-sync', label: 'Data Sync', icon: UploadCloud, active: loading, tone: 'green' as const },
     { id: 'gpu-monitor', label: 'GPU Monitor', icon: Cpu, active: focusedPanel === 'gpu', tone: 'green' as const },
     { id: 'logs', label: 'Logs', icon: DatabaseZap, active: focusedPanel === 'logs', tone: 'amber' as const },
-    { id: 'broker-link', label: 'Broker Link', icon: Link2, active: true, tone: 'green' as const },
+    { id: 'broker-link', label: 'Broker Link', icon: Link2, active: Boolean(brokerState?.connected), tone: 'green' as const },
+    { id: 'auto-trader', label: 'Auto Trader', icon: Activity, active: Boolean(autoTrade?.enabled), tone: 'green' as const },
     { id: 'dark-mode', label: 'Dark Mode', icon: MoonStar, active: true, tone: 'blue' as const },
     { id: 'branch-explorer', label: 'Branch Explorer', icon: GitBranchPlus, active: focusedPanel === 'branches', tone: 'blue' as const },
     { id: 'top-futures', label: 'Top-3 Futures', icon: TrendingUpDown, active: focusedPanel === 'branches', tone: 'green' as const },
@@ -754,6 +871,54 @@ function App() {
                 </div>
               </div>
 
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="stat-chip">
+                  <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Broker</div>
+                  <div className={`mt-3 font-mono text-2xl font-semibold ${brokerState?.connected ? 'tone-green' : 'tone-amber'}`}>
+                    {brokerState?.connected ? 'MT5 Connected' : brokerState?.installed ? 'MT5 Ready' : 'Paper Only'}
+                  </div>
+                </div>
+                <div className="stat-chip">
+                  <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Auto Trader</div>
+                  <div className={`mt-3 font-mono text-2xl font-semibold ${autoTrade?.enabled ? 'tone-green' : 'tone-amber'}`}>
+                    {autoTrade?.enabled ? 'ON' : 'OFF'}
+                  </div>
+                </div>
+                <div className="stat-chip">
+                  <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Broker Action</div>
+                  <div className="mt-3 font-mono text-xl font-semibold text-white/88">
+                    {String(autoTrade?.last_action ?? brokerState?.last_action ?? 'idle').replaceAll('_', ' ')}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="field-shell">
+                  <label className="field-label">MT5 Login</label>
+                  <input value={brokerLogin} onChange={(event) => setBrokerLogin(event.target.value)} className="field-input" placeholder="Account login" />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">MT5 Server</label>
+                  <input value={brokerServer} onChange={(event) => setBrokerServer(event.target.value)} className="field-input" placeholder="Broker server name" />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">MT5 Password</label>
+                  <input value={brokerPassword} onChange={(event) => setBrokerPassword(event.target.value)} className="field-input" type="password" placeholder="Account password" />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Terminal Path</label>
+                  <input value={brokerPath} onChange={(event) => setBrokerPath(event.target.value)} className="field-input" placeholder="Optional terminal64.exe path" />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Symbol Prefix</label>
+                  <input value={brokerPrefix} onChange={(event) => setBrokerPrefix(event.target.value)} className="field-input" placeholder="Optional prefix" />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Symbol Suffix</label>
+                  <input value={brokerSuffix} onChange={(event) => setBrokerSuffix(event.target.value)} className="field-input" placeholder="Optional suffix like .a or m" />
+                </div>
+              </div>
+
               <div className="field-shell">
                 <label className="field-label">Trade Note</label>
                 <textarea
@@ -770,6 +935,20 @@ function App() {
                 </button>
                 <button type="button" className="terminal-button terminal-button-blue" onClick={applyLocalV20ToExecution}>
                   Apply Local V20
+                </button>
+                <button type="button" className="terminal-button terminal-button-blue" onClick={() => void connectBroker()}>
+                  Connect MT5
+                </button>
+                <button type="button" className="terminal-button terminal-button-ghost" onClick={() => void disconnectBroker()}>
+                  Disconnect MT5
+                </button>
+                <button
+                  type="button"
+                  className="terminal-button terminal-button-red"
+                  onClick={() => void openMt5Trade()}
+                  disabled={!brokerState?.connected || Boolean(autoTrade?.enabled)}
+                >
+                  Place MT5 Order
                 </button>
                 <button type="button" className="terminal-button terminal-button-blue" onClick={() => void openPaperTrade()}>
                   Open Paper Trade
