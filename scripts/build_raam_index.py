@@ -34,6 +34,17 @@ def _feature_columns(frame: pd.DataFrame) -> list[str]:
     ]
 
 
+def _normalized_frame(frame: pd.DataFrame, checkpoint: dict[str, object]) -> tuple[pd.DataFrame, list[str]]:
+    feature_columns = list(checkpoint.get("feature_columns") or _feature_columns(frame))
+    feature_mean = np.asarray(checkpoint.get("feature_mean") or [0.0] * len(feature_columns), dtype=np.float32)
+    feature_std = np.asarray(checkpoint.get("feature_std") or [1.0] * len(feature_columns), dtype=np.float32)
+    numeric = frame.select_dtypes(include=["number"]).replace([np.inf, -np.inf], np.nan).ffill().bfill()
+    aligned = numeric.reindex(columns=feature_columns, fill_value=0.0).astype(np.float32)
+    normalized = np.clip((aligned.to_numpy(dtype=np.float32) - feature_mean) / feature_std, -8.0, 8.0)
+    normalized_frame = pd.DataFrame(normalized, index=aligned.index, columns=feature_columns)
+    return normalized_frame, feature_columns
+
+
 def _farthest_point_sampling(vectors: np.ndarray, max_points: int) -> np.ndarray:
     if len(vectors) <= max_points:
         return np.arange(len(vectors), dtype=np.int64)
@@ -63,18 +74,18 @@ def main() -> int:
         raise SystemExit(f"Missing xLSTM checkpoint at {V21_XLSTM_MODEL_PATH}.")
 
     frame = pd.read_parquet(V21_FEATURES_PATH).select_dtypes(include=["number"]).replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
-    feature_columns = _feature_columns(frame)
     checkpoint = torch.load(V21_XLSTM_MODEL_PATH, map_location="cpu")
+    normalized_frame, feature_columns = _normalized_frame(frame, checkpoint)
     model = NexusXLSTM(
         n_features=len(feature_columns),
-        d_model=512,
-        n_layers=4,
+        d_model=int(checkpoint.get("d_model", 192)),
+        n_layers=int(checkpoint.get("n_layers", 3)),
         n_regimes=6,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
 
-    values = frame[feature_columns].to_numpy(dtype=np.float32)
+    values = normalized_frame[feature_columns].to_numpy(dtype=np.float32)
     regime_ids = pd.to_numeric(frame.get("hmm_state"), errors="coerce").fillna(0).clip(lower=0, upper=5).astype(np.int64).to_numpy()
     future_15 = pd.to_numeric(frame.get("future_return_15m"), errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
     future_30 = pd.to_numeric(frame.get("future_return_30m"), errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)

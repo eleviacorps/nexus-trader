@@ -5466,3 +5466,245 @@ Bottom line:
 - V20 is a real implementation, local host, and research scaffold
 - V20 is not yet the finished research win described by the enhanced prompt
 - the repo now has both the local V20 runtime and the remote Jupyter launch path needed to continue the heavier training work honestly
+
+## V21 Remote Recovery Status
+
+This V21 pass was started against the V21 prompt and theory with the specific goal of fixing the V19/V20 remote import failure pattern first, then using the remote Jupyter box at `http://129.212.181.117` for the heavy feature build and backbone training. As of April 9, 2026, the honest state is that the remote path is reachable and did run the V21 jobs, so the cloud path is not simply "dead from no credits". The real failure is numerical: the completed Phase 2 training artifacts are invalid because both backbones collapsed into `NaN` losses.
+
+### V21 Phase 0
+
+Phase 0 was completed successfully before any V21 model training:
+
+- local GPU check passed on the RTX 4070
+- remote workspace tarball sync succeeded
+- remote import verification passed for:
+  - `src.v12.bar_consistent_features`
+  - `src.v16.confidence_tier`
+  - `src.v17.mmm`
+  - `src.v18.mfg_beliefs`
+  - `src.v20.mamba_backbone`
+  - `src.v21.xLSTM_backbone`
+
+Files added for the remote sync and verification path:
+
+- `scripts/sync_workspace_remote.py`
+- `scripts/sync_archive_remote.py`
+- `scripts/launch_remote_v21_phase1_jupyter.py`
+- `scripts/check_remote_v21_phase1_status_jupyter.py`
+- `scripts/launch_remote_v21_phase2_jupyter.py`
+- `scripts/check_remote_v21_phase2_status_jupyter.py`
+
+### V21 Phase 1
+
+The remote full-archive feature build completed, but not at the prompt's intended `8.9M` row scale.
+
+Remote Phase 1 result:
+
+- V21 feature rows: `405434`
+- V21 feature count: `215`
+- macro features: built
+- denoised OHLCV: built
+- regime labels: built
+- HMM checkpoint: built
+
+Honest interpretation:
+
+- Phase 1 is real and usable
+- Phase 1 did not reach the prompt's intended full 17-year / `8.9M` row target
+- the remote pipeline produced a substantial `15m` research frame, but not the dream-scale dataset assumed by the prompt
+
+### V21 Phase 2
+
+The V21 backbone work was implemented in the repo:
+
+- `src/v21/xlstm_backbone.py`
+- `scripts/train_xlstm_backbone.py`
+- `scripts/train_bimamba_backbone_v21.py`
+- `scripts/remote_v21_phase2_train.py`
+
+Additional V21 scaffolding also landed:
+
+- `src/v21/raam.py`
+- `src/v21/runtime_v21.py`
+- `src/v21/rl_executor_v21.py`
+- `src/v21/offline_rl.py`
+- `scripts/build_raam_index.py`
+- tests:
+  - `tests/test_v21_xlstm.py`
+  - `tests/test_v21_runtime.py`
+  - `tests/test_v21_raam.py`
+  - `tests/test_v21_rl.py`
+
+Local V21 validation completed:
+
+- V21 unit tests passed locally
+- py_compile passed on the new V21 modules and scripts
+
+Remote Phase 2 result:
+
+- xLSTM report exists: yes
+- BiMamba report exists: yes
+- xLSTM dataset sequences: `199760`
+- BiMamba dataset sequences: `199760`
+- xLSTM feature count: `207`
+- BiMamba feature count: `207`
+- xLSTM best validation loss: `Infinity`
+- BiMamba best validation loss: `Infinity`
+- xLSTM train loss by epoch: `NaN`
+- xLSTM valid loss by epoch: `NaN`
+- xLSTM latest regime accuracy: `0.004756`
+- BiMamba train loss by epoch: `NaN`
+- BiMamba valid loss by epoch: `NaN`
+- BiMamba latest direction accuracy: `0.454846`
+
+Honest interpretation:
+
+- the remote Phase 2 jobs finished and wrote checkpoints
+- those checkpoints cannot be trusted because both training runs numerically collapsed
+- this is not a remote reachability failure
+- this is not evidence of a finished V21 backbone
+- V21 is still blocked on training stability
+
+### Current Honest V21 Read
+
+What is now genuinely true:
+
+- the remote Jupyter path is reachable
+- the V21 workspace sync / import fix is real
+- the V21 Phase 1 feature build is real
+- the V21 repo scaffolding for xLSTM, RAAM, runtime mode gating, and RL is real
+- the cloud box was not simply unreachable when re-checked on April 9, 2026
+
+What is not yet true:
+
+- V21 is not completed
+- the xLSTM backbone is not validated
+- the BiMamba ablation is not valid
+- no trustworthy V21 month backtest exists yet
+- no trustworthy V21 walk-forward exists yet
+- no V21 host on `8021` has been promoted as a completed terminal release
+- no `outputs/evaluation/v21_summary.json` or `outputs/evaluation/v21_summary.md` has been honestly promoted yet
+
+Bottom line:
+
+- V21 is partially implemented
+- V21 is not blocked by simple cloud reachability alone
+- V21 is currently blocked by invalid Phase 2 training behavior
+- the next honest move is to stabilize the V21 backbone training, not to pretend the current checkpoints are usable
+
+## V21 Local Fallback Activation
+
+Because the remote V21 Phase 2 path was numerically invalid and cloud time was effectively exhausted, I moved V21 onto a truthful local fallback track on the RTX 4070 instead of pretending the broken remote checkpoints were deployable.
+
+### Local Stabilization Work
+
+The local fallback pass added and updated the following:
+
+- `src/v21/training_data.py`
+- `src/v21/inference.py`
+- `src/v21/runtime.py`
+- `src/service/app_v21.py`
+- `scripts/train_xlstm_backbone.py`
+- `scripts/train_bimamba_backbone_v21.py`
+- `scripts/build_raam_index.py`
+- `scripts/download_remote_jupyter_files.py`
+
+What changed technically:
+
+- V21 sequence training now standardizes and clips features before backbone training.
+- xLSTM initialization and gate handling were made safer so local training no longer explodes into `NaN`.
+- BiMamba local training was moved onto the same normalized V21 sequence bundle.
+- the RAAM builder was updated to respect the trained xLSTM checkpoint dimensions instead of the old hard-coded backbone shape.
+- a dedicated V21 host was added on `8021` while preserving the existing UI contract so no frontend redesign was required.
+
+### Local V21 Training Result
+
+The stabilized local runs are real and finite.
+
+Local xLSTM result:
+
+- dataset sequences: `29880`
+- train sequences: `26892`
+- valid sequences: `2988`
+- feature count: `207`
+- best validation loss: `2.380782`
+- latest regime accuracy: `0.830656`
+
+Local BiMamba result:
+
+- dataset sequences: `29880`
+- train sequences: `26892`
+- valid sequences: `2988`
+- feature count: `207`
+- best validation loss: `0.686026`
+- latest direction accuracy: `0.551205`
+
+Interpretation:
+
+- local V21 training is now numerically stable
+- local xLSTM is much healthier than the broken remote run
+- BiMamba is functioning, but its direction accuracy is still weak
+- this is a local fallback success, not proof that V21 research targets are cleared
+
+### Local RAAM Result
+
+I also built a real local RAAM index from the stabilized xLSTM hidden states.
+
+Local RAAM build:
+
+- candidate windows: `20266`
+- selected windows: `5000`
+- embedding dimension: `128`
+- sequence length: `120`
+- sample stride: `20`
+
+Artifacts:
+
+- `checkpoints/v21/raam_index.faiss`
+- `checkpoints/v21/raam_outcomes.json`
+- `outputs/v21/raam_build_report.json`
+
+### V21 Local Host
+
+V21 is now hosted locally at:
+
+- `http://127.0.0.1:8021/ui`
+
+This host keeps the current premium glass UI intact and plugs in:
+
+- independent Kimi judge
+- independent local V21 judge
+- local V21 runtime aliased into the existing desk payload so the current frontend can render it without theme changes
+- paper trading on the V21 host
+
+Verified endpoints:
+
+- `/health`
+- `/ui`
+- `/api/dashboard/live`
+- `/api/llm/judges-live`
+- `/api/paper/state`
+
+I reset the V21 paper account back to `$1000` after verification so the desk opens clean instead of inheriting stale negative-equity paper state.
+
+### Honest V21 State After Local Fallback
+
+What is now genuinely true:
+
+- the remote V21 story is honestly preserved: Phase 1 worked, Phase 2 failed
+- local V21 training now works without `NaN` collapse
+- local V21 inference is scoring live bars
+- local RAAM artifacts exist
+- V21 is testable live on `8021`
+
+What is still not true:
+
+- V21 is not fully completed against the prompt
+- no honest V21 month backtest has been completed yet
+- no honest V21 walk-forward has been completed yet
+- the local fallback should not be confused with a finished research win
+
+Artifacts added for this local fallback record:
+
+- `outputs/evaluation/v21_summary.json`
+- `outputs/evaluation/v21_summary.md`

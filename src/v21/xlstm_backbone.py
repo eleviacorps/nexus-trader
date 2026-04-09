@@ -18,6 +18,13 @@ class VariableSelectionNetwork(nn.Module):
             nn.Linear(int(d_model), int(n_features)),
         )
         self.softmax = nn.Softmax(dim=-1)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in self.grn:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=0.25)
+                nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor, regime_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         regime_emb = self.regime_embed(regime_ids)
@@ -39,6 +46,12 @@ class sLSTMBlock(nn.Module):
         self.W_z = nn.Linear(self.d_model, self.d_state)
         self.W_o = nn.Linear(self.d_model, self.d_state)
         self.proj_out = nn.Linear(self.d_state, self.d_model)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in (self.W_i, self.W_f, self.W_z, self.W_o, self.proj_out):
+            nn.init.xavier_uniform_(module.weight, gain=0.15)
+            nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq, _ = x.shape
@@ -50,8 +63,8 @@ class sLSTMBlock(nn.Module):
 
         for t in range(seq):
             xt = x[:, t, :]
-            log_i = self.W_i(xt).clamp(min=-20.0, max=20.0)
-            log_f = self.W_f(xt).clamp(min=-20.0, max=20.0)
+            log_i = (0.1 * self.W_i(xt)).clamp(min=-8.0, max=8.0)
+            log_f = (0.1 * self.W_f(xt)).clamp(min=-8.0, max=8.0)
             z = torch.tanh(self.W_z(xt))
             o = torch.sigmoid(self.W_o(xt))
 
@@ -83,6 +96,14 @@ class NexusXLSTM(nn.Module):
         self.head_vol_env = nn.Linear(int(d_model), 3)
         self.head_regime = nn.Linear(int(d_model), self.n_regimes)
         self.head_range = nn.Linear(int(d_model), 3)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.input_proj.weight, gain=0.5)
+        nn.init.zeros_(self.input_proj.bias)
+        for head in (self.head_dir_15m, self.head_dir_30m, self.head_vol_env, self.head_regime, self.head_range):
+            nn.init.xavier_uniform_(head.weight, gain=0.2)
+            nn.init.zeros_(head.bias)
 
     def encode(self, x: torch.Tensor, regime_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x_weighted, vsn_weights = self.vsn(x, regime_ids)
