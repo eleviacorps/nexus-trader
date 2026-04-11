@@ -210,6 +210,12 @@ export interface DashboardPayload {
     symbol_suffix?: string
     symbol_overrides?: Record<string, string>
     autotrade_enabled?: boolean
+    autotrade_config?: {
+      lot_mode?: string
+      fixed_lot?: number | null
+      min_lot?: number
+      max_lot?: number
+    }
     last_error?: string
     last_action?: string
     last_order?: Record<string, unknown> | null
@@ -218,6 +224,12 @@ export interface DashboardPayload {
     enabled?: boolean
     broker_connected?: boolean
     symbol?: string
+    config?: {
+      lot_mode?: string
+      fixed_lot?: number | null
+      min_lot?: number
+      max_lot?: number
+    }
     last_action?: string
     last_order?: Record<string, unknown> | null
     last_error?: string

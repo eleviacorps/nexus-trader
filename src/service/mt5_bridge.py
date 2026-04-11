@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,10 @@ class MT5Bridge:
                     "symbol_suffix": "",
                     "symbol_overrides": {},
                     "autotrade_enabled": False,
+                    "autotrade_lot_mode": "range",
+                    "autotrade_fixed_lot": None,
+                    "autotrade_min_lot": 0.01,
+                    "autotrade_max_lot": 0.05,
                     "last_error": "",
                     "last_action": "idle",
                     "last_order": None,
@@ -68,6 +73,10 @@ class MT5Bridge:
                 "symbol_suffix": "",
                 "symbol_overrides": {},
                 "autotrade_enabled": False,
+                "autotrade_lot_mode": "range",
+                "autotrade_fixed_lot": None,
+                "autotrade_min_lot": 0.01,
+                "autotrade_max_lot": 0.05,
                 "last_error": "",
                 "last_action": "idle",
                 "last_order": None,
@@ -86,18 +95,42 @@ class MT5Bridge:
             self._write_state(state)
             return state
 
-    def _connected_snapshot(self) -> dict[str, Any]:
-        state = self._read_state()
+    def _autotrade_config_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "lot_mode": str(state.get("autotrade_lot_mode", "range") or "range"),
+            "fixed_lot": _safe_float(state.get("autotrade_fixed_lot"), 0.0) or None,
+            "min_lot": max(_safe_float(state.get("autotrade_min_lot", 0.01), 0.01), 0.01),
+            "max_lot": max(_safe_float(state.get("autotrade_max_lot", 0.05), 0.05), 0.01),
+        }
+
+    def _ensure_initialized(self, path_override: str | None = None) -> tuple[Any | None, str]:
         mt5 = self._import_mt5()
+        if mt5 is None:
+            return None, "MetaTrader5 Python package is not installed."
+        state = self._read_state()
+        path = str(path_override if path_override is not None else state.get("path", "") or "").strip()
+        try:
+            initialized = mt5.initialize(path) if path else mt5.initialize()
+        except Exception as exc:
+            return mt5, str(exc)
+        if not initialized:
+            return mt5, f"MT5 initialize failed: {mt5.last_error()}"
+        return mt5, ""
+
+    def _connected_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            state = self._read_state()
+        mt5, init_error = self._ensure_initialized()
         installed = mt5 is not None
         connected = False
         account_payload: dict[str, Any] = {}
         terminal_payload: dict[str, Any] = {}
-        if installed:
+        if installed and not init_error:
             try:
                 terminal = mt5.terminal_info()
                 account = mt5.account_info()
-                connected = bool(terminal) and bool(account)
+                terminal_connected = bool(getattr(terminal, "connected", False)) if terminal else False
+                connected = terminal_connected and bool(account)
                 if terminal:
                     terminal_payload = {
                         "company": getattr(terminal, "company", ""),
@@ -115,8 +148,16 @@ class MT5Bridge:
                     }
             except Exception:
                 connected = False
-        state["connected"] = connected
-        self._write_state(state)
+        with self._lock:
+            state = self._read_state()
+            state["connected"] = connected
+            if account_payload.get("login"):
+                state["login"] = account_payload["login"]
+            if account_payload.get("server"):
+                state["server"] = account_payload["server"]
+            if init_error:
+                state["last_error"] = init_error
+            self._write_state(state)
         return {
             "installed": installed,
             "connected": connected,
@@ -129,7 +170,8 @@ class MT5Bridge:
             "terminal": terminal_payload,
             "account": account_payload,
             "autotrade_enabled": bool(state.get("autotrade_enabled", False)),
-            "last_error": str(state.get("last_error", "")),
+            "autotrade_config": self._autotrade_config_from_state(state),
+            "last_error": str(state.get("last_error", "")) if not init_error else init_error,
             "last_action": str(state.get("last_action", "idle")),
             "last_order": state.get("last_order"),
         }
@@ -155,7 +197,8 @@ class MT5Bridge:
         symbol_suffix: str = "",
         symbol_overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        mt5 = self._import_mt5()
+        requested_path = str(path or "").strip()
+        mt5, init_error = self._ensure_initialized(requested_path or None)
         if mt5 is None:
             state = self._patch_state(
                 connected=False,
@@ -169,23 +212,38 @@ class MT5Bridge:
                 last_action="connect_failed",
             )
             return self.status() | {"ok": False, "detail": state["last_error"]}
+        if init_error:
+            self._patch_state(
+                connected=False,
+                login=int(login),
+                server=str(server),
+                path=str(path),
+                symbol_prefix=str(symbol_prefix),
+                symbol_suffix=str(symbol_suffix),
+                symbol_overrides=dict(symbol_overrides or {}),
+                last_error=init_error,
+                last_action="connect_failed",
+            )
+            return self.status() | {"ok": False, "detail": init_error}
 
         try:
-            initialized = mt5.initialize(path or None) if path else mt5.initialize()
-            if not initialized:
-                error = f"MT5 initialize failed: {mt5.last_error()}"
+            terminal = mt5.terminal_info()
+            account = mt5.account_info()
+            current_login = int(getattr(account, "login", 0) or 0) if account else 0
+            terminal_connected = bool(getattr(terminal, "connected", False)) if terminal else False
+            if terminal_connected and current_login == int(login):
                 self._patch_state(
-                    connected=False,
+                    connected=True,
                     login=int(login),
                     server=str(server),
                     path=str(path),
                     symbol_prefix=str(symbol_prefix),
                     symbol_suffix=str(symbol_suffix),
                     symbol_overrides=dict(symbol_overrides or {}),
-                    last_error=error,
-                    last_action="connect_failed",
+                    last_error="",
+                    last_action="connected",
                 )
-                return self.status() | {"ok": False, "detail": error}
+                return self.status() | {"ok": True, "detail": "MT5 connected."}
             authorized = mt5.login(int(login), password=str(password), server=str(server))
             if not authorized:
                 error = f"MT5 login failed: {mt5.last_error()}"
@@ -237,9 +295,44 @@ class MT5Bridge:
         self._patch_state(connected=False, last_action="disconnected")
         return self.status() | {"ok": True, "detail": "MT5 disconnected."}
 
-    def set_autotrade(self, enabled: bool) -> dict[str, Any]:
-        self._patch_state(autotrade_enabled=bool(enabled), last_action="autotrade_on" if enabled else "autotrade_off")
+    def set_autotrade(
+        self,
+        enabled: bool,
+        *,
+        lot_mode: str | None = None,
+        fixed_lot: float | None = None,
+        min_lot: float | None = None,
+        max_lot: float | None = None,
+    ) -> dict[str, Any]:
+        updates: dict[str, Any] = {
+            "autotrade_enabled": bool(enabled),
+            "last_action": "autotrade_on" if enabled else "autotrade_off",
+        }
+        if lot_mode is not None:
+            updates["autotrade_lot_mode"] = str(lot_mode or "range").lower()
+        if fixed_lot is not None:
+            updates["autotrade_fixed_lot"] = max(round(float(fixed_lot), 2), 0.01)
+        if min_lot is not None:
+            updates["autotrade_min_lot"] = max(round(float(min_lot), 2), 0.01)
+        if max_lot is not None:
+            updates["autotrade_max_lot"] = max(round(float(max_lot), 2), 0.01)
+        state = self._patch_state(**updates)
+        config = self._autotrade_config_from_state(state)
+        if config["max_lot"] < config["min_lot"]:
+            state = self._patch_state(autotrade_max_lot=config["min_lot"])
         return self.status() | {"ok": True, "autotrade_enabled": bool(enabled)}
+
+    def resolve_autotrade_volume(self, suggested_volume: float) -> tuple[float, str]:
+        state = self._read_state()
+        config = self._autotrade_config_from_state(state)
+        suggested = max(round(float(suggested_volume or 0.01), 2), 0.01)
+        lot_mode = str(config.get("lot_mode", "range") or "range").lower()
+        if lot_mode == "fixed":
+            fixed = max(round(float(config.get("fixed_lot") or suggested), 2), 0.01)
+            return fixed, "fixed_lot"
+        min_lot = max(round(float(config.get("min_lot") or 0.01), 2), 0.01)
+        max_lot = max(round(float(config.get("max_lot") or min_lot), 2), min_lot)
+        return min(max(suggested, min_lot), max_lot), "range_clamp"
 
     def resolve_symbol(self, symbol: str) -> str:
         mt5 = self._import_mt5()
@@ -296,6 +389,51 @@ class MT5Bridge:
         except Exception:
             return []
 
+    def quote(self, symbol: str) -> float | None:
+        mt5, init_error = self._ensure_initialized()
+        if mt5 is None or init_error:
+            return None
+        try:
+            resolved_symbol = self.resolve_symbol(symbol)
+            if not mt5.symbol_select(resolved_symbol, True):
+                return None
+            tick = mt5.symbol_info_tick(resolved_symbol)
+            if tick is None:
+                return None
+            bid = _safe_float(getattr(tick, "bid", 0.0), 0.0)
+            ask = _safe_float(getattr(tick, "ask", 0.0), 0.0)
+            if bid > 0 and ask > 0:
+                return round((bid + ask) / 2.0, 5)
+            return bid or ask or None
+        except Exception:
+            return None
+
+    def recent_candles(self, symbol: str, *, count: int = 240) -> list[dict[str, Any]]:
+        mt5, init_error = self._ensure_initialized()
+        if mt5 is None or init_error:
+            return []
+        try:
+            resolved_symbol = self.resolve_symbol(symbol)
+            if not mt5.symbol_select(resolved_symbol, True):
+                return []
+            rates = mt5.copy_rates_from_pos(resolved_symbol, getattr(mt5, "TIMEFRAME_M5", 5), 0, max(int(count), 60))
+            results: list[dict[str, Any]] = []
+            for item in rates or []:
+                timestamp = datetime.fromtimestamp(int(item["time"]), tz=timezone.utc).isoformat()
+                results.append(
+                    {
+                        "timestamp": timestamp,
+                        "open": _safe_float(item["open"]),
+                        "high": _safe_float(item["high"]),
+                        "low": _safe_float(item["low"]),
+                        "close": _safe_float(item["close"]),
+                        "volume": _safe_float(item["tick_volume"]),
+                    }
+                )
+            return results
+        except Exception:
+            return []
+
     def has_open_position(self, symbol: str) -> bool:
         resolved = self.resolve_symbol(symbol)
         return any(str(position.get("symbol", "")) == resolved for position in self.positions(symbol))
@@ -310,9 +448,16 @@ class MT5Bridge:
         take_profit: float | None = None,
         comment: str = "NexusTrader",
     ) -> dict[str, Any]:
-        mt5 = self._import_mt5()
+        mt5, init_error = self._ensure_initialized()
         if mt5 is None:
             raise RuntimeError("MetaTrader5 Python package is not installed.")
+        if init_error:
+            raise RuntimeError(init_error)
+        terminal = mt5.terminal_info()
+        if not terminal or not bool(getattr(terminal, "connected", False)):
+            raise RuntimeError("MT5 terminal is not connected to the trade server.")
+        if not bool(getattr(terminal, "trade_allowed", False)):
+            raise RuntimeError("MT5 terminal has AutoTrading disabled by client.")
         resolved_symbol = self.resolve_symbol(symbol)
         if not mt5.symbol_select(resolved_symbol, True):
             raise RuntimeError(f"MT5 could not select symbol {resolved_symbol}.")
@@ -323,7 +468,7 @@ class MT5Bridge:
         side = str(direction).upper()
         order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
         price = _safe_float(tick.ask if side == "BUY" else tick.bid)
-        filling = getattr(info, "filling_mode", mt5.ORDER_FILLING_IOC)
+        filling = self._resolve_filling_mode(mt5, info)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": resolved_symbol,
@@ -369,6 +514,23 @@ class MT5Bridge:
     def can_trade(self) -> bool:
         status = self.status()
         return bool(status.get("installed")) and bool(status.get("connected"))
+
+    def _resolve_filling_mode(self, mt5: Any, info: Any) -> int:
+        supported = int(getattr(info, "filling_mode", 0) or 0)
+        # MT5 symbol_info().filling_mode is a bitmask of allowed modes, but order_send
+        # expects one concrete ORDER_FILLING_* value.
+        candidates = [
+            getattr(mt5, "ORDER_FILLING_FOK", 0),
+            getattr(mt5, "ORDER_FILLING_IOC", 1),
+            getattr(mt5, "ORDER_FILLING_RETURN", 2),
+        ]
+        for candidate in candidates:
+            if supported & (1 << int(candidate)):
+                return int(candidate)
+        for candidate in candidates:
+            if supported == int(candidate):
+                return int(candidate)
+        return int(getattr(mt5, "ORDER_FILLING_IOC", 1))
 
 
 __all__ = ["MT5Bridge"]

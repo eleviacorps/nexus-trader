@@ -82,6 +82,12 @@ def build_v21_runtime_state(payload: Mapping[str, Any], *, mode: str = "frequenc
     disagree_prob = _clip01(abs(x_prob - b_prob))
     raw_stance = _stance_from_prob(ensemble_prob)
     top_branch = bundle.branches.iloc[0].to_dict()
+    branch_stance = str(top_branch.get("decision_direction", "HOLD")).upper()
+    frequency_mode = str(mode).lower() == "frequency"
+    used_branch_fallback = False
+    if frequency_mode and raw_stance == "HOLD" and branch_stance in {"BUY", "SELL"}:
+        raw_stance = branch_stance
+        used_branch_fallback = True
     top_cabr = _safe_float(top_branch.get("v20_cabr_score"), 0.5)
     cone_width = abs(bundle.cone_upper[-1] - bundle.cone_lower[-1]) / 0.1 if bundle.cone_upper and bundle.cone_lower else 0.0
     conformal_confidence = _clip01(bundle.confidence)
@@ -103,7 +109,7 @@ def build_v21_runtime_state(payload: Mapping[str, Any], *, mode: str = "frequenc
         + (0.15 * (1.0 - disagree_prob))
         + (0.10 * (1.0 - min(dangerous_branch_count, 5) / 5.0))
     )
-    runtime = V21Runtime(mode="research" if str(mode).lower() == "frequency" else "production")
+    runtime = V21Runtime(mode="research" if frequency_mode else "production")
     should_execute, failed_gates = runtime.should_trade(
         sjd_output={"stance": raw_stance, "disagree_prob": disagree_prob},
         conformal_confidence=conformal_confidence,
@@ -126,10 +132,11 @@ def build_v21_runtime_state(payload: Mapping[str, Any], *, mode: str = "frequenc
     final_direction = raw_stance if should_execute else "HOLD"
     regime_probs = [float(item) for item in (x_result.get("regime_probs") or bundle.regime_probs or [])]
     sqt_label = "GOOD" if meta_label_prob >= 0.58 and confidence_tier in {"high", "very_high"} else "NEUTRAL" if meta_label_prob >= 0.38 else "CAUTION"
+    fallback_note = f", branch_fallback={branch_stance}" if used_branch_fallback else ""
     execution_reason = (
-        f"V21 local execution cleared: stance={raw_stance}, ensemble={ensemble_prob:.3f}, conformal={conformal_confidence:.3f}, meta={meta_label_prob:.3f}, dangerous_branches={dangerous_branch_count}."
+        f"V21 local execution cleared: stance={raw_stance}, ensemble={ensemble_prob:.3f}, conformal={conformal_confidence:.3f}, meta={meta_label_prob:.3f}, dangerous_branches={dangerous_branch_count}{fallback_note}."
         if should_execute
-        else f"V21 local hold: raw_stance={raw_stance}, failed_gates={','.join(failed_gates) if failed_gates else 'none'}, ensemble={ensemble_prob:.3f}, conformal={conformal_confidence:.3f}, meta={meta_label_prob:.3f}, disagree={disagree_prob:.3f}."
+        else f"V21 local hold: raw_stance={raw_stance}, failed_gates={','.join(failed_gates) if failed_gates else 'none'}, ensemble={ensemble_prob:.3f}, conformal={conformal_confidence:.3f}, meta={meta_label_prob:.3f}, disagree={disagree_prob:.3f}{fallback_note}."
     )
     return {
         "available": True,
@@ -182,6 +189,7 @@ def build_v21_runtime_state(payload: Mapping[str, Any], *, mode: str = "frequenc
         "v21_dangerous_branch_count": int(dangerous_branch_count),
         "v21_top_vsn_features": list(x_result.get("top_vsn_features", []) or []),
         "v21_regime_label": _regime_label(regime_probs),
+        "v21_used_branch_fallback": bool(used_branch_fallback),
     }
 
 

@@ -5708,3 +5708,120 @@ Artifacts added for this local fallback record:
 
 - `outputs/evaluation/v21_summary.json`
 - `outputs/evaluation/v21_summary.md`
+
+## V21 MT5 Tester Bridge And Frequency Execution Alignment
+
+After the local V21 fallback was live, I added a real MT5 Strategy Tester bridge so V21 could be replayed inside MT5 using exported local-judge signals rather than pretending MT5 was running the Python stack directly.
+
+### Bridge Implementation
+
+Files added for the tester bridge:
+
+- `src/v21/mt5_tester_bridge.py`
+- `scripts/export_v21_mt5_tester_bridge.py`
+- `mt5_tester/NexusTraderV21TesterBridge.mq5`
+- `mt5_tester/README.md`
+- `tests/test_v21_mt5_tester_bridge.py`
+
+What the bridge does:
+
+- exports timestamped V21 `BUY` / `SELL` rows
+- includes lot, SL, TP, CABR, CPM, branch label, and execution reason
+- copies the bridge CSV into MT5 `Common\\Files` when requested
+- replays those rows bar-by-bar inside MT5 Strategy Tester on `M15`
+
+### Fast Export Path
+
+The first full-month exporter attempt timed out because it was rebuilding the live V21 stack one bar at a time. I replaced that slow path with an offline feature/checkpoint export path:
+
+- reads `data/features/v21_features.parquet`
+- loads the local xLSTM and BiMamba checkpoints once
+- runs batched inference over the month window
+- reconstructs the V21 runtime state without the live dashboard loop
+
+I also had to synthesize a few runtime columns that were missing from the parquet schema, including `atr_14`, `quant_route_confidence`, `quant_regime_strength`, and `quant_vol_realism`.
+
+### Verified Frequency Export
+
+The final verified V21 MT5 frequency export for `2023-12` is:
+
+- signals: `1816`
+- buy signals: `1785`
+- sell signals: `31`
+- average lot: `0.01`
+- average CABR: `0.763104`
+- average CPM: `0.741359`
+- first execution: `2023-12-01T00:15:00+00:00`
+- last execution: `2023-12-29T17:00:00+00:00`
+
+Artifacts:
+
+- `outputs/v21/mt5_tester/v21_mt5_tester_signals.csv`
+- `outputs/v21/mt5_tester/v21_mt5_tester_summary.json`
+
+The CSV was also copied into MT5 Common Files at:
+
+- `C:\Users\rfsga\AppData\Roaming\MetaQuotes\Terminal\Common\Files\v21_mt5_tester_signals.csv`
+
+### MT5 EA Fixes
+
+The first MT5 tester failures were not caused by V21 producing no signals. They were bridge bugs.
+
+What was fixed in `mt5_tester/NexusTraderV21TesterBridge.mq5`:
+
+- explicit comma delimiter for `FileOpen(..., FILE_CSV, ',')`
+- UTF-8 BOM stripping on the CSV header field
+- relaxed symbol matching so broker variants like `XAUUSDm` or `XAUUSD.a` can match the exported `XAUUSD`
+- better diagnostics for:
+  - file open failures
+  - total rows loaded
+  - matched rows
+  - symbols actually seen in the CSV
+
+Honest interpretation:
+
+- the earlier `loaded 0 signals for XAUUSD` failure was a bridge parsing / symbol-matching problem
+- it was not evidence that V21 frequency mode was all `HOLD`
+
+### V21 Frequency Execution Fix
+
+I also aligned the live V21 runtime and auto-trader with the intended `15m` frequency behavior.
+
+Changes:
+
+- `src/v21/runtime.py`
+- `src/v21/mt5_tester_bridge.py`
+- `src/service/app_v21.py`
+
+What changed:
+
+- in `frequency` mode, V21 now uses `research` execution semantics consistently
+- if the local ensemble lands on `HOLD` but the top branch has a clear `BUY` / `SELL` direction, the runtime now falls back to that top-branch direction for frequency execution
+- the live auto-trader now calls the full V21 runtime directly instead of relying on the cached quick desk proxy
+- the quick runtime proxy no longer confidence-gates `frequency` mode
+
+Local historical verification after the patch showed the V21 local judge emitting executable `BUY` calls with:
+
+- `should_execute = True`
+- `final_call = BUY`
+- `branch_fallback = True`
+
+Honest interpretation:
+
+- V21 frequency mode is now much closer to the requested "trade every 15 minutes based on the simulation" behavior
+- this is still a local heuristic / branch-fallback implementation layered onto the V21 runtime, not proof of a profitable research result
+
+### Current Honest V21 State
+
+What is now genuinely true:
+
+- V21 local frequency export produces a large non-zero MT5 replay set
+- the MT5 tester bridge exists and is usable
+- the local V21 judge is the execution source for the frequency bridge
+- the live V21 auto-trader and exported tester path now follow the same frequency-direction logic more closely
+
+What is still not yet true:
+
+- MT5 Strategy Tester is not running the Python V21 runtime natively; it is replaying exported V21 signals
+- the patched EA must be recompiled in MetaEditor before MT5 can use the latest delimiter / symbol fixes
+- none of this upgrades V21 into a completed research win by itself

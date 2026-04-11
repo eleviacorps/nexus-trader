@@ -374,6 +374,10 @@ V21_REMOTE_PHASE2_LOG_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase2.log"
 V21_REMOTE_PHASE2_PID_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase2.pid"
 V21_RAAM_INDEX_PATH = V21_CHECKPOINT_DIR / "raam_index.faiss"
 V21_RAAM_OUTCOMES_PATH = V21_CHECKPOINT_DIR / "raam_outcomes.json"
+V21_MT5_TESTER_DIR = OUTPUTS_V21_DIR / "mt5_tester"
+V21_MT5_TESTER_SIGNALS_PATH = V21_MT5_TESTER_DIR / "v21_mt5_tester_signals.csv"
+V21_MT5_TESTER_SUMMARY_PATH = V21_MT5_TESTER_DIR / "v21_mt5_tester_summary.json"
+V21_MT5_TESTER_EA_PATH = PROJECT_ROOT / "mt5_tester" / "NexusTraderV21TesterBridge.mq5"
 V21_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v21_summary.json"
 V21_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v21_summary.md"
 MACRO_REPORT_PATH = OUTPUTS_EVAL_DIR / "macro_report.json"
@@ -407,6 +411,7 @@ NORM_STATS_PATH = PROJECT_ROOT / "config" / "norm_stats_1m.json"
 PERSONA_CONFIG_PATH = PROJECT_ROOT / "config" / "persona_config.json"
 DATASET_MANIFEST_PATH = PROJECT_ROOT / "config" / "dataset_manifest.json"
 DOWNLOAD_REPORT_PATH = OUTPUTS_LOGS_DIR / "download_report.json"
+MT5_COMMON_FILES_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "MetaQuotes" / "Terminal" / "Common" / "Files"
 
 
 def get_data_path(*parts: str) -> Path:

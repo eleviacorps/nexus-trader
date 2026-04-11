@@ -273,6 +273,11 @@ function App() {
   const [brokerPath, setBrokerPath] = useState('')
   const [brokerPrefix, setBrokerPrefix] = useState('')
   const [brokerSuffix, setBrokerSuffix] = useState('')
+  const [brokerSymbolOverride, setBrokerSymbolOverride] = useState('')
+  const [autoLotMode, setAutoLotMode] = useState<'range' | 'fixed'>('range')
+  const [autoFixedLot, setAutoFixedLot] = useState('')
+  const [autoMinLot, setAutoMinLot] = useState('0.01')
+  const [autoMaxLot, setAutoMaxLot] = useState('0.05')
   const [liveState, setLiveState] = useState({
     connected: false,
     price: null as number | null,
@@ -280,6 +285,7 @@ function App() {
     positions: [] as PaperPosition[],
   })
   const initialLoadRef = useRef(false)
+  const autoTradeConfigHydratedRef = useRef(false)
 
   const newsItems = useDeferredValue(dashboard?.feeds?.news ?? [])
   const discussionItems = useDeferredValue(dashboard?.feeds?.public_discussions ?? [])
@@ -447,6 +453,16 @@ function App() {
   const brokerState = dashboard?.broker
   const autoTrade = dashboard?.auto_trade
 
+  useEffect(() => {
+    const config = autoTrade?.config ?? brokerState?.autotrade_config
+    if (!config || autoTradeConfigHydratedRef.current) return
+    setAutoLotMode(config.lot_mode === 'fixed' ? 'fixed' : 'range')
+    setAutoFixedLot(config.fixed_lot != null ? String(config.fixed_lot) : '')
+    setAutoMinLot(config.min_lot != null ? String(config.min_lot) : '0.01')
+    setAutoMaxLot(config.max_lot != null ? String(config.max_lot) : '0.05')
+    autoTradeConfigHydratedRef.current = true
+  }, [autoTrade?.config, brokerState?.autotrade_config])
+
   const confidenceLabel =
     judge?.confidence ??
     dashboard?.simulation?.confidence_tier?.replaceAll('_', ' ').toUpperCase() ??
@@ -464,6 +480,19 @@ function App() {
     `Cone width ${formatNumber(dashboard?.simulation?.cone_width_pips, 1)} pips remains inside the current volatility envelope.`,
     `${dashboard?.technical_analysis?.location ?? 'Market'} location and ${dashboard?.technical_analysis?.structure ?? 'structure'} reduce branch dislocation.`,
   ]
+
+  const buildAutoTradeConfigPayload = () => {
+    const fixedFallback = Number(dashboard?.simulation?.suggested_lot ?? 0.05)
+    const parsedFixed = Number(autoFixedLot || fixedFallback)
+    const parsedMin = Number(autoMinLot || 0.01)
+    const parsedMax = Number(autoMaxLot || Math.max(parsedMin || 0.01, fixedFallback))
+    return {
+      lot_mode: autoLotMode,
+      fixed_lot: autoLotMode === 'fixed' ? Math.max(parsedFixed, 0.01) : null,
+      min_lot: autoLotMode === 'range' ? Math.max(parsedMin, 0.01) : null,
+      max_lot: autoLotMode === 'range' ? Math.max(parsedMax, Math.max(parsedMin, 0.01)) : null,
+    }
+  }
 
   const handleTileClick = async (tile: string) => {
     switch (tile) {
@@ -493,7 +522,7 @@ function App() {
           await jsonFetch('/api/autotrade/toggle', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: nextEnabled, symbol }),
+            body: JSON.stringify({ enabled: nextEnabled, symbol, ...buildAutoTradeConfigPayload() }),
           })
           setBanner({
             tone: nextEnabled ? 'green' : 'amber',
@@ -538,6 +567,33 @@ function App() {
     }
   }
 
+  const saveAutoTraderSettings = async () => {
+    try {
+      await jsonFetch('/api/autotrade/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: Boolean(autoTrade?.enabled),
+          symbol,
+          ...buildAutoTradeConfigPayload(),
+        }),
+      })
+      setBanner({
+        tone: 'blue',
+        text:
+          autoLotMode === 'fixed'
+            ? `Auto trader fixed lot saved at ${formatNumber(Number(autoFixedLot || (dashboard?.simulation?.suggested_lot ?? 0.05)), 2)}.`
+            : `Auto trader lot clamp saved at ${formatNumber(Number(autoMinLot || 0.01), 2)} to ${formatNumber(Number(autoMaxLot || 0.05), 2)}.`,
+      })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({
+        tone: 'red',
+        text: error instanceof Error ? error.message : 'Unable to save auto trader lot settings.',
+      })
+    }
+  }
+
   const applyJudgeToExecution = (
     candidate: typeof judge | typeof localJudge,
     sourceLabel: 'Kimi' | 'Local V20',
@@ -578,7 +634,7 @@ function App() {
           path: brokerPath,
           symbol_prefix: brokerPrefix,
           symbol_suffix: brokerSuffix,
-          symbol_overrides: {},
+          symbol_overrides: brokerSymbolOverride.trim() ? { [symbol]: brokerSymbolOverride.trim() } : {},
         }),
       })
       setBanner({ tone: 'green', text: 'MT5 broker connected.' })
@@ -892,6 +948,50 @@ function App() {
                 </div>
               </div>
 
+              <div className="grid gap-4 md:grid-cols-4">
+                <div className="field-shell">
+                  <label className="field-label">Auto Lot Mode</label>
+                  <select
+                    value={autoLotMode}
+                    onChange={(event) => setAutoLotMode(event.target.value === 'fixed' ? 'fixed' : 'range')}
+                    className="field-input"
+                  >
+                    <option value="range">Clamp suggested lot</option>
+                    <option value="fixed">Fixed lot</option>
+                  </select>
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Auto Fixed Lot</label>
+                  <input
+                    value={autoFixedLot}
+                    onChange={(event) => setAutoFixedLot(event.target.value)}
+                    className="field-input"
+                    placeholder="0.10"
+                    disabled={autoLotMode !== 'fixed'}
+                  />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Auto Min Lot</label>
+                  <input
+                    value={autoMinLot}
+                    onChange={(event) => setAutoMinLot(event.target.value)}
+                    className="field-input"
+                    placeholder="0.01"
+                    disabled={autoLotMode !== 'range'}
+                  />
+                </div>
+                <div className="field-shell">
+                  <label className="field-label">Auto Max Lot</label>
+                  <input
+                    value={autoMaxLot}
+                    onChange={(event) => setAutoMaxLot(event.target.value)}
+                    className="field-input"
+                    placeholder="0.25"
+                    disabled={autoLotMode !== 'range'}
+                  />
+                </div>
+              </div>
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="field-shell">
                   <label className="field-label">MT5 Login</label>
@@ -917,6 +1017,15 @@ function App() {
                   <label className="field-label">Symbol Suffix</label>
                   <input value={brokerSuffix} onChange={(event) => setBrokerSuffix(event.target.value)} className="field-input" placeholder="Optional suffix like .a or m" />
                 </div>
+                <div className="field-shell sm:col-span-2">
+                  <label className="field-label">{symbol} Exact Broker Symbol</label>
+                  <input
+                    value={brokerSymbolOverride}
+                    onChange={(event) => setBrokerSymbolOverride(event.target.value)}
+                    className="field-input"
+                    placeholder="Examples: XAUUSDm, XAUUSD.a, GOLD"
+                  />
+                </div>
               </div>
 
               <div className="field-shell">
@@ -938,6 +1047,9 @@ function App() {
                 </button>
                 <button type="button" className="terminal-button terminal-button-blue" onClick={() => void connectBroker()}>
                   Connect MT5
+                </button>
+                <button type="button" className="terminal-button terminal-button-blue" onClick={() => void saveAutoTraderSettings()}>
+                  Save Auto Trader Settings
                 </button>
                 <button type="button" className="terminal-button terminal-button-ghost" onClick={() => void disconnectBroker()}>
                   Disconnect MT5

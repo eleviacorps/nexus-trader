@@ -114,6 +114,10 @@ class BrokerOrderRequest(BaseModel):
 class AutoTradeToggleRequest(BaseModel):
     enabled: bool
     symbol: str = "XAUUSD"
+    lot_mode: str | None = None
+    fixed_lot: float | None = None
+    min_lot: float | None = None
+    max_lot: float | None = None
 
 
 def _quick_runtime_from_payload(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
@@ -122,7 +126,8 @@ def _quick_runtime_from_payload(payload: Mapping[str, Any], *, mode: str) -> dic
     market = dict(payload.get("market", {}) if isinstance(payload.get("market"), Mapping) else {})
     direction = str(simulation.get("direction", "HOLD")).upper()
     confidence = str(simulation.get("confidence_tier", "low")).lower()
-    should_execute = direction in {"BUY", "SELL"} and confidence in {"moderate", "high", "very_high"}
+    frequency_mode = str(mode).lower() == "frequency"
+    should_execute = direction in {"BUY", "SELL"} if frequency_mode else direction in {"BUY", "SELL"} and confidence in {"moderate", "high", "very_high"}
     cone_width = float(simulation.get("cone_width_pips", 0.0) or 0.0)
     return {
         "available": True,
@@ -154,7 +159,7 @@ def _quick_runtime_from_payload(payload: Mapping[str, Any], *, mode: str) -> dic
         "cone_upper": list(simulation.get("cone_outer_upper", []) or []),
         "cone_lower": list(simulation.get("cone_outer_lower", []) or []),
         "regime_probs": [],
-        "v21_mode": "research" if str(mode).lower() == "frequency" else "production",
+        "v21_mode": "research" if frequency_mode else "production",
         "v21_dir_15m_prob": 0.5,
         "v21_bimamba_prob": 0.5,
         "v21_ensemble_prob": 0.5,
@@ -205,7 +210,56 @@ def create_app_v21() -> FastAPI:
         try:
             return float(fetch_live_quote(symbol) or 0.0)
         except Exception:
-            return 0.0
+            return float(broker_bridge.quote(symbol) or 0.0)
+
+    def _fallback_chart_payload(symbol: str, bars: int = 240) -> dict[str, Any]:
+        candles = broker_bridge.recent_candles(symbol, count=max(60, min(int(bars), 720)))
+        return {
+            "symbol": str(symbol).upper(),
+            "candles": candles,
+            "source": "mt5_local" if candles else "empty_local",
+        }
+
+    def _fallback_dashboard_payload(symbol: str) -> dict[str, Any]:
+        candles = broker_bridge.recent_candles(symbol, count=240)
+        current_price = float(candles[-1]["close"]) if candles else float(broker_bridge.quote(symbol) or 0.0)
+        direction = "HOLD"
+        if len(candles) >= 2:
+            if candles[-1]["close"] > candles[-2]["close"]:
+                direction = "BUY"
+            elif candles[-1]["close"] < candles[-2]["close"]:
+                direction = "SELL"
+        return {
+            "symbol": str(symbol).upper(),
+            "market": {
+                "current_price": current_price,
+                "candles": candles,
+            },
+            "realtime_chart": _fallback_chart_payload(symbol, bars=240),
+            "technical_analysis": {
+                "structure": "mt5_local_fallback",
+                "location": "broker_price_only",
+            },
+            "simulation": {
+                "direction": direction,
+                "confidence_tier": "low",
+                "tier_label": "MT5 LOCAL",
+                "overall_confidence": 0.35,
+                "cabr_score": 0.35,
+                "cpm_score": 0.35,
+                "cone_width_pips": 80.0,
+                "consensus_path": [current_price] * 4 if current_price else [],
+                "minority_path": [current_price] * 4 if current_price else [],
+                "cone_outer_upper": [current_price] * 4 if current_price else [],
+                "cone_outer_lower": [current_price] * 4 if current_price else [],
+                "sqt_label": "LOCAL",
+                "suggested_lot": 0.05,
+                "detected_regime": "mt5_local_fallback",
+                "branch_count": 3,
+            },
+            "feeds": {"news": [], "public_discussions": []},
+            "mfg": {"disagreement": 0.0, "consensus_drift": 0.0},
+        }
 
     def _decorate_local_v21(payload: dict[str, Any], local_judge: dict[str, Any]) -> dict[str, Any]:
         decorated = _decorate_kimi_judge(payload, local_judge)
@@ -220,6 +274,7 @@ def create_app_v21() -> FastAPI:
             "enabled": bool(broker.get("autotrade_enabled", False)),
             "broker_connected": bool(broker.get("connected", False)),
             "symbol": str(symbol).upper(),
+            "config": dict(broker.get("autotrade_config", {}) or {}),
             "last_action": broker.get("last_action", "idle"),
             "last_order": broker.get("last_order"),
             "last_error": broker.get("last_error", ""),
@@ -262,9 +317,15 @@ def create_app_v21() -> FastAPI:
         return _quick_runtime_from_payload(payload, mode=mode)
 
     def _dashboard_payload(symbol: str, mode: str, llm_provider: str, llm_model: str | None, *, with_kimi: bool = False, force_kimi: bool = False) -> dict[str, Any]:
-        payload = build_fast_dashboard_payload(symbol)
+        try:
+            payload = build_fast_dashboard_payload(symbol)
+        except Exception:
+            payload = _fallback_dashboard_payload(symbol)
         payload["paper_trading"] = _paper_state(symbol)
-        payload["realtime_chart"] = build_realtime_chart_payload(symbol)
+        try:
+            payload["realtime_chart"] = build_realtime_chart_payload(symbol)
+        except Exception:
+            payload["realtime_chart"] = _fallback_chart_payload(symbol)
         runtime = _resolve_runtime(payload, symbol, mode)
         local_judge = _decorate_local_v21(payload, build_v21_local_judge(payload, runtime))
         simulation = dict(payload.get("simulation", {}))
@@ -343,7 +404,10 @@ def create_app_v21() -> FastAPI:
 
     @app.get("/api/chart/realtime")
     def realtime_chart(symbol: str = "XAUUSD", bars: int = 240):
-        return build_realtime_chart_payload(symbol, bars=max(60, min(int(bars), 720)))
+        try:
+            return build_realtime_chart_payload(symbol, bars=max(60, min(int(bars), 720)))
+        except Exception:
+            return _fallback_chart_payload(symbol, bars=max(60, min(int(bars), 720)))
 
     @app.get("/api/dashboard/live")
     def dashboard_live(symbol: str = "XAUUSD", llm_provider: str = "nvidia_nim", llm_model: str | None = None, mode: str = "frequency"):
@@ -429,7 +493,16 @@ def create_app_v21() -> FastAPI:
     def autotrade_toggle(request: AutoTradeToggleRequest):
         if bool(request.enabled) and not broker_bridge.can_trade():
             raise HTTPException(status_code=400, detail="Connect MT5 before enabling auto trader.")
-        return {"ok": True, "auto_trade": broker_bridge.set_autotrade(bool(request.enabled))}
+        return {
+            "ok": True,
+            "auto_trade": broker_bridge.set_autotrade(
+                bool(request.enabled),
+                lot_mode=request.lot_mode,
+                fixed_lot=request.fixed_lot,
+                min_lot=request.min_lot,
+                max_lot=request.max_lot,
+            ),
+        }
 
     @app.post("/api/paper/open")
     def paper_open(request: PaperOpenRequest):
@@ -502,13 +575,26 @@ def create_app_v21() -> FastAPI:
                     broker = broker_bridge.status()
                     if broker.get("autotrade_enabled") and broker.get("connected"):
                         symbol = "XAUUSD"
-                        payload = build_fast_dashboard_payload(symbol)
+                        try:
+                            payload = build_fast_dashboard_payload(symbol)
+                        except Exception:
+                            payload = _fallback_dashboard_payload(symbol)
                         payload["paper_trading"] = _paper_state(symbol)
-                        payload["realtime_chart"] = build_realtime_chart_payload(symbol)
-                        runtime = _resolve_runtime(payload, symbol, "frequency")
+                        try:
+                            payload["realtime_chart"] = build_realtime_chart_payload(symbol)
+                        except Exception:
+                            payload["realtime_chart"] = _fallback_chart_payload(symbol)
+                        try:
+                            runtime = build_v21_runtime_state(payload, mode="frequency")
+                            if runtime.get("available", False):
+                                runtime_cache[_runtime_key(symbol, "frequency")] = (time.time(), runtime)
+                            else:
+                                runtime = _quick_runtime_from_payload(payload, mode="frequency")
+                        except Exception:
+                            runtime = _quick_runtime_from_payload(payload, mode="frequency")
                         judge = build_v21_local_judge(payload, runtime)
                         content = dict(judge.get("content", {}))
-                        stance = str(content.get("stance", runtime.get("raw_stance", "HOLD"))).upper()
+                        stance = str(runtime.get("decision_direction", content.get("final_call", content.get("stance", "HOLD")))).upper()
                         bucket = int(time.time() // 900)
                         last_order = broker.get("last_order") or {}
                         last_bucket = int(((broker_bridge._read_state().get("last_bucket_by_symbol", {}) or {}).get(symbol, -1)))
@@ -518,7 +604,8 @@ def create_app_v21() -> FastAPI:
                             and not broker_bridge.has_open_position(symbol)
                             and bucket != last_bucket
                         ):
-                            volume = float((runtime.get("lepl_features") or {}).get("suggested_lot", 0.01) or 0.01)
+                            suggested_volume = float((runtime.get("lepl_features") or {}).get("suggested_lot", 0.01) or 0.01)
+                            volume, volume_source = broker_bridge.resolve_autotrade_volume(suggested_volume)
                             order = broker_bridge.place_market_order(
                                 symbol=symbol,
                                 direction=stance,
@@ -530,7 +617,12 @@ def create_app_v21() -> FastAPI:
                             state = broker_bridge._read_state()
                             last_by_symbol = dict(state.get("last_bucket_by_symbol", {}) or {})
                             last_by_symbol[symbol] = bucket
-                            broker_bridge._patch_state(last_bucket_by_symbol=last_by_symbol, last_order=order, last_action="autotrade_order_sent", last_error="")
+                            broker_bridge._patch_state(
+                                last_bucket_by_symbol=last_by_symbol,
+                                last_order=order | {"volume_source": volume_source, "suggested_volume": suggested_volume},
+                                last_action="autotrade_order_sent",
+                                last_error="",
+                            )
                         elif runtime.get("should_execute", False) and stance in {"BUY", "SELL"} and broker_bridge.has_open_position(symbol):
                             broker_bridge._patch_state(last_action="autotrade_skipped_existing_position")
                         elif not runtime.get("should_execute", False):
@@ -548,9 +640,15 @@ def create_app_v21() -> FastAPI:
         # Warm the default desk payload once so the first browser load does not sit on the initializing banner.
         def _warm_default() -> None:
             try:
-                payload = build_fast_dashboard_payload("XAUUSD")
+                try:
+                    payload = build_fast_dashboard_payload("XAUUSD")
+                except Exception:
+                    payload = _fallback_dashboard_payload("XAUUSD")
                 payload["paper_trading"] = _paper_state("XAUUSD")
-                payload["realtime_chart"] = build_realtime_chart_payload("XAUUSD")
+                try:
+                    payload["realtime_chart"] = build_realtime_chart_payload("XAUUSD")
+                except Exception:
+                    payload["realtime_chart"] = _fallback_chart_payload("XAUUSD")
                 runtime_cache[_runtime_key("XAUUSD", "frequency")] = (time.time(), build_v21_runtime_state(payload, mode="frequency"))
             except Exception:
                 pass
