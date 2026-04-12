@@ -21,7 +21,11 @@ VERIFY_IMPORTS = [
     "src.v17.mmm",
     "src.v18.mfg_beliefs",
     "src.v20.mamba_backbone",
-    "src.v21.xLSTM_backbone",
+    "src.v21.xlstm_backbone",
+    "src.v22.hybrid_risk_judge",
+    "src.v22.ensemble_judge_stack",
+    "src.v22.online_hmm",
+    "src.v22.circuit_breaker",
 ]
 
 

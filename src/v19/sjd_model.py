@@ -221,6 +221,7 @@ def train_sjd_model(
     dataset_path: Path = V19_SJD_DATASET_PATH,
     feature_names_path: Path = V19_SJD_FEATURE_NAMES_PATH,
     checkpoint_path: Path = V19_SJD_MODEL_PATH,
+    npz_output_path: Path = V19_SJD_MODEL_NPZ_PATH,
     epochs: int = 30,
     batch_size: int = 512,
     lr: float = 3e-4,
@@ -313,9 +314,10 @@ def train_sjd_model(
     if best_payload is None:
         raise RuntimeError("SJD training did not produce a valid checkpoint.")
     torch.save(best_payload, checkpoint_path)
-    export_sjd_npz(checkpoint_path=checkpoint_path, output_path=V19_SJD_MODEL_NPZ_PATH)
+    export_sjd_npz(checkpoint_path=checkpoint_path, output_path=npz_output_path)
     return {
         "checkpoint_path": str(checkpoint_path),
+        "npz_output_path": str(npz_output_path),
         "validation_metrics": best_metrics or {},
         "train_size": int(len(train_idx)),
         "valid_size": int(len(valid_idx)),

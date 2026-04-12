@@ -37,12 +37,23 @@ class V18KimiPromptTests(unittest.TestCase):
                 "sqt": {"label": "HOT", "rolling_accuracy": 0.7},
                 "news_feed": [{"title": "<b>Gold rallies</b> - Reuters", "source": "Reuters", "sentiment": 0.2}],
                 "mfg": {"disagreement": 0.0002, "consensus_drift": 0.0001},
+                "live_performance": {"rolling_win_rate_10": 0.6, "consecutive_losses": 1, "equity": 1000.0},
+                "v21_runtime": {"runtime_version": "v21_local", "v21_ensemble_prob": 0.64, "v21_meta_label_prob": 0.58},
+                "v22_runtime": {
+                    "online_hmm": {"regime_confidence": 0.72, "persistence_count": 4},
+                    "circuit_breaker": {"state": "CLEAR", "trading_allowed": True},
+                    "ensemble": {"agreement_rate": 0.8, "meta_label_prob": 0.61},
+                    "risk_check": {"rr_ratio": 1.8},
+                },
             },
             "XAUUSD",
         )
         self.assertIn("SIMULATION SUMMARY", message)
         self.assertIn("Gold rallies", message)
         self.assertNotIn("<b>", message)
+        self.assertIn("V21 LOCAL RUNTIME", message)
+        self.assertIn("V22 RISK STACK", message)
+        self.assertIn("Rolling win rate", message)
 
     def test_parse_kimi_response_accepts_fenced_json(self) -> None:
         payload = parse_kimi_response(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -514,10 +515,19 @@ def capital_backtest_from_unit_pnl(
 
 
 def _loader_kwargs() -> dict[str, Any]:
-    workers = max(0, int(NUM_WORKERS))
+    env_workers = os.environ.get("NEXUS_NUM_WORKERS", "").strip()
+    if env_workers:
+        try:
+            workers = max(0, int(env_workers))
+        except ValueError:
+            workers = max(0, int(NUM_WORKERS))
+    else:
+        # Windows sandboxed sessions regularly fail when PyTorch opens worker pipes.
+        # Keep Linux/remote training behavior unchanged while making local evaluation reliable.
+        workers = 0 if os.name == "nt" else max(0, int(NUM_WORKERS))
     kwargs: dict[str, Any] = {
         "num_workers": workers,
-        "pin_memory": bool(PIN_MEMORY),
+        "pin_memory": bool(PIN_MEMORY and workers > 0),
     }
     if workers > 0:
         kwargs["persistent_workers"] = bool(PERSISTENT_WORKERS)

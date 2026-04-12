@@ -390,6 +390,134 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _trade_like_pnl(item: Mapping[str, Any]) -> float:
+    for key in ("pnl_usd", "profit", "net_pnl", "realized_pnl"):
+        if key in item:
+            return _safe_float(item.get(key), 0.0)
+    return 0.0
+
+
+def _paper_performance_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    paper = dict(payload.get("paper_trading", {}) if isinstance(payload.get("paper_trading"), Mapping) else {})
+    summary = dict(paper.get("summary", {}) if isinstance(paper.get("summary"), Mapping) else {})
+    closed_positions = list(
+        paper.get("closed_positions", paper.get("closed_trades", []))
+        if isinstance(paper.get("closed_positions", paper.get("closed_trades", [])), list)
+        else []
+    )
+    recent_closed = [item for item in closed_positions[-10:] if isinstance(item, Mapping)]
+    pnl = [_trade_like_pnl(item) for item in recent_closed]
+    rolling_win_rate = float(sum(1 for value in pnl if value > 0.0) / len(pnl)) if pnl else 0.0
+    consecutive_losses = 0
+    for value in reversed(pnl):
+        if value < 0.0:
+            consecutive_losses += 1
+        else:
+            break
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    daily_pnl = 0.0
+    for item in closed_positions:
+        if not isinstance(item, Mapping):
+            continue
+        close_time = str(item.get("closed_at", item.get("exit_time", item.get("timestamp", ""))))
+        if today_iso in close_time:
+            daily_pnl += _trade_like_pnl(item)
+    return {
+        "balance": round(_safe_float(summary.get("balance"), 0.0), 6),
+        "equity": round(_safe_float(summary.get("equity"), _safe_float(summary.get("balance"), 0.0)), 6),
+        "open_positions": _safe_int(len(list(paper.get("open_positions", []))) if isinstance(paper.get("open_positions"), list) else 0, 0),
+        "closed_trades_total": _safe_int(len(closed_positions), 0),
+        "rolling_win_rate_10": round(rolling_win_rate, 6),
+        "consecutive_losses": int(consecutive_losses),
+        "daily_pnl": round(daily_pnl, 6),
+    }
+
+
+def _runtime_brief(runtime: Mapping[str, Any] | None) -> dict[str, Any]:
+    runtime_mapping = dict(runtime or {})
+    lepl = dict(runtime_mapping.get("lepl_features", {}) if isinstance(runtime_mapping.get("lepl_features"), Mapping) else {})
+    return {
+        "runtime_version": str(runtime_mapping.get("runtime_version", "")),
+        "decision_direction": str(runtime_mapping.get("decision_direction", runtime_mapping.get("raw_stance", "HOLD"))),
+        "raw_stance": str(runtime_mapping.get("raw_stance", "HOLD")),
+        "should_execute": bool(runtime_mapping.get("should_execute", False)),
+        "execution_reason": str(runtime_mapping.get("execution_reason", "")),
+        "confidence_tier": str(runtime_mapping.get("confidence_tier", "")),
+        "cabr_score": round(_safe_float(runtime_mapping.get("cabr_score"), 0.0), 6),
+        "cpm_score": round(_safe_float(runtime_mapping.get("cpm_score"), 0.0), 6),
+        "cone_width_pips": round(_safe_float(runtime_mapping.get("cone_width_pips"), 0.0), 3),
+        "selected_branch_label": str(runtime_mapping.get("selected_branch_label", "")),
+        "v21_dir_15m_prob": round(_safe_float(runtime_mapping.get("v21_dir_15m_prob"), 0.0), 6),
+        "v21_bimamba_prob": round(_safe_float(runtime_mapping.get("v21_bimamba_prob"), 0.0), 6),
+        "v21_ensemble_prob": round(_safe_float(runtime_mapping.get("v21_ensemble_prob"), 0.0), 6),
+        "v21_disagree_prob": round(_safe_float(runtime_mapping.get("v21_disagree_prob"), 0.0), 6),
+        "v21_meta_label_prob": round(_safe_float(runtime_mapping.get("v21_meta_label_prob"), 0.0), 6),
+        "v21_dangerous_branch_count": _safe_int(runtime_mapping.get("v21_dangerous_branch_count"), 0),
+        "v21_regime_label": str(runtime_mapping.get("v21_regime_label", "")),
+        "v21_used_branch_fallback": bool(runtime_mapping.get("v21_used_branch_fallback", False)),
+        "lepl_features": {
+            "kelly_fraction": round(_safe_float(lepl.get("kelly_fraction"), 0.0), 6),
+            "suggested_lot": round(_safe_float(lepl.get("suggested_lot"), 0.0), 4),
+            "conformal_confidence": round(_safe_float(lepl.get("conformal_confidence"), 0.0), 6),
+            "dangerous_branch_count": _safe_int(lepl.get("dangerous_branch_count"), 0),
+            "paper_equity": round(_safe_float(lepl.get("paper_equity"), 0.0), 6),
+        },
+    }
+
+
+def _v22_runtime_brief(payload: Mapping[str, Any]) -> dict[str, Any]:
+    runtime = dict(payload.get("v22_runtime", {}) if isinstance(payload.get("v22_runtime"), Mapping) else {})
+    online_hmm = dict(runtime.get("online_hmm", payload.get("online_hmm", {})) if isinstance(runtime.get("online_hmm", payload.get("online_hmm", {})), Mapping) else {})
+    circuit_breaker = dict(runtime.get("circuit_breaker", payload.get("circuit_breaker", {})) if isinstance(runtime.get("circuit_breaker", payload.get("circuit_breaker", {})), Mapping) else {})
+    ensemble = dict(runtime.get("ensemble", {}) if isinstance(runtime.get("ensemble"), Mapping) else {})
+    risk_check = dict(runtime.get("risk_check", {}) if isinstance(runtime.get("risk_check"), Mapping) else {})
+    return {
+        "runtime_version": str(runtime.get("runtime_version", "")),
+        "online_hmm": {
+            "regime_label": str(online_hmm.get("regime_label", "")),
+            "regime_confidence": round(_safe_float(online_hmm.get("regime_confidence"), 0.0), 6),
+            "persistence_count": _safe_int(online_hmm.get("persistence_count"), 0),
+            "lot_size_multiplier": round(_safe_float(online_hmm.get("lot_size_multiplier"), 1.0), 6),
+            "low_confidence_flag": bool(online_hmm.get("low_confidence_flag", False)),
+            "persistence_conflict": bool(online_hmm.get("persistence_conflict", False)),
+            "reasons": list(online_hmm.get("reasons", []))[:6],
+        },
+        "circuit_breaker": {
+            "trading_allowed": bool(circuit_breaker.get("trading_allowed", True)),
+            "state": str(circuit_breaker.get("state", "CLEAR")),
+            "pause_until": circuit_breaker.get("pause_until"),
+            "size_multiplier": round(_safe_float(circuit_breaker.get("size_multiplier"), 1.0), 6),
+            "consecutive_losses": _safe_int(circuit_breaker.get("consecutive_losses"), 0),
+            "rolling_win_rate_10": round(_safe_float(circuit_breaker.get("rolling_win_rate_10"), 0.0), 6),
+            "daily_drawdown_pct": round(_safe_float(circuit_breaker.get("daily_drawdown_pct"), 0.0), 6),
+            "reasons": list(circuit_breaker.get("reasons", []))[:6],
+        },
+        "ensemble": {
+            "action": str(ensemble.get("action", "")),
+            "confidence": round(_safe_float(ensemble.get("confidence"), 0.0), 6),
+            "agreement_count": _safe_int(ensemble.get("agreement_count"), 0),
+            "agreement_rate": round(_safe_float(ensemble.get("agreement_rate"), 0.0), 6),
+            "meta_label_prob": round(_safe_float(ensemble.get("meta_label_prob"), 0.0), 6),
+            "risk_score": round(_safe_float(ensemble.get("risk_score"), 0.0), 6),
+            "conformal_set_size": _safe_int(ensemble.get("conformal_set_size"), 0),
+            "max_lot": round(_safe_float(ensemble.get("max_lot"), 0.0), 4),
+        },
+        "risk_check": {
+            "rr_ratio": round(_safe_float(risk_check.get("rr_ratio"), runtime.get("rr_ratio", 0.0)), 6),
+            "stop_loss": round(_safe_float(risk_check.get("stop_loss"), runtime.get("stop_loss", 0.0)), 5),
+            "take_profit": round(_safe_float(risk_check.get("take_profit"), runtime.get("take_profit", 0.0)), 5),
+            "atr_14": round(_safe_float(risk_check.get("atr_14"), 0.0), 5),
+        },
+    }
+
+
 def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
     market = payload.get("market", {}) if isinstance(payload, dict) else {}
     simulation = payload.get("simulation", {}) if isinstance(payload, dict) else {}
@@ -399,6 +527,7 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sqt = payload.get("sqt", {}) if isinstance(payload, dict) else {}
     model_prediction = payload.get("model_prediction", {}) if isinstance(payload, dict) else {}
     current_price = _safe_float(market.get("current_price"), 0.0)
+    atr_14 = _safe_float(technical_analysis.get("atr_14"), _safe_float(payload.get("current_row", {}).get("atr_14"), 0.0))
     confidence = _safe_float(simulation.get("overall_confidence"), _safe_float(simulation.get("cabr_score"), 0.0))
     regime = str(
         simulation.get(
@@ -421,6 +550,7 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
     recent_closes = [_safe_float(item.get("close"), current_price) for item in recent_candles]
     market_context = {
         "current_price": round(current_price, 5),
+        "atr_14": round(atr_14, 5),
         "recent_5m_candles": recent_candles,
         "session_high": round(max([_safe_float(item.get("high"), current_price) for item in recent_candles], default=current_price), 5),
         "session_low": round(min([_safe_float(item.get("low"), current_price) for item in recent_candles], default=current_price), 5),
@@ -467,6 +597,9 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "suggested_lot": round(_safe_float(simulation.get("suggested_lot"), 0.0), 4),
             "cone_c_m": round(_safe_float(simulation.get("cone_c_m"), 0.0), 6),
             "entry_zone": simulation.get("entry_zone", []),
+            "confidence_tier": str(simulation.get("confidence_tier", "")),
+            "should_execute": bool(simulation.get("should_execute", False)),
+            "execution_reason": str(simulation.get("execution_reason", "")),
         },
         "technical_analysis": reduced_technical_analysis,
         "bot_swarm": reduced_bot_swarm,
@@ -475,6 +608,32 @@ def build_kimi_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "sqt": sqt,
         "mfg": payload.get("mfg", {}),
         "v18_paths": v18_paths,
+        "v21_runtime": _runtime_brief(payload.get("v21_runtime") if isinstance(payload.get("v21_runtime"), Mapping) else payload.get("v19_runtime")),
+        "v22_runtime": _v22_runtime_brief(payload),
+        "live_performance": _paper_performance_summary(payload),
+        "risk_controls": {
+            "broker": {
+                "autotrade_enabled": bool(((payload.get("broker") or {}).get("autotrade_enabled")) if isinstance(payload.get("broker"), Mapping) else False),
+                "last_order_volume": round(
+                    _safe_float(
+                        (((payload.get("broker") or {}).get("last_order") or {}).get("volume"))
+                        if isinstance(((payload.get("broker") or {}).get("last_order")), Mapping)
+                        else 0.0,
+                        0.0,
+                    ),
+                    4,
+                ),
+                "suggested_volume": round(
+                    _safe_float(
+                        (((payload.get("broker") or {}).get("last_order") or {}).get("suggested_volume"))
+                        if isinstance(((payload.get("broker") or {}).get("last_order")), Mapping)
+                        else 0.0,
+                        0.0,
+                    ),
+                    4,
+                ),
+            }
+        },
     }
 
 

@@ -20,6 +20,7 @@ from src.evaluation.walkforward import (
     _parse_horizon_minutes,
     apply_bucket_calibration,
     build_event_driven_backtest,
+    directional_backtest,
     load_event_price_frame,
     load_model,
     resolve_gate_context_path,
@@ -31,6 +32,7 @@ from src.evaluation.walkforward import (
 )
 from src.backtest.engine import capital_backtest_from_unit_pnl, fixed_risk_capital_backtest_from_unit_pnl
 from src.training.meta_gate import load_meta_gate
+from src.v22.backtest_metrics import attach_v22_month_metrics
 
 
 def _tagged_eval_path(stem: str, run_tag: str, suffix: str = ".json") -> Path:
@@ -145,7 +147,7 @@ def main() -> int:
     except Exception:
         meta_gate = None
     gate_context = _safe_gate_context(resolve_gate_context_path(manifest), row_slice, sequence_len)
-    _, _, gate_scores = _combined_gate_scores(
+    _, _, _, gate_scores = _combined_gate_scores(
         probabilities,
         precision_gate,
         meta_gate,
@@ -154,21 +156,38 @@ def main() -> int:
 
     calibrated_horizon_probabilities = apply_bucket_calibration(direction_probabilities[:, horizon_idx], calibration)
     price_frame = load_event_price_frame()
-    report = build_event_driven_backtest(
-        direction_targets[:, horizon_idx],
-        calibrated_horizon_probabilities,
-        row_slice=row_slice,
-        sequence_len=sequence_len,
-        hold_bars=_parse_horizon_minutes(args.horizon),
-        decision_threshold=float(thresholds.get("decision_threshold", 0.53)),
-        confidence_floor=float(thresholds.get("confidence_floor", 0.06)),
-        gate_scores=gate_scores,
-        gate_threshold=float(thresholds.get("gate_threshold", 0.5)),
-        hold_probabilities=hold_probabilities[:, horizon_idx],
-        hold_threshold=float(thresholds.get("hold_threshold", 0.55)),
-        confidence_probabilities=confidence_probabilities[:, horizon_idx],
-        price_frame=price_frame,
-    )
+    hold_bars = _parse_horizon_minutes(args.horizon)
+    try:
+        report = build_event_driven_backtest(
+            direction_targets[:, horizon_idx],
+            calibrated_horizon_probabilities,
+            row_slice=row_slice,
+            sequence_len=sequence_len,
+            hold_bars=hold_bars,
+            decision_threshold=float(thresholds.get("decision_threshold", 0.53)),
+            confidence_floor=float(thresholds.get("confidence_floor", 0.06)),
+            gate_scores=gate_scores,
+            gate_threshold=float(thresholds.get("gate_threshold", 0.5)),
+            hold_probabilities=hold_probabilities[:, horizon_idx],
+            hold_threshold=float(thresholds.get("hold_threshold", 0.55)),
+            confidence_probabilities=confidence_probabilities[:, horizon_idx],
+            price_frame=price_frame,
+        )
+        report["backtest_engine"] = "event_driven"
+    except ValueError as exc:
+        report = directional_backtest(
+            direction_targets[:, horizon_idx],
+            calibrated_horizon_probabilities,
+            decision_threshold=float(thresholds.get("decision_threshold", 0.53)),
+            confidence_floor=float(thresholds.get("confidence_floor", 0.06)),
+            gate_scores=gate_scores,
+            gate_threshold=float(thresholds.get("gate_threshold", 0.5)),
+            hold_probabilities=hold_probabilities[:, horizon_idx],
+            hold_threshold=float(thresholds.get("hold_threshold", 0.55)),
+            confidence_probabilities=confidence_probabilities[:, horizon_idx],
+        )
+        report["backtest_engine"] = "directional_fallback"
+        report["event_backtest_error"] = str(exc)
 
     pnl = np.asarray([float(trade.get("net_unit_pnl", 0.0)) for trade in report.get("trades", [])], dtype=np.float32)
     report["custom_capital_backtests"] = {
@@ -186,6 +205,8 @@ def main() -> int:
     report["selected_horizon"] = args.horizon
     report["row_slice"] = {"start": int(row_slice.start), "stop": int(row_slice.stop), "count": int(len(row_slice))}
 
+    report = attach_v22_month_metrics(report, mode=args.horizon)
+
     out_path = _tagged_eval_path(f"month_backtest_{month}", args.run_tag)
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(str(out_path))
@@ -199,6 +220,9 @@ def main() -> int:
             "win_rate": float(report.get("win_rate", 0.0)),
             "avg_unit_pnl": float(report.get("avg_unit_pnl", 0.0)),
             "cumulative_unit_pnl": float(report.get("cumulative_unit_pnl", 0.0)),
+            "avg_realized_rr": float(((report.get("trade_health") or {}).get("avg_realized_rr", 0.0) or 0.0)),
+            "longest_loss_streak": int(((report.get("trade_health") or {}).get("longest_loss_streak", 0) or 0)),
+            "trade_frequency_target_met": bool(((report.get("v22_new_metrics") or {}).get("trade_frequency_target_met", False))),
             "usd_100_fixed_risk_final": float(report["custom_capital_backtests"]["usd_100_fixed_risk"].get("final_capital", 0.0)),
             "usd_100_fixed_risk_max_dd": float(report["custom_capital_backtests"]["usd_100_fixed_risk"].get("max_drawdown_pct", 0.0)),
         },
