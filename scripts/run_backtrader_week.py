@@ -145,7 +145,7 @@ def _build_signal_frame(
             context_arr = np.load(GATE_CONTEXT_PATH, mmap_mode="r")
             context_features = np.asarray(context_arr[sequence_len - 1 : sequence_len - 1 + usable], dtype=np.float32)
 
-        _, _, gate_scores = _combined_gate_scores(
+        _, _, _, gate_scores = _combined_gate_scores(
             probabilities,
             precision_gate,
             meta_gate,
