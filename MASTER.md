@@ -6890,3 +6890,31 @@ The V24.1 validation phase has been successfully implemented with all required c
 5. Comprehensive calibration and validation
 
 The implementation meets all the core requirements outlined in the V24.1 validation theory and prompt.
+
+## V24.4.1 Final Validation Complete (2026-04-15)
+
+Independent benchmark rerun completed with:
+- `scripts/validate_v24_4_1_codex.py`
+
+Measured aggregate results:
+- V24.1: participation `0.460935`, expectancy `0.000218R`, max drawdown `0.126736`
+- V24.3: participation `0.682246`, expectancy `-0.000021R`, max drawdown `0.135903`
+- V24.4: participation `0.055110`, expectancy `0.000170R`, max drawdown `0.018710`
+
+Interpretation:
+- V24.4 lowers drawdown and raises win rate, but participation and expectancy targets are not met.
+- Verdict remains: `not improved` for deployment criteria.
+
+Artifacts:
+- `outputs/v24_4_1/*`
+- `outputs/V24_4_1_final_verdict.md`
+
+## Codex Independent Audit Complete (2026-04-15)
+
+Audit outputs created:
+- `outputs/codex_v24_audit/code_review_report.md`
+- `outputs/codex_v24_audit/metric_verification.md`
+- `outputs/codex_v24_audit/deployment_score.json`
+- `outputs/codex_v24_audit/final_fix_list.md`
+
+Deployment status: NOT READY

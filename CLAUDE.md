@@ -159,3 +159,25 @@ V24.2 extends V24.1 with tactical trading capabilities:
 ## Conclusion
 
 The Nexus Trader V24/V24.2 implementation represents a comprehensive trading system architecture that has been scientifically validated to meet all performance targets while maintaining proper risk management and system reliability.
+
+## V24.4.1 Validation Results (2026-04-15)
+
+Independent rerun command:
+- `C:\Users\rfsga\miniconda3\python.exe scripts\validate_v24_4_1_codex.py`
+
+Actual aggregate metrics (`outputs/v24_4_1/metric_comparison.json`):
+- V24.3: participation `0.682246`, win rate `0.502045`, expectancy `-0.000021R`, max drawdown `0.135903`
+- V24.4: participation `0.055110`, win rate `0.683544`, expectancy `0.000170R`, max drawdown `0.018710`
+
+Comparison vs V24.3:
+- V24.4 improved win rate and drawdown.
+- V24.4 severely under-trades and does not meet expectancy target.
+- Required deployment zone (participation `0.15-0.30`, expectancy `>0.12R`, drawdown `<0.18`) is not satisfied.
+
+Live paper trading decision:
+- Do not proceed to live paper trading yet.
+
+Recommended threshold changes:
+- Reduce trend-continuation threshold weight (negative expectancy in regime breakdown).
+- Relax admission/cooldown strictness to recover participation into the target band.
+- Recalibrate thresholds on `2023-12`, `2024-12`, and latest 30-day window before re-audit.
