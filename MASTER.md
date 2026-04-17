@@ -6918,3 +6918,95 @@ Audit outputs created:
 - `outputs/codex_v24_audit/final_fix_list.md`
 
 Deployment status: NOT READY
+
+## V24.4.2 -> V25 Unified Recovery Session (2026-04-17)
+
+### Phase 0 - Baseline and Root-Cause Lock
+- What was implemented:
+  - Re-ran baseline diagnostics through `scripts/validate_v24_4_1_codex.py`.
+  - Wrote `outputs/v24_4_2/baseline_root_cause.md` with quantified overtrade/undertrade and ablation impact.
+- What failed:
+  - Baseline still confirmed non-deployable V24.4.1 profile.
+- Current best metrics:
+  - V24.4 baseline participation `0.055110`, win-rate `0.683544`, expectancy `0.000170R`, drawdown `0.018710`.
+- Current blockers:
+  - Participation and expectancy mismatch versus deployment gates.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 1 - V24.4.2 Participation Recovery
+- What was implemented:
+  - Added `src/v24_4_2/regime_threshold_router.py`.
+  - Added `src/v24_4_2/adaptive_admission.py`.
+  - Added `src/v24_4_2/sell_bias_guard.py`.
+  - Added `src/v24_4_2/threshold_optimizer.py`.
+  - Added runtime integration `src/v24_4_2/recovery_runtime.py`.
+  - Added scripts `scripts/train_v24_4_2_thresholds.py`, `scripts/validate_v24_4_2.py`.
+  - Generated `outputs/v24_4_2/grid_search_results.json`, `outputs/v24_4_2/best_threshold_config.json`, `outputs/v24_4_2/final_validation.md`.
+- What failed:
+  - Target win-rate and expectancy remained below requested deployment gates.
+- Current best metrics:
+  - Participation `0.237705`, win-rate `0.546588`, expectancy `0.000244R`, drawdown `0.048340`.
+  - Best config: `trend_up=0.74`, `trend_down=0.84`, `breakout=0.78`, `range=0.80`, `cooldown_decay=0.70`, `cluster_radius=0.20`, `size_multiplier=0.95`.
+- Current blockers:
+  - Expectancy not close to `>0.12R`.
+  - Win-rate below `>60%`.
+  - Regime robustness insufficient (positive expectancy in 2 regimes, target >=3).
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 2 - Deployment Readiness Validation
+- What was implemented:
+  - Added `scripts/deployment_readiness_check.py` with continuous weighted score model (0-100).
+  - Generated `outputs/deployment/deployment_readiness.json`.
+- What failed:
+  - Deployment score did not reach deployment-ready threshold.
+- Current best metrics:
+  - Total score `73.409623`.
+  - Score parts: metric `39.1604`, stability `17.582556`, regime robustness `6.666667`, operational safety `10.0`.
+- Current blockers:
+  - Expectancy gate failed.
+  - Win-rate gate failed.
+  - Regime robustness gate failed.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 3-6 - V25 Execution Stack + Claude/Kimi Judge + Paper Integration
+- What was implemented:
+  - Added `src/v25/execution_mode_router.py`.
+  - Added `src/v25/manual_execution_queue.py`.
+  - Added `src/v25/auto_execution_engine.py`.
+  - Added `src/v25/execution_dashboard.py`.
+  - Added `src/v25/claude_execution_judge.py`.
+  - Added `src/v25/claude_execution_prompt.md`.
+  - Added `src/service/claude_trade_gateway.py`.
+  - Added `src/service/claude_trade_router.py`.
+  - Added `src/v25/mt5_bridge.py`.
+  - Added `src/v25/paper_trade_engine.py`.
+  - Added `src/v25/live_trade_logger.py`.
+  - Added `scripts/run_v25_proxy_paper.py`.
+  - Generated live artifacts: `outputs/live/claude_decision_log.jsonl`, `outputs/live/live_paper_report.json`, `outputs/live/trade_log.csv`.
+- What failed:
+  - Live NIM calls failed in-session (404/401), so fail-closed policy blocked auto approvals without cache.
+  - Proxy replay produced zero closed paper trades under auto-gating because readiness < 90 and judge unavailable.
+- Current best metrics:
+  - Proxy report: `trade_candidates=41`, `closed_positions=0`, `proxy_positive=false`.
+- Current blockers:
+  - Judge availability and auth for configured model chain.
+  - Deployment readiness below auto-mode threshold.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 7 - Promotion / Stop Condition
+- What was implemented:
+  - Produced blocker summary `outputs/v25/final_release_summary.md`.
+- What failed:
+  - Promotion conditions were not met (`score < 90` and proxy paper not positive).
+- Current best metrics:
+  - Deployment score `73.409623`.
+- Current blockers:
+  - Expectancy, win-rate, regime robustness, and live judge availability.
+- Deployment status:
+  - `BLOCKED`.
+
+Deployment status: BLOCKED

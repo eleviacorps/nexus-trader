@@ -181,3 +181,74 @@ Recommended threshold changes:
 - Reduce trend-continuation threshold weight (negative expectancy in regime breakdown).
 - Relax admission/cooldown strictness to recover participation into the target band.
 - Recalibrate thresholds on `2023-12`, `2024-12`, and latest 30-day window before re-audit.
+
+## V24.4.2 -> V25 Session Journal (2026-04-17)
+
+### Phase 0
+- What was implemented:
+  - Baseline rerun via `scripts/validate_v24_4_1_codex.py`.
+  - Root-cause note written to `outputs/v24_4_2/baseline_root_cause.md`.
+- What failed:
+  - Baseline remained non-deployable.
+- Current best metrics:
+  - V24.4 baseline participation `0.055110`, expectancy `0.000170R`.
+- Current blockers:
+  - Participation/expectancy gates.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 1
+- What was implemented:
+  - New V24.4.2 modules in `src/v24_4_2/*`.
+  - New scripts `scripts/train_v24_4_2_thresholds.py`, `scripts/validate_v24_4_2.py`.
+  - Artifacts: `outputs/v24_4_2/grid_search_results.json`, `best_threshold_config.json`, `final_validation.md`.
+- What failed:
+  - Win-rate and expectancy gates remain below target.
+- Current best metrics:
+  - Participation `0.237705`, win-rate `0.546588`, expectancy `0.000244R`, drawdown `0.048340`.
+- Current blockers:
+  - Expectancy scaling and precision quality.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 2
+- What was implemented:
+  - `scripts/deployment_readiness_check.py` (continuous weighted scoring).
+  - `outputs/deployment/deployment_readiness.json` generated.
+- What failed:
+  - Readiness score below deployment threshold.
+- Current best metrics:
+  - Readiness score `73.409623`.
+- Current blockers:
+  - Failed gates: expectancy, win-rate, regime robustness.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 3-6
+- What was implemented:
+  - V25 execution stack added in `src/v25/*`.
+  - Claude gateway/router added in `src/service/claude_trade_gateway.py` and `src/service/claude_trade_router.py`.
+  - Proxy replay script `scripts/run_v25_proxy_paper.py`.
+  - Live artifacts written: `outputs/live/claude_decision_log.jsonl`, `outputs/live/live_paper_report.json`, `outputs/live/trade_log.csv`.
+- What failed:
+  - NIM access failed in-session (fail-closed path engaged, no cache-approved auto trades).
+- Current best metrics:
+  - Proxy replay `closed_positions=0`, `proxy_positive=false`.
+- Current blockers:
+  - Judge auth/runtime access and readiness < 90.
+- Deployment status:
+  - `BLOCKED`.
+
+### Phase 7
+- What was implemented:
+  - Final blocker summary written to `outputs/v25/final_release_summary.md`.
+- What failed:
+  - Promotion to V25 not allowed.
+- Current best metrics:
+  - Score `73.409623`, proxy paper `false`.
+- Current blockers:
+  - Expectancy/win-rate/regime-robustness and live judge availability.
+- Deployment status:
+  - `BLOCKED`.
+
+Deployment status: BLOCKED
