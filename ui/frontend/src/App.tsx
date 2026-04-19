@@ -452,6 +452,9 @@ function App() {
   const currentSession = sessionForDate(clock)
   const brokerState = dashboard?.broker
   const autoTrade = dashboard?.auto_trade
+  const v25Production = dashboard?.v25_production
+  const v25Control = v25Production?.control_state
+  const v25Service = v25Production?.service_status
 
   useEffect(() => {
     const config = autoTrade?.config ?? brokerState?.autotrade_config
@@ -480,6 +483,10 @@ function App() {
     `Cone width ${formatNumber(dashboard?.simulation?.cone_width_pips, 1)} pips remains inside the current volatility envelope.`,
     `${dashboard?.technical_analysis?.location ?? 'Market'} location and ${dashboard?.technical_analysis?.structure ?? 'structure'} reduce branch dislocation.`,
   ]
+  const v25Recent = v25Production?.recent_performance ?? {}
+  const v25Expectancy = Number((v25Recent as { expectancy_R?: number }).expectancy_R)
+  const v25WinRate = Number((v25Recent as { win_rate?: number }).win_rate)
+  const v25Drawdown = Number((v25Recent as { max_drawdown?: number }).max_drawdown)
 
   const buildAutoTradeConfigPayload = () => {
     const fixedFallback = Number(dashboard?.simulation?.suggested_lot ?? 0.05)
@@ -591,6 +598,54 @@ function App() {
         tone: 'red',
         text: error instanceof Error ? error.message : 'Unable to save auto trader lot settings.',
       })
+    }
+  }
+
+  const setV25Mode = async (nextMode: 'manual_mode' | 'auto_mode') => {
+    try {
+      await jsonFetch<{ ok: boolean; control_state: unknown }>('/api/v25/control/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: nextMode }),
+      })
+      setBanner({
+        tone: nextMode === 'auto_mode' ? 'blue' : 'amber',
+        text: nextMode === 'auto_mode' ? 'V25 control switched to auto mode.' : 'V25 control switched to manual mode.',
+      })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({ tone: 'red', text: error instanceof Error ? error.message : 'Unable to update V25 mode.' })
+    }
+  }
+
+  const setV25Pause = async (paused: boolean) => {
+    try {
+      await jsonFetch<{ ok: boolean; control_state: unknown }>('/api/v25/control/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trading_paused: paused }),
+      })
+      setBanner({
+        tone: paused ? 'amber' : 'green',
+        text: paused ? 'V25 trading paused.' : 'V25 trading resumed.',
+      })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({ tone: 'red', text: error instanceof Error ? error.message : 'Unable to update pause state.' })
+    }
+  }
+
+  const triggerV25EmergencyStop = async () => {
+    try {
+      await jsonFetch<{ ok: boolean; control_state: unknown }>('/api/v25/control/emergency-stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emergency_stop: true }),
+      })
+      setBanner({ tone: 'red', text: 'V25 emergency stop engaged. Trading paused and mode forced to manual.' })
+      await refreshDesk(false)
+    } catch (error) {
+      setBanner({ tone: 'red', text: error instanceof Error ? error.message : 'Unable to trigger emergency stop.' })
     }
   }
 
@@ -831,6 +886,111 @@ function App() {
             ]}
           />
         </section>
+
+        <GlassCard
+          title="V25 Production Panel"
+          subtitle="Deployment metrics, execution-readiness controls, and safety states for manual/auto routing."
+          icon={<ShieldAlert size={20} />}
+        >
+          <div className="grid gap-5">
+            <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Deployment</div>
+                <div className={`mt-2 text-lg font-semibold ${toneClassFromValue(v25Production?.system_status)}`}>
+                  {v25Production?.system_status ?? 'BLOCKED'}
+                </div>
+              </div>
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Score</div>
+                <div className="mt-2 font-mono text-lg font-semibold text-white">{formatNumber(v25Production?.deployment_score, 2)} / 100</div>
+              </div>
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Tradeability</div>
+                <div className="mt-2 font-mono text-lg font-semibold text-[#00E38C]">{formatPercent(v25Production?.tradeability_probability, 1)}</div>
+              </div>
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Branch Improvement</div>
+                <div className={clsx('mt-2 font-mono text-lg font-semibold', Number(v25Production?.branch_realism_improvement ?? 0) >= 0 ? 'tone-green' : 'tone-red')}>
+                  {formatPercent(v25Production?.branch_realism_improvement, 1)}
+                </div>
+              </div>
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Tradeability Precision</div>
+                <div className="mt-2 font-mono text-lg font-semibold text-[#5BA7FF]">{formatPercent(v25Production?.tradeability_precision, 1)}</div>
+              </div>
+              <div className="stat-chip">
+                <div className="text-[11px] tracking-[0.24em] text-white/36 uppercase">Cache Hit</div>
+                <div className="mt-2 font-mono text-lg font-semibold text-[#FFC857]">{formatPercent(v25Production?.cache_hit_rate, 1)}</div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <ControlTile
+                label="Manual Mode"
+                icon={Settings2}
+                active={v25Control?.mode === 'manual_mode'}
+                tone="amber"
+                onClick={() => void setV25Mode('manual_mode')}
+              />
+              <ControlTile
+                label="Auto Mode"
+                icon={Play}
+                active={v25Control?.mode === 'auto_mode'}
+                tone="blue"
+                onClick={() => void setV25Mode('auto_mode')}
+              />
+              <ControlTile
+                label={v25Control?.trading_paused ? 'Resume Trading' : 'Pause Trading'}
+                icon={CircleStop}
+                active={Boolean(v25Control?.trading_paused)}
+                tone="red"
+                onClick={() => void setV25Pause(!Boolean(v25Control?.trading_paused))}
+              />
+              <ControlTile
+                label="Emergency Stop"
+                icon={ShieldAlert}
+                active={Boolean(v25Control?.emergency_stop)}
+                tone="red"
+                onClick={() => void triggerV25EmergencyStop()}
+              />
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Regime</div>
+                <div className="mt-2 text-sm text-white/82">{v25Production?.current_regime ?? 'unknown'}</div>
+              </div>
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Expectancy</div>
+                <div className={clsx('mt-2 font-mono text-sm font-semibold', Number.isFinite(v25Expectancy) && v25Expectancy >= 0 ? 'tone-green' : 'tone-red')}>
+                  {formatNumber(Number.isFinite(v25Expectancy) ? v25Expectancy : null, 4)} R
+                </div>
+              </div>
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Win Rate</div>
+                <div className="mt-2 font-mono text-sm font-semibold text-[#5BA7FF]">
+                  {formatPercent(Number.isFinite(v25WinRate) ? v25WinRate : null, 1)}
+                </div>
+              </div>
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Drawdown</div>
+                <div className="mt-2 font-mono text-sm font-semibold text-[#FFC857]">
+                  {formatPercent(Number.isFinite(v25Drawdown) ? v25Drawdown : null, 1)}
+                </div>
+              </div>
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Trader Service</div>
+                <div className={`mt-2 text-sm font-semibold ${toneClassFromValue(v25Service?.trader)}`}>{v25Service?.trader ?? 'unknown'}</div>
+              </div>
+              <div className="summary-card">
+                <div className="text-[11px] tracking-[0.22em] text-white/38 uppercase">Mode / Pause</div>
+                <div className="mt-2 text-sm text-white/82">
+                  {(v25Control?.mode ?? 'manual_mode').replaceAll('_', ' ')} • {v25Control?.trading_paused ? 'paused' : 'running'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </GlassCard>
 
         <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
           <GlassCard

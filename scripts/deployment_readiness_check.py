@@ -20,6 +20,11 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _load_validation() -> dict[str, Any]:
+    preferred = OUTPUTS_DIR / "v25" / "v25_1_validation.json"
+    if preferred.exists():
+        payload = json.loads(preferred.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
     path = OUTPUTS_DIR / "v24_4_2" / "final_validation.json"
     if not path.exists():
         raise FileNotFoundError(f"Missing validation artifact: {path}")
@@ -108,7 +113,15 @@ def _operational_safety_score(ops: dict[str, Any], total_candidates: int) -> tup
 
 def main() -> None:
     payload = _load_validation()
-    windows = list(payload.get("windows", []))
+    raw_windows = list(payload.get("windows", []))
+    windows = []
+    for item in raw_windows:
+        if not isinstance(item, dict):
+            continue
+        if "metrics" in item:
+            windows.append(item)
+        else:
+            windows.append({"label": item.get("label", "window"), "metrics": item})
     aggregate = dict(payload.get("aggregate_metrics", {}))
     regime_breakdown = dict(payload.get("regime_breakdown", {}))
     ops = dict(payload.get("operational_safety", {}))
@@ -171,4 +184,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

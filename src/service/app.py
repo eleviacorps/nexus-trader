@@ -50,6 +50,7 @@ from src.v16.paper import PaperTradingEngine
 from src.v16.sqt import SimulationQualityTracker
 from src.v18.websocket_feed import LiveFeedManager
 from src.v19.runtime import build_v19_runtime_state
+from src.v25.production_dashboard import ProductionDashboard
 
 try:
     import torch  # type: ignore
@@ -118,6 +119,18 @@ class PaperModifyRequest(BaseModel):  # type: ignore[misc]
     trade_id: str
     stop_loss: float | None = None
     take_profit: float | None = None
+
+
+class V25ModeRequest(BaseModel):  # type: ignore[misc]
+    mode: str
+
+
+class V25PauseRequest(BaseModel):  # type: ignore[misc]
+    trading_paused: bool
+
+
+class V25EmergencyStopRequest(BaseModel):  # type: ignore[misc]
+    emergency_stop: bool = True
 
 
 FRONTEND_DIST_PATH = Path(__file__).resolve().parents[2] / "ui" / "frontend" / "dist"
@@ -1028,6 +1041,7 @@ def create_app() -> Any:
     feed_manager = LiveFeedManager()
     feed_manager.set_paper_engine(paper_trader)
     kimi_cache: dict[str, dict[str, Any]] = {}
+    production_dashboard = ProductionDashboard()
 
     def _kimi_cache_key(symbol: str, active_mode: str, llm_provider: str, llm_model: str | None) -> str:
         bucket = str(int(time.time() // 900))
@@ -1084,6 +1098,7 @@ def create_app() -> Any:
         payload["stack_mode"] = "dashboard_fast_path"
         payload["mode"] = active_mode
         payload["manual_trading_mode"] = True
+        payload["v25_production"] = production_dashboard.snapshot(payload)
         return payload
 
     def _resolve_local_judge(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1327,7 +1342,35 @@ def create_app() -> Any:
         payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
         payload["kimi_judge"] = _cached_or_fallback_kimi(payload, active_mode, llm_provider, llm_model)
         payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
+        payload["v25_production"] = production_dashboard.snapshot(payload)
         return payload
+
+    @app.get('/api/v25/production')
+    def v25_production_status(symbol: str = 'XAUUSD', mode: str | None = None):
+        active_mode = (mode or default_mode).strip().lower() or "frequency"
+        payload = _base_dashboard_payload(symbol, active_mode)
+        payload = _attach_v19_runtime(payload, _resolve_local_judge(payload))
+        payload["kimi_judge"] = _cached_or_fallback_kimi(payload, active_mode, "nvidia_nim", None)
+        payload["judge_comparison"] = _judge_comparison(payload["kimi_judge"], payload["local_judge"], payload.get("v19_runtime"))
+        return production_dashboard.snapshot(payload)
+
+    @app.post('/api/v25/control/mode')
+    def v25_control_mode(request: V25ModeRequest):
+        try:
+            state = production_dashboard.set_control_state(mode=request.mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "control_state": state}
+
+    @app.post('/api/v25/control/pause')
+    def v25_control_pause(request: V25PauseRequest):
+        state = production_dashboard.set_control_state(trading_paused=bool(request.trading_paused))
+        return {"ok": True, "control_state": state}
+
+    @app.post('/api/v25/control/emergency-stop')
+    def v25_control_emergency_stop(request: V25EmergencyStopRequest):
+        state = production_dashboard.set_control_state(emergency_stop=bool(request.emergency_stop))
+        return {"ok": True, "control_state": state}
 
     @app.get('/api/chart/realtime')
     def realtime_chart(symbol: str = 'XAUUSD', bars: int = 240):

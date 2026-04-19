@@ -24,6 +24,7 @@ from config.project_config import (
     NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE,
     NVIDIA_NIM_MODEL,
     NVIDIA_NIM_TIMEOUT_SECONDS,
+    OUTPUTS_DIR,
     V17_KIMI_PACKET_LOG_PATH,
     V18_KIMI_PACKET_LOG_PATH,
     V19_SJD_MODEL_NPZ_PATH,
@@ -47,10 +48,7 @@ class LlmSidecarConfig:
 
 
 NVIDIA_NIM_MODEL_FALLBACK_CHAIN = [
-    "moonshotai/kimi-k2-instruct",
-    "moonshotai/kimi-k2-5",
-    "nvidia/llama-3.3-nemotron-super-49b-v1",
-    "meta/llama-3.1-70b-instruct",
+    "z-ai/glm-5.1",
 ]
 
 
@@ -299,21 +297,35 @@ def _reserve_nim_request_slot() -> tuple[bool, dict[str, Any]]:
 
 
 def _append_packet_log(entry: Mapping[str, Any], path: Path = V17_KIMI_PACKET_LOG_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(entry), ensure_ascii=True) + "\n")
+    candidates = [path, V18_KIMI_PACKET_LOG_PATH, OUTPUTS_DIR / "live" / "kimi_packet_log.jsonl"]
+    serialized = json.dumps(dict(entry), ensure_ascii=True) + "\n"
+    for candidate in candidates:
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            with candidate.open("a", encoding="utf-8") as handle:
+                handle.write(serialized)
+            return
+        except Exception:
+            continue
 
 
 def read_packet_log(limit: int = 20, path: Path = V17_KIMI_PACKET_LOG_PATH) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
+    candidates = [path, V18_KIMI_PACKET_LOG_PATH, OUTPUTS_DIR / "live" / "kimi_packet_log.jsonl"]
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    for candidate in candidates:
+        if not candidate.exists():
             continue
         try:
-            rows.append(json.loads(line))
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+            if rows:
+                break
         except Exception:
             continue
     return rows[-max(int(limit), 1) :]
@@ -665,7 +677,11 @@ def _chat_json_request(
                     ],
                     "temperature": 0.2,
                     "top_p": 0.9,
-                    "max_tokens": 4096,
+                    "max_tokens": 2048,
+                    "chat_template_kwargs": {
+                        "enable_thinking": True,
+                        "clear_thinking": False,
+                    },
                     "stream": False,
                 }
                 response = _post_json(

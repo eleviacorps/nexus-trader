@@ -238,6 +238,7 @@ export interface DashboardPayload {
     label?: string
     rolling_accuracy?: number
   }
+  v25_production?: V25ProductionStatus
 }
 
 export interface PacketLogEntry {
@@ -262,4 +263,29 @@ export interface SystemTelemetry {
   gpu_temperature_c: number | null
   broker_connection: string
   local_runtime: string
+}
+
+export interface V25ControlState {
+  mode: 'manual_mode' | 'auto_mode'
+  trading_paused: boolean
+  emergency_stop: boolean
+  updated_at?: string
+}
+
+export interface V25ProductionStatus {
+  generated_at?: string
+  system_status?: string
+  deployment_score?: number
+  current_regime?: string
+  consensus_branch?: number[]
+  minority_branch?: number[]
+  current_trades?: Record<string, number | string | null>
+  recent_performance?: Record<string, number | string | null>
+  claude_decision?: Record<string, unknown>
+  tradeability_probability?: number
+  branch_realism_improvement?: number
+  tradeability_precision?: number
+  cache_hit_rate?: number
+  control_state?: V25ControlState
+  service_status?: Record<string, string>
 }

@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus_api
+    command: uvicorn src.service.app:create_app --factory --host 0.0.0.0 --port 8000
+    env_file:
+      - infra/production.env
+    environment:
+      NEXUS_SERVICE_ROLE: api
+    restart: always
+    expose:
+      - "8000"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus_trader_worker
+    command: python scripts/start_production.py --service trader --loop
+    env_file:
+      - infra/production.env
+    environment:
+      NEXUS_SERVICE_ROLE: trader
+    depends_on:
+      - api
+    restart: always
+    volumes:
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus_monitor_worker
+    command: python scripts/start_production.py --service monitor --loop
+    env_file:
+      - infra/production.env
+    environment:
+      NEXUS_SERVICE_ROLE: monitor
+    depends_on:
+      - api
+    restart: always
+    volumes:
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus_backup_worker
+    command: python scripts/start_production.py --service backup --loop
+    env_file:
+      - infra/production.env
+    environment:
+      NEXUS_SERVICE_ROLE: backup
+    restart: always
+    volumes:
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/frontend.Dockerfile
+    container_name: nexus_frontend
+    environment:
+      NEXUS_SERVICE_ROLE: frontend
+    restart: always
+    expose:
+      - "80"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: nexus_nginx
+    depends_on:
+      - api
+      - frontend
+    ports:
+      - "80:80"
+    restart: always
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/conf.d/default.conf:ro
