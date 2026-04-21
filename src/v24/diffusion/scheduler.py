@@ -60,62 +60,100 @@ class NoiseScheduler(nn.Module):
         out = a.gather(0, t)
         return out.reshape(b, *([1] * (len(shape) - 1)))
 
+    @staticmethod
+    def _autocorr(x: Tensor, lag: int = 1) -> Tensor:
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x = x - x.mean(-1, keepdim=True)
+        var = (x ** 2).mean(-1).clamp(min=1e-8)
+        lag_cov = (x[:, :, lag:] * x[:, :, :-lag]).mean(-1)
+        return (lag_cov / var).mean()
+
+    @staticmethod
+    def _vol_clustering(x: Tensor, lag: int = 1) -> Tensor:
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        sq = torch.abs(x)
+        sq_centered = sq - sq.mean(-1, keepdim=True)
+        var = (sq_centered ** 2).mean(-1).clamp(min=1e-8)
+        lag_cov = (sq_centered[:, :, lag:] * sq_centered[:, :, :-lag]).mean(-1)
+        return (lag_cov / var).mean()
+
+    def training_loss_with_realism(
+        self, model: nn.Module, x_start: Tensor, context: Tensor,
+        t: Optional[Tensor] = None,
+        temporal_seq: Optional[Tensor] = None,
+        temporal_emb: Optional[Tensor] = None,
+        acf_weight: float = 0.10,
+        vol_weight: float = 0.10,
+        std_weight: float = 0.05,
+        return_idx: int = 0,
+    ) -> dict[str, Tensor]:
+        if t is None:
+            t = torch.randint(0, self.num_timesteps, (x_start.shape[0],), device=x_start.device)
+
+        noise = torch.randn_like(x_start)
+        x_t = self.q_sample(x_start, t, noise)
+        eps_pred = model(x_t, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
+
+        diffusion_loss = torch.nn.functional.mse_loss(eps_pred, noise)
+
+        s1 = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
+        s2 = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+        x0_pred = (x_t - s2 * eps_pred) / s1.clamp(min=1e-8)
+        x0_pred = torch.clamp(x0_pred, -2.5, 2.5)
+
+        ret = x0_pred[:, return_idx:return_idx + 1, :].squeeze(1)
+        ret_real = x_start[:, return_idx:return_idx + 1, :].squeeze(1)
+
+        acf_fake = self._autocorr(ret, lag=1)
+        acf_real = self._autocorr(ret_real.detach(), lag=1)
+        acf_loss = torch.abs(acf_fake - acf_real)
+
+        vol_fake = self._vol_clustering(ret, lag=1)
+        vol_real = self._vol_clustering(ret_real.detach(), lag=1)
+        vol_loss = torch.abs(vol_fake - vol_real)
+
+        std_real = torch.std(ret_real.detach())
+        std_fake = torch.std(ret)
+        std_loss = torch.abs(torch.log(std_fake.clamp(min=1e-8) / std_real.clamp(min=1e-8)))
+
+        total = diffusion_loss + acf_weight * acf_loss + vol_weight * vol_loss + std_weight * std_loss
+
+        return {
+            "total": total,
+            "diffusion": diffusion_loss,
+            "acf": acf_loss,
+            "vol": vol_loss,
+            "std": std_loss,
+        }
+
     def q_sample(self, x_start: Tensor, t: Tensor, noise: Optional[Tensor] = None) -> Tensor:
-        """Forward diffusion: add noise to x_start at timestep t.
-
-        Args:
-            x_start: Clean data of shape (B, C, L).
-            t: Timestep indices of shape (B,).
-            noise: Optional pre-sampled noise (default: standard Gaussian).
-
-        Returns:
-            Noisy sample x_t of shape (B, C, L).
-        """
         if noise is None:
             noise = torch.randn_like(x_start)
         s1 = self._extract(self.sqrt_alphas_cumprod, t, x_start.shape)
         s2 = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
         return s1 * x_start + s2 * noise
 
-    def training_loss(self, model: nn.Module, x_start: Tensor, context: Tensor, t: Optional[Tensor] = None) -> Tensor:
-        """Compute DDPM epsilon-MSE training loss.
-
-        Args:
-            model: The epsilon-prediction model (callable with x_t, t, context).
-            x_start: Clean data of shape (B, C, L).
-            context: Conditioning context of shape (B, ctx_dim).
-            t: Optional pre-sampled timesteps (default: uniform random).
-
-        Returns:
-            Scalar MSE loss between predicted and true noise.
-        """
+    def training_loss(self, model: nn.Module, x_start: Tensor, context: Tensor, t: Optional[Tensor] = None,
+                      temporal_seq: Optional[Tensor] = None, temporal_emb: Optional[Tensor] = None) -> Tensor:
         if t is None:
             t = torch.randint(0, self.num_timesteps, (x_start.shape[0],), device=x_start.device)
         noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise)
-        noise_pred = model(x_t, t, context)
+        noise_pred = model(x_t, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
         return torch.nn.functional.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
-    def p_sample(self, model: nn.Module, x_t: Tensor, t: Tensor, context: Tensor) -> Tensor:
-        """Single DDPM reverse step: x_t -> x_{t-1}.
-
-        Args:
-            model: The epsilon-prediction model.
-            x_t: Current noisy sample of shape (B, C, L).
-            t: Current timestep indices of shape (B,).
-            context: Conditioning context of shape (B, ctx_dim).
-
-        Returns:
-            Less noisy sample x_{t-1} of shape (B, C, L).
-        """
-        eps_pred = model(x_t, t, context)
+    def p_sample(self, model: nn.Module, x_t: Tensor, t: Tensor, context: Tensor,
+                 temporal_seq: Optional[Tensor] = None, temporal_emb: Optional[Tensor] = None) -> Tensor:
+        eps_pred = model(x_t, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
         b1 = self._extract(self.posterior_mean_coef1, t, x_t.shape)
         b2 = self._extract(self.posterior_mean_coef2, t, x_t.shape)
         s1 = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
         s2 = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
         x0_pred = (x_t - s2 * eps_pred) / s1
-        x0_pred = torch.clamp(x0_pred, -5.0, 5.0)
+        x0_pred = torch.clamp(x0_pred, -3.0, 3.0)
         mean = b1 * x0_pred + b2 * x_t
         log_var = self._extract(self.posterior_log_variance, t, x_t.shape)
         nonzero = (t > 0).float().reshape(-1, *([1] * (x_t.dim() - 1)))
@@ -123,40 +161,18 @@ class NoiseScheduler(nn.Module):
         return mean + nonzero * torch.exp(0.5 * log_var) * noise
 
     @torch.no_grad()
-    def ddpm_sample(self, model: nn.Module, shape: tuple[int, ...], context: Tensor, device: torch.device) -> Tensor:
-        """Full DDPM reverse sampling from T to 0.
-
-        Args:
-            model: The epsilon-prediction model.
-            shape: Output shape (B, C, L).
-            context: Conditioning context of shape (B, ctx_dim).
-            device: Device for tensors.
-
-        Returns:
-            Generated sample of shape (B, C, L).
-        """
+    def ddpm_sample(self, model: nn.Module, shape: tuple[int, ...], context: Tensor, device: torch.device,
+                    temporal_seq: Optional[Tensor] = None, temporal_emb: Optional[Tensor] = None) -> Tensor:
         x = torch.randn(shape, device=device)
         for t_val in reversed(range(self.num_timesteps)):
             t = torch.full((shape[0],), t_val, device=device, dtype=torch.long)
-            x = self.p_sample(model, x, t, context)
+            x = self.p_sample(model, x, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
         return x
 
     @torch.no_grad()
     def ddim_sample(self, model: nn.Module, shape: tuple[int, ...], context: Tensor,
-                    num_steps: int = 50, eta: float = 0.0, device: torch.device = None) -> Tensor:
-        """DDIM fast sampling with fewer steps.
-
-        Args:
-            model: The epsilon-prediction model.
-            shape: Output shape (B, C, L).
-            context: Conditioning context of shape (B, ctx_dim).
-            num_steps: Number of denoising steps (default 50).
-            eta: Stochasticity parameter (0 = deterministic DDIM).
-            device: Device for tensors.
-
-        Returns:
-            Generated sample of shape (B, C, L).
-        """
+                    num_steps: int = 50, eta: float = 0.0, device: torch.device = None,
+                    temporal_seq: Optional[Tensor] = None, temporal_emb: Optional[Tensor] = None) -> Tensor:
         if device is None:
             device = context.device
         step_size = self.num_timesteps // num_steps
@@ -166,11 +182,11 @@ class NoiseScheduler(nn.Module):
         x = torch.randn(shape, device=device)
         for i in range(len(timesteps)):
             t = torch.full((shape[0],), timesteps[i], device=device, dtype=torch.long)
-            eps_pred = model(x, t, context)
+            eps_pred = model(x, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
             s1 = self._extract(self.sqrt_alphas_cumprod, t, x.shape)
             s2 = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
             x0_pred = (x - s2 * eps_pred) / s1
-            x0_pred = torch.clamp(x0_pred, -5.0, 5.0)
+            x0_pred = torch.clamp(x0_pred, -2.5, 2.5)
 
             if i < len(timesteps) - 1:
                 t_next = torch.full((shape[0],), timesteps[i + 1], device=device, dtype=torch.long)

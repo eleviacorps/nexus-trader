@@ -48,12 +48,14 @@ OUT_NORM_STATS_PATH = PROJECT_ROOT / "config" / "diffusion_norm_stats_6m.json"
 
 MARKET_DYNAMICS_DROP = {"open", "high", "low", "close", "market_dynamics_label"}
 
-DIM_PRICE = 36
-DIM_NEWS = 32
-DIM_CROWD = 32
-DIM_MARKET_DYNAMICS = 23
-DIM_QUANT = 21
-DIM_TOTAL = DIM_PRICE + DIM_NEWS + DIM_CROWD + DIM_MARKET_DYNAMICS + DIM_QUANT
+DIM = {
+    "price": 36,
+    "news": 32,
+    "crowd": 32,
+    "market_dynamics": 23,
+    "quant": 21,
+    "total": 36 + 32 + 32 + 23 + 21,
+}
 
 
 def load_price_features():
@@ -100,7 +102,7 @@ def load_quant_features():
 
 
 def fuse_all(price, news, crowd, market_dyn, quant):
-    print(f"[5/5] Fusing all sources into {DIM_TOTAL}-feature matrix ...")
+    print(f"[5/5] Fusing all sources into {DIM['total']}-feature matrix ...")
     t0 = time.time()
     n = len(price)
     assert len(news) == n, f"News rows {len(news)} != price rows {n}"
@@ -108,14 +110,14 @@ def fuse_all(price, news, crowd, market_dyn, quant):
     assert len(market_dyn) == n, f"Market dynamics rows {len(market_dyn)} != price rows {n}"
     assert len(quant) == n, f"Quant rows {len(quant)} != price rows {n}"
 
-    fused = np.empty((n, DIM_TOTAL), dtype=np.float32)
+    fused = np.empty((n, DIM["total"]), dtype=np.float32)
     c = 0
-    fused[:, c:c+DIM_PRICE] = price; c += DIM_PRICE
-    fused[:, c:c+DIM_NEWS] = news; c += DIM_NEWS
-    fused[:, c:c+DIM_CROWD] = crowd; c += DIM_CROWD
-    fused[:, c:c+DIM_MARKET_DYNAMICS] = market_dyn; c += DIM_MARKET_DYNAMICS
-    fused[:, c:c+DIM_QUANT] = quant; c += DIM_QUANT
-    assert c == DIM_TOTAL
+    fused[:, c:c+DIM["price"]] = price; c += DIM["price"]
+    fused[:, c:c+DIM["news"]] = news; c += DIM["news"]
+    fused[:, c:c+DIM["crowd"]] = crowd; c += DIM["crowd"]
+    fused[:, c:c+DIM["market_dynamics"]] = market_dyn; c += DIM["market_dynamics"]
+    fused[:, c:c+DIM["quant"]] = quant; c += DIM["quant"]
+    assert c == DIM["total"]
 
     nan_count = np.isnan(fused).sum()
     inf_count = np.isinf(fused).sum()
@@ -149,14 +151,14 @@ def normalize_and_save(fused, timestamps):
         "means": means.tolist(),
         "stds": stds.tolist(),
         "feature_groups": {
-            "price": {"start": 0, "dim": DIM_PRICE},
-            "news": {"start": DIM_PRICE, "dim": DIM_NEWS},
-            "crowd": {"start": DIM_PRICE + DIM_NEWS, "dim": DIM_CROWD},
-            "market_dynamics": {"start": DIM_PRICE + DIM_NEWS + DIM_CROWD, "dim": DIM_MARKET_DYNAMICS},
-            "quant": {"start": DIM_PRICE + DIM_NEWS + DIM_CROWD + DIM_MARKET_DYNAMICS, "dim": DIM_QUANT},
+            "price": {"start": 0, "dim": DIM["price"]},
+            "news": {"start": DIM["price"], "dim": DIM["news"]},
+            "crowd": {"start": DIM["price"] + DIM["news"], "dim": DIM["crowd"]},
+            "market_dynamics": {"start": DIM["price"] + DIM["news"] + DIM["crowd"], "dim": DIM["market_dynamics"]},
+            "quant": {"start": DIM["price"] + DIM["news"] + DIM["crowd"] + DIM["market_dynamics"], "dim": DIM["quant"]},
         },
         "n_rows": int(fused_norm.shape[0]),
-        "n_features": DIM_TOTAL,
+        "n_features": DIM["total"],
     }
 
     print(f"  Saving fused matrix ({fused_norm.nbytes / 1e9:.2f} GB) to {OUT_FUSED_PATH} ...")
@@ -200,20 +202,15 @@ def main():
     crowd = load_embeddings(CROWD_EMB_NPY_PATH, "crowd")
 
     market_dyn, md_cols = load_market_dynamics()
-    print(f"  Market dynamics actual dim: {len(md_cols)} (expected {DIM_MARKET_DYNAMICS})")
+    print(f" Market dynamics actual dim: {len(md_cols)} (expected {DIM['market_dynamics']})")
 
     quant, q_cols = load_quant_features()
-    print(f"  Quant actual dim: {len(q_cols)} (expected {DIM_QUANT})")
+    print(f" Quant actual dim: {len(q_cols)} (expected {DIM['quant']})")
 
-    dim_md_actual = market_dyn.shape[1]
-    dim_q_actual = quant.shape[1]
-    dim_total_actual = DIM_PRICE + DIM_NEWS + DIM_CROWD + dim_md_actual + dim_q_actual
-
-    global DIM_MARKET_DYNAMICS, DIM_QUANT, DIM_TOTAL
-    DIM_MARKET_DYNAMICS = dim_md_actual
-    DIM_QUANT = dim_q_actual
-    DIM_TOTAL = dim_total_actual
-    print(f"  Adjusted total features: {DIM_TOTAL}")
+    DIM["market_dynamics"] = market_dyn.shape[1]
+    DIM["quant"] = quant.shape[1]
+    DIM["total"] = DIM["price"] + DIM["news"] + DIM["crowd"] + DIM["market_dynamics"] + DIM["quant"]
+    print(f" Adjusted total features: {DIM['total']}")
 
     fused = fuse_all(price, news, crowd, market_dyn, quant)
     fused_norm = normalize_and_save(fused, timestamps)
