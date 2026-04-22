@@ -52,7 +52,15 @@ class FiLMConditioning(nn.Module):
 
 
 class ResBlock1d(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float = 0.1, temporal_dim: int = 0) -> None:
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        time_dim: int,
+        dropout: float = 0.1,
+        temporal_dim: int = 0,
+        regime_dim: int = 0,  # V26 Phase 1
+    ) -> None:
         super().__init__()
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_ch, out_ch, 3, padding=1),
@@ -66,13 +74,36 @@ class ResBlock1d(nn.Module):
         )
         self.film = FiLMConditioning(time_dim, out_ch)
         self.temporal_film = FiLMConditioning(temporal_dim, out_ch) if temporal_dim > 0 else None
+        # V26 Phase 1: Combined FiLM conditioning for regime
+        self.combined_film_cond_dim = temporal_dim + regime_dim if temporal_dim > 0 and regime_dim > 0 else 0
+        self.combined_film = FiLMConditioning(self.combined_film_cond_dim, out_ch) if self.combined_film_cond_dim > 0 else None
+        self.temporal_only = temporal_dim > 0 and regime_dim == 0
+        self.regime_only = temporal_dim == 0 and regime_dim > 0
+        if self.regime_only:
+            # If only regime, use it like temporal (single FiLM)
+            self.temporal_film = FiLMConditioning(regime_dim, out_ch)
         self.residual = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
-    def forward(self, x: Tensor, t_emb: Tensor, temporal_emb: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        t_emb: Tensor,
+        temporal_emb: Optional[Tensor] = None,
+        regime_emb: Optional[Tensor] = None,  # V26 Phase 1
+    ) -> Tensor:
         h = self.conv1(x)
         h = self.film(h, t_emb)
-        if self.temporal_film is not None and temporal_emb is not None:
+
+        # V26 Phase 1: Handle temporal and/or regime conditioning
+        if self.combined_film is not None and temporal_emb is not None and regime_emb is not None:
+            # Combined temporal + regime FiLM
+            combined_emb = torch.cat([temporal_emb, regime_emb], dim=-1)
+            h = self.combined_film(h, combined_emb)
+        elif self.temporal_film is not None and temporal_emb is not None:
             h = self.temporal_film(h, temporal_emb)
+        elif self.regime_only and regime_emb is not None:
+            h = self.temporal_film(h, regime_emb)  # temporal_film handles regime when regime_only
+
         h = self.conv2(h)
         return h + self.residual(x)
 
@@ -146,16 +177,21 @@ class DiffusionUNet1D(nn.Module):
     - temporal_dim > 0: TemporalFiLM in every ResBlock, temporal cross-attn at every decoder level
     - forward() accepts optional temporal_seq + temporal_emb
 
+    Phase 1 (V26) additions:
+    - regime_dim > 0: RegimeFiLM in every ResBlock, regime cross-attn at every decoder level
+    - forward() accepts optional regime_emb for regime conditioning
+
     Args:
-        in_channels: Number of input feature channels (e.g. 144 for 6M fused).
-        base_channels: Base channel count (default 128).
-        channel_multipliers: Per-level multipliers (default (1, 2, 4)).
-        time_dim: Sinusoidal time embedding dimension.
-        num_res_blocks: ResBlocks per encoder/decoder level.
-        ctx_dim: Context vector dimension for cross-attention (0 = disabled).
-        dropout: Dropout rate in ResBlocks.
-        temporal_dim: Temporal FiLM embedding dimension (0 = disabled, backward compat).
-        d_gru: GRU hidden dim for temporal cross-attention key/value projection.
+    in_channels: Number of input feature channels (e.g. 144 for 6M fused).
+    base_channels: Base channel count (default 128).
+    channel_multipliers: Per-level multipliers (default (1, 2, 4)).
+    time_dim: Sinusoidal time embedding dimension.
+    num_res_blocks: ResBlocks per encoder/decoder level.
+    ctx_dim: Context vector dimension for cross-attention (0 = disabled).
+    dropout: Dropout rate in ResBlocks.
+    temporal_dim: Temporal FiLM embedding dimension (0 = disabled, backward compat).
+    d_gru: GRU hidden dim for temporal cross-attention key/value projection.
+    regime_dim: Regime embedding dimension for FiLM conditioning (0 = disabled, backward compat).
     """
 
     def __init__(
@@ -169,12 +205,14 @@ class DiffusionUNet1D(nn.Module):
         dropout: float = 0.1,
         temporal_dim: int = 0,
         d_gru: int = 256,
+        regime_dim: int = 0,  # V26 Phase 1: regime conditioning
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.ctx_dim = ctx_dim
         self.temporal_dim = temporal_dim
         self.d_gru = d_gru
+        self.regime_dim = regime_dim
 
         ch = [base_channels * m for m in channel_multipliers]
         num_levels = len(ch)
@@ -195,7 +233,7 @@ class DiffusionUNet1D(nn.Module):
             blocks = nn.ModuleList()
             in_c = ch[level - 1] if level > 0 else ch[0]
             for _ in range(num_res_blocks):
-                blocks.append(ResBlock1d(in_c, ch[level], time_dim, dropout, temporal_dim=temporal_dim))
+                blocks.append(ResBlock1d(in_c, ch[level], time_dim, dropout, temporal_dim=temporal_dim, regime_dim=regime_dim))
                 in_c = ch[level]
             self.encoder_blocks.append(blocks)
             self.encoder_downsample.append(
@@ -203,10 +241,10 @@ class DiffusionUNet1D(nn.Module):
             )
 
         # --- Bottleneck ---
-        self.bottleneck_res1 = ResBlock1d(ch[-1], ch[-1], time_dim, dropout, temporal_dim=temporal_dim)
+        self.bottleneck_res1 = ResBlock1d(ch[-1], ch[-1], time_dim, dropout, temporal_dim=temporal_dim, regime_dim=regime_dim)
         self.bottleneck_attn = SelfAttention1d(ch[-1])
         self.bottleneck_cross = CrossAttention1d(ch[-1], ctx_dim) if ctx_dim > 0 else None
-        self.bottleneck_res2 = ResBlock1d(ch[-1], ch[-1], time_dim, dropout, temporal_dim=temporal_dim)
+        self.bottleneck_res2 = ResBlock1d(ch[-1], ch[-1], time_dim, dropout, temporal_dim=temporal_dim, regime_dim=regime_dim)
 
         # --- Decoder ---
         # Decoder processes levels in reverse: level 2 (deepest) first, then 1, then 0
@@ -214,6 +252,8 @@ class DiffusionUNet1D(nn.Module):
         self.decoder_blocks = nn.ModuleList()
         self.decoder_cross_attns = nn.ModuleList()
         self.decoder_temporal_cross_attns = nn.ModuleList()
+        # V26 Phase 1: Regime cross-attention in decoder blocks
+        self.decoder_regime_cross_attns = nn.ModuleList()
 
         reversed_levels = list(reversed(range(num_levels)))
         for idx, level in enumerate(reversed_levels):
@@ -225,17 +265,21 @@ class DiffusionUNet1D(nn.Module):
             blocks = nn.ModuleList()
             cross_attns = nn.ModuleList()
             temporal_cross_attns = nn.ModuleList()
+            regime_cross_attns = nn.ModuleList()  # V26 Phase 1
             skip_c = ch[level]
             in_c = ch[level] + skip_c
             for j in range(num_res_blocks + 1):
                 use_cross = (level == 0) and ctx_dim > 0
-                blocks.append(ResBlock1d(in_c, ch[level], time_dim, dropout, temporal_dim=temporal_dim))
+                blocks.append(ResBlock1d(in_c, ch[level], time_dim, dropout, temporal_dim=temporal_dim, regime_dim=regime_dim))
                 cross_attns.append(CrossAttention1d(ch[level], ctx_dim) if use_cross else None)
                 temporal_cross_attns.append(CrossAttention1d(ch[level], d_gru) if temporal_dim > 0 else None)
+                # V26 Phase 1: Regime cross-attention in all decoder blocks (like temporal)
+                regime_cross_attns.append(CrossAttention1d(ch[level], regime_dim) if regime_dim > 0 else None)
                 in_c = ch[level]
             self.decoder_blocks.append(blocks)
             self.decoder_cross_attns.append(cross_attns)
             self.decoder_temporal_cross_attns.append(temporal_cross_attns)
+            self.decoder_regime_cross_attns.append(regime_cross_attns)
 
         self.conv_out = nn.Sequential(
             nn.GroupNorm(8, ch[0]),
@@ -250,18 +294,20 @@ class DiffusionUNet1D(nn.Module):
         context: Optional[Tensor] = None,
         temporal_seq: Optional[Tensor] = None,
         temporal_emb: Optional[Tensor] = None,
+        regime_emb: Optional[Tensor] = None,  # V26 Phase 1: regime conditioning
     ) -> Tensor:
-        """Forward pass — predicts epsilon given noisy input, timestep, context, and optional temporal conditioning.
+        """Forward pass — predicts epsilon given noisy input, timestep, context, and optional temporal/regime conditioning.
 
         Args:
-            x: Noisy input (B, C, L).
-            t: Timestep indices (B,).
-            context: Conditioning context (B, ctx_dim).
-            temporal_seq: Temporal encoder hidden sequence (B, T_past, d_gru) for cross-attention.
-            temporal_emb: Temporal encoder FiLM embedding (B, temporal_dim) for FiLM in ResBlocks.
+        x: Noisy input (B, C, L).
+        t: Timestep indices (B,).
+        context: Conditioning context (B, ctx_dim).
+        temporal_seq: Temporal encoder hidden sequence (B, T_past, d_gru) for cross-attention.
+        temporal_emb: Temporal encoder FiLM embedding (B, temporal_dim) for FiLM in ResBlocks.
+        regime_emb: Regime embedding (B, regime_dim) for FiLM + cross-attention in decoder.
 
         Returns:
-            Predicted epsilon (B, C, L).
+        Predicted epsilon (B, C, L).
         """
         t_emb = self.time_embed(t)
         h = self.conv_in(x)
@@ -270,17 +316,17 @@ class DiffusionUNet1D(nn.Module):
         skips = []
         for level, blocks in enumerate(self.encoder_blocks):
             for block in blocks:
-                h = block(h, t_emb, temporal_emb)
+                h = block(h, t_emb, temporal_emb, regime_emb)  # V26: pass regime_emb
             skips.append(h)
             if self.encoder_downsample[level] is not None:
                 h = self.encoder_downsample[level](h)
 
         # Bottleneck
-        h = self.bottleneck_res1(h, t_emb, temporal_emb)
+        h = self.bottleneck_res1(h, t_emb, temporal_emb, regime_emb)  # V26: pass regime_emb
         h = self.bottleneck_attn(h)
         if self.bottleneck_cross is not None and context is not None:
             h = self.bottleneck_cross(h, context)
-        h = self.bottleneck_res2(h, t_emb, temporal_emb)
+        h = self.bottleneck_res2(h, t_emb, temporal_emb, regime_emb)  # V26: pass regime_emb
 
         # Decoder — consume one skip per level (only at first block)
         for level_idx in range(len(self.decoder_blocks)):
@@ -289,7 +335,10 @@ class DiffusionUNet1D(nn.Module):
             blocks = self.decoder_blocks[level_idx]
             cross_attns = self.decoder_cross_attns[level_idx]
             temporal_cross_attns = self.decoder_temporal_cross_attns[level_idx]
-            for j, (block, cross, t_cross) in enumerate(zip(blocks, cross_attns, temporal_cross_attns)):
+            regime_cross_attns = self.decoder_regime_cross_attns[level_idx]  # V26: regime cross-attention
+            for j, (block, cross, t_cross, r_cross) in enumerate(
+                zip(blocks, cross_attns, temporal_cross_attns, regime_cross_attns)
+            ):
                 if j == 0:
                     skip = skips.pop()
                     diff = h.shape[2] - skip.shape[2]
@@ -298,10 +347,13 @@ class DiffusionUNet1D(nn.Module):
                     elif diff < 0:
                         h = F.pad(h, (0, -diff))
                     h = torch.cat([h, skip], dim=1)
-                h = block(h, t_emb, temporal_emb)
+                h = block(h, t_emb, temporal_emb, regime_emb)  # V26: pass regime_emb
                 if cross is not None and context is not None:
                     h = cross(h, context)
                 if t_cross is not None and temporal_seq is not None:
                     h = t_cross(h, temporal_seq)
+                # V26 Phase 1: Regime cross-attention in decoder blocks
+                if r_cross is not None and regime_emb is not None:
+                    h = r_cross(h, regime_emb)
 
         return self.conv_out(h)

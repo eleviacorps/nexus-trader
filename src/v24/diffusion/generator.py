@@ -165,18 +165,20 @@ class DiffusionPathGeneratorV2:
         steps: Optional[int] = None,
         guidance_scale: Optional[float] = None,
         past_context: Optional[Tensor] = None,
+        regime_probs: Optional[Tensor] = None,  # V26 Phase 1: backward compat
     ) -> list[dict[str, Any]]:
         """Generate multiple future market paths conditioned on world state.
 
         Args:
-            world_state: Current market state for conditioning.
-            num_paths: Number of paths (default from config).
-            steps: DDIM sampling steps (default from config).
-            guidance_scale: CFG strength (default from config).
-            past_context: Optional (B, context_len, C) tensor of past bars for temporal encoding.
+        world_state: Current market state for conditioning.
+        num_paths: Number of paths (default from config).
+        steps: DDIM sampling steps (default from config).
+        guidance_scale: CFG strength (default from config).
+        past_context: Optional (B, context_len, C) tensor of past bars for temporal encoding.
+        regime_probs: Optional (B, 9) or (9,) regime probability vector (V26, ignored in V24).
 
         Returns:
-            List of path dicts with data, confidence, and metadata.
+        List of path dicts with data, confidence, and metadata.
         """
         n = num_paths or self.config.num_paths
         s = steps or self.config.sampling_steps
@@ -242,7 +244,7 @@ class DiffusionPathGeneratorV2:
             s1 = self.scheduler._extract(self.scheduler.sqrt_alphas_cumprod, t, x.shape)
             s2 = self.scheduler._extract(self.scheduler.sqrt_one_minus_alphas_cumprod, t, x.shape)
             x0_pred = (x - s2 * eps_pred) / s1
-            x0_pred = torch.clamp(x0_pred, -2.5, 2.5)
+            x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
 
             if i < len(timesteps) - 1:
                 t_next_val = timesteps[i + 1]

@@ -150,14 +150,14 @@ def main():
     print(f"LR: {args.lr}, epochs: {args.epochs}")
 
     # Load best checkpoint
-    ckpt_path = V24_DIFFUSION_CHECKPOINT_6M_PATH
+    ckpt_path = Path("models/v24/diffusion_unet1d_v2_6m_phase06.pt")
     print(f"Loading checkpoint: {ckpt_path}")
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
     print(f"Resuming from epoch {ckpt['epoch']}, val_loss={ckpt.get('best_val_loss', '?')}")
 
     fused_path = V24_DIFFUSION_FUSED_6M_PATH
     timestamps_path = V24_DIFFUSION_TIMESTAMPS_6M_PATH
-    out_ckpt_path = ckpt_path.parent / "diffusion_unet1d_v2_6m_phase06.pt"
+    out_ckpt_path = ckpt_path.parent / "diffusion_unet1d_v2_6m_phase07.pt"
 
     timestamps = None
     if timestamps_path.exists():

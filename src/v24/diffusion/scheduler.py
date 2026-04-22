@@ -79,22 +79,52 @@ class NoiseScheduler(nn.Module):
         lag_cov = (sq_centered[:, :, lag:] * sq_centered[:, :, :-lag]).mean(-1)
         return (lag_cov / var).mean()
 
-    def training_loss_with_realism(
+    def training_loss_regime(
         self, model: nn.Module, x_start: Tensor, context: Tensor,
         t: Optional[Tensor] = None,
         temporal_seq: Optional[Tensor] = None,
         temporal_emb: Optional[Tensor] = None,
+        regime_emb: Optional[Tensor] = None,
         acf_weight: float = 0.10,
         vol_weight: float = 0.10,
         std_weight: float = 0.05,
         return_idx: int = 0,
     ) -> dict[str, Tensor]:
+        """Training loss with regime conditioning for V26 Phase 1.
+
+        Args:
+            model: The diffusion U-Net model.
+            x_start: Clean input (B, C, L).
+            context: Conditioning context (B, ctx_dim).
+            t: Optional timestep indices (B,).
+            temporal_seq: Temporal encoder hidden sequence (B, T_past, d_gru).
+            temporal_emb: Temporal encoder FiLM embedding (B, temporal_dim).
+            regime_emb: Regime embedding (B, regime_dim) for regime conditioning.
+            acf_weight: Weight for autocorrelation realism loss.
+            vol_weight: Weight for volatility clustering realism loss.
+            std_weight: Weight for standard deviation realism loss.
+            return_idx: Index of the return channel for realism losses.
+
+        Returns:
+            Dictionary containing total loss and component losses.
+        """
         if t is None:
             t = torch.randint(0, self.num_timesteps, (x_start.shape[0],), device=x_start.device)
 
         noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise)
-        eps_pred = model(x_t, t, context, temporal_seq=temporal_seq, temporal_emb=temporal_emb)
+
+        # Combine temporal_emb and regime_emb if both provided
+        combined_temporal_emb = temporal_emb
+        if temporal_emb is not None and regime_emb is not None:
+            # Concatenate regime to temporal embedding (assumes model supports this)
+            # Model must be updated to handle combined embedding dimension
+            combined_temporal_emb = torch.cat([temporal_emb, regime_emb], dim=-1)
+        elif regime_emb is not None:
+            # Use regime_emb directly if no temporal_emb
+            combined_temporal_emb = regime_emb
+
+        eps_pred = model(x_t, t, context, temporal_seq=temporal_seq, temporal_emb=combined_temporal_emb)
 
         diffusion_loss = torch.nn.functional.mse_loss(eps_pred, noise)
 
@@ -109,6 +139,8 @@ class NoiseScheduler(nn.Module):
         acf_fake = self._autocorr(ret, lag=1)
         acf_real = self._autocorr(ret_real.detach(), lag=1)
         acf_loss = torch.abs(acf_fake - acf_real)
+        if torch.sign(acf_fake) != torch.sign(acf_real):
+            acf_loss = acf_loss * 2.0
 
         vol_fake = self._vol_clustering(ret, lag=1)
         vol_real = self._vol_clustering(ret_real.detach(), lag=1)
@@ -127,6 +159,32 @@ class NoiseScheduler(nn.Module):
             "vol": vol_loss,
             "std": std_loss,
         }
+
+    def training_loss_with_realism(
+        self, model: nn.Module, x_start: Tensor, context: Tensor,
+        t: Optional[Tensor] = None,
+        temporal_seq: Optional[Tensor] = None,
+        temporal_emb: Optional[Tensor] = None,
+        acf_weight: float = 0.10,
+        vol_weight: float = 0.10,
+        std_weight: float = 0.05,
+        return_idx: int = 0,
+    ) -> dict[str, Tensor]:
+        """Backward-compatible training loss with realism (without regime conditioning).
+
+        This is a wrapper that calls training_loss_regime without regime_emb.
+        """
+        return self.training_loss_regime(
+            model, x_start, context,
+            t=t,
+            temporal_seq=temporal_seq,
+            temporal_emb=temporal_emb,
+            regime_emb=None,
+            acf_weight=acf_weight,
+            vol_weight=vol_weight,
+            std_weight=std_weight,
+            return_idx=return_idx,
+        )
 
     def q_sample(self, x_start: Tensor, t: Tensor, noise: Optional[Tensor] = None) -> Tensor:
         if noise is None:
