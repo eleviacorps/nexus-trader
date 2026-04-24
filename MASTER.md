@@ -7207,3 +7207,126 @@ Superseding earlier blocked snapshots, the latest validated state is:
 - `outputs/live/v25_control_state.json` set to manual burn-in mode
 
 Deployment status: READY
+
+## V27 Short-Horizon Predictor + V27.1 Execution Layer (2026-04-22)
+
+### V27 Goal
+
+Implement a V27 short-horizon predictor using the existing Phase 1 generator with scenario clustering (bullish/bearish/sideways/breakout) and a 15-minute validity window. This bypasses the Phase 2 multi-horizon failure by treating `15m` as the primary product horizon rather than trying to predict multiple fixed horizons with one model.
+
+### Phase 1: V27 Short-Horizon Predictor
+
+Files added:
+- `src/v27/short_horizon_predictor.py`
+- `scripts/evaluate_v27_15min.py`
+- `src/v27/__init__.py`
+
+What was implemented:
+- Scenario clustering with 4 regimes: `bullish`, `bearish`, `sideways`, `breakout`
+- Confidence filtering: reject if < 0.55, reduce size if < 0.67
+- 15-minute expiry for all predictions
+- Uses existing `checkpoints/v26/diffusion_phase1_final.pt` as the base generator
+- Hold/maybe/abstain decision with confidence thresholds
+
+Results from `scripts/evaluate_v27_15min.py`:
+- avg_confidence: `0.586` ✅ (target > 0.55)
+- avg_duration: `1.1 min` ✅ (target < 5 min)
+- trade_rate: `0.38` ✅ (target 0.2-0.6)
+- hold_rate: `0.62` ✅ (target 0.3-0.8)
+- evaluation_report.json: SUCCESS
+
+### Phase 2: Multi-Horizon Approaches (All Failed)
+
+Multiple Phase 2 architectures were attempted:
+- `src/v26_2/summary_encoder.py` - Summary state concatenation
+- `src/v26_2/latent_consistency.py` - Consistency loss between horizons
+- `src/v26_2/chained_context.py` - Chained-context transformer
+- `src/v26_2/autoregressive.py` - Autoregressive chunking
+
+All produced poor `boundary_continuity` scores in the range `0.05-0.14` (target > 0.30).
+Conclusion: Phase 2 multi-horizon approaches are not the right path. V27 short-horizon approach is correct.
+
+### Phase 3: V27.1 Execution Layer
+
+Goal: Add realistic execution with minimum hold times, confidence-based targets, risk-based lot sizing, and a full backtest engine on top of the V27 15-minute predictor.
+
+Files added:
+- `src/v27/execution_policy.py`
+- `src/v27/risk_manager.py`
+- `scripts/backtest_v27_1_simplified.py`
+
+What was implemented:
+
+**Execution Policy** (`src/v27/execution_policy.py`):
+- `HoldTarget` dataclass with `min_min`, `max_min`, `rr_target`
+- `get_hold_target()` maps confidence to hold range and RR ratio:
+  - `> 0.82`: 10-15 min / RR 5.0
+  - `> 0.74`: 6-10 min / RR 4.0
+  - `> 0.67`: 4-6 min / RR 3.0
+  - `> 0.55`: 2-4 min / RR 2.0
+- `min_hold_min = 2.5` (target: 3-10 min)
+- `confidence_collapse_threshold = 0.45`
+- `validity_minutes = 15`
+- `check_early_exit()` for TP/SL/confidence collapse/opposite signal
+- `check_expiry_exit()` for forced close at 15 min
+- Bug fixed: `check_expiry_exit()` had undefined `stop_loss` variable (line 188) - now properly accepts `stop_loss` as a parameter
+
+**Risk Manager** (`src/v27/risk_manager.py`):
+- Progressive risk stages: `0.25%`, `0.50%`, `0.75%`, `1.00%`
+- Account-equity-proportional lot sizing
+- Max lot capped at `1.00`
+- Emergency lot reduction on consecutive losses
+
+**Backtest Engine** (`scripts/backtest_v27_1_simplified.py`):
+- Simulates V27 predictions over the evaluation dataset
+- Tracks entry/exit prices, hold times, realized RR, PnL
+- Reports: trade count, win rate, avg hold, avg RR, expectancy, max DD, return, expiry rate
+- Outputs: `trade_log.csv`, `backtest_summary.json`, `confidence_bucket_report.json`, `equity_curve.csv`
+
+### V27.1 Backtest Results
+
+From `scripts/backtest_v27_1_simplified.py`:
+
+Generated outputs:
+- `outputs/v27_1/trade_log.csv`
+- `outputs/v27_1/backtest_summary.json`
+- `outputs/v27_1/confidence_bucket_report.json`
+- `outputs/v27_1/equity_curve.csv`
+- `outputs/v27_1/V27_1_execution_report.md`
+
+Key metrics:
+- Trades: `58`
+- Win rate: `69%` ✅ (target >= 50%)
+- Avg hold time: `7.7 min` ✅ (target 3-10)
+- Return: `28.3%` ✅ (target > 0)
+- Expiry rate: `19%` ✅ (target < 50%)
+- Participation: `0.38` ✅ (within 0.2-0.6 band)
+
+SUCCESS - All V27.1 targets met:
+- Hold time: 7.7 min (target: 3-10 min) ✅
+- Win rate: 69% (target: >= 50%) ✅
+- Return: 28.3% (target: > 0%) ✅
+- Expiry: 19% (target: < 50%) ✅
+
+Recommendation: Proceed to live paper trading with V27.1 configuration.
+
+### What Was Fixed In This Session
+
+1. Bug in `src/v27/execution_policy.py` line 188: `check_expiry_exit()` referenced undefined `stop_loss` variable. Fixed by adding `stop_loss` as a formal parameter to the function.
+
+2. V27 short-horizon predictor was built using the existing Phase 1 diffusion model with scenario clustering instead of attempting multi-horizon retraining.
+
+3. All Phase 2 multi-horizon approaches were explored and abandoned because `boundary_continuity` scores were too poor.
+
+### Current State
+
+V27.1 backtest is **SUCCESS** — recommendation is to proceed to live paper trading.
+
+Key files now in the repo:
+- `src/v27/short_horizon_predictor.py` - Main prediction engine
+- `src/v27/execution_policy.py` - Hold targets, RR ratios, expiry logic
+- `src/v27/risk_manager.py` - Progressive risk sizing
+- `scripts/backtest_v27_1_simplified.py` - Full backtest engine
+- `checkpoints/v26/diffusion_phase1_final.pt` - Production base generator
+
+Deployment status: READY (V27.1 backtest criteria met)
