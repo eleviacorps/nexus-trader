@@ -60,19 +60,26 @@ class TrainingConfig:
     quant_dim: int = 64
     
     # Training - optimized for speed
-    batch_size: int = 128  # Larger for full dataset
-    num_paths: int = 64  # Fewer paths for faster training
+    batch_size: int = 256  # Increased for GPU utilization
+    num_paths: int = 8  # Reduced for speed
     learning_rate: float = 1e-4
-    epochs: int = 100
-    gradient_clip: float = 1.0
+    max_steps: int = 25000  # Train by steps, not epochs
+    gradient_clip: float = 0.5  # Reduced to prevent spikes
     
     # Loss weights
     diffusion_weight: float = 1.0
-    diversity_weight: float = 0.1
+    diversity_weight: float = 0.05  # Reduced to prevent spikes
     regime_consistency_weight: float = 0.05
     
-    # Sampling - reduced for faster training
-    sampling_steps: int = 20  # Reduced from 50
+    # Sampling - reduced for speed
+    sampling_steps: int = 8  # Reduced for 2x speed
+    train_diffusion_steps: int = 8  # Training uses fewer steps
+    
+    # Mixed precision
+    use_amp: bool = True
+    
+    # Logging
+    log_every: int = 50
     
     # Data
     features_path: str = "data/features/diffusion_fused_6m.npy"
@@ -81,7 +88,7 @@ class TrainingConfig:
     
     # Checkpointing
     checkpoint_dir: str = "outputs/MMFPS/generator_checkpoints"
-    checkpoint_interval: int = 1  # Save every epoch
+    checkpoint_every: int = 50  # Save every 50 steps
     
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -103,8 +110,10 @@ class PathDataset(Dataset):
         self.sequence_length = sequence_length
         self.stride = stride
         
-        # Calculate valid indices
-        self.max_idx = len(features) - sequence_length - 1
+        # Calculate valid indices - need 2*seq_len for context + target
+        self.max_idx = len(features) - 2 * sequence_length - 1
+        if self.max_idx < 0:
+            self.max_idx = 0
         self.indices = list(range(0, self.max_idx, stride))
         
     def __len__(self) -> int:
@@ -118,9 +127,27 @@ class PathDataset(Dataset):
         # We need stride of 20 to create overlapping sequences
         seq_len = self.sequence_length
         
-        # Take consecutive chunks
-        context_feat = self.features[i:i + seq_len]
-        target_feat = self.features[i + seq_len:i + 2 * seq_len]
+        # Take consecutive chunks - ensure we don't go out of bounds
+        end_idx = min(i + 2 * seq_len, len(self.features))
+        actual_len = end_idx - i
+        
+        # If not full length, pad with zeros
+        if actual_len < 2 * seq_len:
+            # Pad the context and target with zeros
+            context_feat = np.zeros((2 * seq_len, self.features.shape[1]), dtype=np.float32)
+            target_feat = np.zeros((2 * seq_len, self.features.shape[1]), dtype=np.float32)
+            
+            # Fill available data
+            avail = min(seq_len, len(self.features) - i)
+            if avail > 0:
+                context_feat[:avail] = self.features[i:i + avail]
+            if len(self.features) - i - seq_len > 0:
+                avail_target = min(seq_len, len(self.features) - i - seq_len)
+                if avail_target > 0:
+                    target_feat[:avail_target] = self.features[i + seq_len:i + seq_len + avail_target]
+        else:
+            context_feat = self.features[i:i + seq_len]
+            target_feat = self.features[i + seq_len:i + 2 * seq_len]
         
         # Flatten to 1D vector for DataLoader
         context = context_feat.flatten()  # (20*144,) = 2880
@@ -190,39 +217,32 @@ def train_epoch(
             # Get losses from output
             loss = output.diversity_loss
             
-            if loss is not None and loss.abs() > 0:
+            loss_val = float('nan')
+            if loss is not None:
+                with torch.no_grad():
+                    loss_val = loss.abs().mean().item()
+            if loss is not None and not (torch.isnan(torch.tensor(loss_val)) or loss_val == 0.0):
                 optimizer.zero_grad()
-                if loss.requires_grad == False:
-                    loss = loss.detach().requires_grad_(True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
                 optimizer.step()
                 scheduler.step()
-                
-                total_loss += loss.abs().item()
-                
-                # Get metrics from the generated paths
-                if output.paths is not None:
-                    gen_paths = output.paths
-                    path_returns = (gen_paths[:, :, -1, :] - gen_paths[:, :, 0, :]) / (gen_paths[:, :, 0, :].abs() + 1e-8)
-                    path_returns = path_returns.mean(dim=-1)
-                    path_std = path_returns.std(dim=1).mean().item()
-                    path_range = (path_returns.max(dim=1)[0] - path_returns.min(dim=1)[0]).mean().item()
-                    path_mean = path_returns.mean().item()
-                else:
-                    path_std = 0.0
-                    path_range = 0.0
-                    path_mean = 0.0
-                
-                # Track metrics
-                diff_loss_val = loss.item()
-                num_batches += 1
+            
+            total_loss += loss_val
+            
+            if output.paths is not None:
+                gen_paths = output.paths
+                path_returns = (gen_paths[:, :, -1, :] - gen_paths[:, :, 0, :]) / (gen_paths[:, :, 0, :].abs() + 1e-8)
+                path_returns = path_returns.mean(dim=-1)
+                path_std = path_returns.std(dim=1).mean().item()
+                path_range = (path_returns.max(dim=1)[0] - path_returns.min(dim=1)[0]).mean().item()
+                path_mean = path_returns.mean().item()
             else:
-                num_batches += 1
                 path_std = 0.0
                 path_range = 0.0
                 path_mean = 0.0
-                diff_loss_val = 0.0
+            
+            diff_loss_val = loss.abs().mean().item() if loss is not None else 0.0
              
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
@@ -444,85 +464,191 @@ def main():
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=config.learning_rate,
-        epochs=config.epochs,
-        steps_per_epoch=len(train_loader),
+        total_steps=config.max_steps,
         pct_start=0.1,
     )
     
+    # AMP scaler for mixed precision
+    scaler = torch.cuda.amp.GradScaler() if config.use_amp else None
+    
     # Resume if needed
-    start_epoch = 0
+    start_step = 0
+    global_step = 0
     if args.resume:
         logger.info(f"Resuming from {args.resume}")
         checkpoint = torch.load(args.resume, map_location=config.device)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        start_epoch = checkpoint["epoch"] + 1
+        global_step = checkpoint.get("step", 0)
+        start_step = global_step + 1
     
-    # Training loop
+    # Training loop - step-based
     best_diversity = 0.0
     metrics_history = []
+    total_loss = 0.0
+    num_batches = 0
     
-    for epoch in range(start_epoch, config.epochs):
-        logger.info(f"=== Epoch {epoch + 1}/{config.epochs} ===")
-        
-        train_metrics = train_epoch(
-            model, regime_detector, quant_extractor,
-            train_loader, optimizer, scheduler,
-            config, logger, epoch,
-        )
-        
-        logger.info(
-            f"Train - loss: {train_metrics['loss']:.4f}, "
-            f"diff: {train_metrics['diffusion_loss']:.4f}, "
-            f"div: {train_metrics['diversity_loss']:.4f}"
-        )
-        
-        # Validation every few epochs
-        if epoch % 2 == 0:
-            val_metrics = validate(
-                model, regime_detector, quant_extractor,
-                val_loader, config,
-            )
-            logger.info(
-                f"Val - diversity: {val_metrics['diversity']:.4f}, "
-                f"path_std: {val_metrics['path_std']:.4f}, "
-                f"path_range: {val_metrics['path_range']:.4f}"
-            )
+    # EMA tracking
+    loss_ema = 0.0
+    std_ema = 0.0
+    range_ema = 0.0
+    
+    logger.info(f"=== Training for {config.max_steps} steps ===")
+    
+    model.train()
+    device = torch.device(config.device)
+    
+    pbar = tqdm(total=config.max_steps, desc="Training")
+    
+    while global_step < config.max_steps:
+        for batch_idx, (context_seqs, target_seqs) in enumerate(train_loader):
+            if global_step >= config.max_steps:
+                break
+                
+            context_seqs = context_seqs.to(device)
+            target_seqs = target_seqs.to(device)
             
-            if val_metrics['diversity'] > best_diversity:
-                best_diversity = val_metrics['diversity']
-                # Save best
+            B = context_seqs.shape[0]
+            seq_len = config.horizon
+            C = config.in_channels
+            
+            context_seq = context_seqs.view(B, seq_len, C)
+            context = context_seq[:, -1, :]
+            
+            regime_state = regime_detector(context)
+            regime_emb = regime_state.regime_embedding
+            quant_emb = torch.zeros(B, config.quant_dim, device=device)
+            
+            try:
+                target_for_model = target_seqs.view(B, 1, seq_len, C)
+                
+                # Forward with AMP
+                if config.use_amp:
+                    with torch.cuda.amp.autocast():
+                        output = model(
+                            context=context,
+                            regime_emb=regime_emb,
+                            quant_emb=quant_emb,
+                            targets=target_for_model,
+                        )
+                        loss = output.diversity_loss
+                        
+                        loss_val = float('nan')
+                        if loss is not None:
+                            with torch.no_grad():
+                                loss_val = loss.abs().mean().item()
+                        if loss is not None and not (torch.isnan(torch.tensor(loss_val)) or loss_val == 0.0):
+                            optimizer.zero_grad()
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                            scaler.step(optimizer)
+                            scaler.update()
+                            scheduler.step()
+                else:
+                    output = model(
+                        context=context,
+                        regime_emb=regime_emb,
+                        quant_emb=quant_emb,
+                        targets=target_for_model,
+                    )
+                    loss = output.diversity_loss
+                    
+                    loss_val = float('nan')
+                    if loss is not None:
+                        with torch.no_grad():
+                            loss_val = loss.abs().mean().item()
+                    if loss is not None and not (torch.isnan(torch.tensor(loss_val)) or loss_val == 0.0):
+                        optimizer.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                        optimizer.step()
+                        scheduler.step()
+                
+                # Metrics - update EVERY step
+                if output.paths is not None:
+                    gen_paths = output.paths
+                    path_returns = (gen_paths[:, :, -1, :] - gen_paths[:, :, 0, :]) / (gen_paths[:, :, 0, :].abs() + 1e-8)
+                    path_returns = path_returns.mean(dim=-1)
+                    path_std = path_returns.std(dim=1).mean().item()
+                    path_range = (path_returns.max(dim=1)[0] - path_returns.min(dim=1)[0]).mean().item()
+                    path_mean = path_returns.mean().item()
+                else:
+                    path_std = path_range = path_mean = 0.0
+                
+                loss_val = loss.abs().item() if loss is not None else 0.0
+                
+                # Update EMA metrics
+                if global_step == 0:
+                    loss_ema = loss_val
+                    std_ema = path_std
+                    range_ema = path_range
+                else:
+                    loss_ema = 0.98 * loss_ema + 0.02 * loss_val
+                    std_ema = 0.98 * std_ema + 0.02 * path_std
+                    range_ema = 0.98 * range_ema + 0.02 * path_range
+                
+                total_loss += loss_val
+                num_batches += 1
+                
+                # Update progress EVERY step (not just every log_every)
+                pbar.set_postfix({
+                    "loss": f"{loss_val:.4f}",
+                    "ema": f"{loss_ema:.4f}",
+                    "std": f"{path_std:.2f}",
+                })
+            
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                continue
+            except Exception as e:
+                logger.warning(f"Training error: {e}")
+                continue
+            
+            global_step += 1
+            pbar.update(1)
+            
+            # Checkpoint every 200 steps
+            if global_step % config.checkpoint_every == 0:
                 torch.save({
-                    "epoch": epoch,
+                    "step": global_step,
                     "model": model.state_dict(),
                     "regime_detector": regime_detector.state_dict(),
                     "quant_extractor": quant_extractor.state_dict(),
-                    "metrics": val_metrics,
-                }, output_dir / "best_model.pt")
-                logger.info(f"Saved best model (diversity: {best_diversity:.4f})")
-        
-        # Checkpoint
-        if epoch % config.checkpoint_interval == 0:
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "regime_detector": regime_detector.state_dict(),
-                "quant_extractor": quant_extractor.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "config": config,
-            }, output_dir / f"checkpoint_epoch_{epoch}.pt")
-        
-        # Save metrics
-        metrics_history.append({
-            "epoch": epoch,
-            **train_metrics,
-        })
-        
-        with open(output_dir / "metrics_history.json", "w") as f:
-            json.dump(metrics_history, f, indent=2)
+                    "optimizer": optimizer.state_dict(),
+                    "config": config,
+                }, output_dir / f"checkpoint_step_{global_step}.pt")
+                logger.info(
+                    f"[{global_step}] loss={loss_val:.4f}, ema={loss_ema:.4f}, "
+                    f"std={path_std:.2f}, range={path_range:.2f}"
+                )
+            
+            # Validation every 500 steps
+            if global_step % 500 == 0 and global_step > 0:
+                val_metrics = validate(
+                    model, regime_detector, quant_extractor,
+                    val_loader, config,
+                )
+                logger.info(
+                    f"Step {global_step} - Val diversity: {val_metrics['diversity']:.4f}, "
+                    f"path_std: {val_metrics['path_std']:.4f}"
+                )
+                
+                if val_metrics['diversity'] > best_diversity:
+                    best_diversity = val_metrics['diversity']
+                    torch.save({
+                        "step": global_step,
+                        "model": model.state_dict(),
+                        "regime_detector": regime_detector.state_dict(),
+                        "quant_extractor": quant_extractor.state_dict(),
+                        "metrics": val_metrics,
+                    }, output_dir / "best_model.pt")
+                    logger.info(f"Saved best model (diversity: {best_diversity:.4f})")
+                
+                model.train()
     
-    logger.info("Training complete!")
-    logger.info(f"Best diversity: {best_diversity:.4f}")
+    pbar.close()
+    logger.info(f"Training complete! Steps: {global_step}, Best diversity: {best_diversity:.4f}")
 
 
 if __name__ == "__main__":

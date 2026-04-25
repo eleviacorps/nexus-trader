@@ -350,8 +350,11 @@ class DiffusionPathGenerator(nn.Module):
         B, n_paths, horizon, C = paths.shape
         
         # Compute per-path returns
-        returns = (paths[:, :, -1, :] - paths[:, :, 0, :]) / (paths[:, :, 0, :].abs() + 1e-8)
+        returns = (paths[:, :, -1, :] - paths[:, :, 0, :]) / (paths[:, :, 0, :].abs() + 1.0)  # +1.0 prevents division explosion
         returns = returns.mean(dim=-1)  # (B, n_paths)
+        
+        # Clamp returns ONLY (localized, doesn't kill capacity)
+        returns = torch.clamp(returns, -10, 10)
         
         # Standard deviation of returns (want high)
         ret_std = returns.std(dim=1).mean()
@@ -366,8 +369,13 @@ class DiffusionPathGenerator(nn.Module):
         pairwise_dist = pairwise_dist * (1 - eye)
         avg_sep = pairwise_dist.sum() / (B * n_paths * (n_paths - 1) + 1e-8)
         
-        # Diversity loss: minimize negative of these
-        diversity_loss = -(ret_std + 0.1 * ret_range + 0.01 * avg_sep)
+        # Magnitude penalty to prevent extreme values
+        magnitude_penalty = (paths ** 2).mean()
+        
+        # Diversity loss: minimize negative of these + small magnitude penalty
+        # Diversity loss: use only std and separation (no ret_range which rewards extremes)
+        # Increase magnitude penalty from 0.01 to 0.05 for stronger regularization
+        diversity_loss = -(ret_std + 0.01 * avg_sep) + 0.05 * magnitude_penalty
         
         return diversity_loss
 
