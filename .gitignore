@@ -26,3 +26,5 @@ nexus_packaged/.mypy_cache/
 nexus_packaged/ui/frontend/node_modules/
 nexus_packaged/ui/frontend/dist/
 nexus_packaged/ui/frontend/*.tsbuildinfo
+nexus_packaged/nexus_packaged/.env.local
+nexus_packaged/nexus_packaged/node_modules/
