@@ -1,0 +1,66 @@
+version: "v30"
+
+data:
+  features_path: "data/features/diffusion_fused_6m.npy"
+  ohlcv_path: "nexus_packaged/data/ohlcv.parquet"
+  
+  # Processing
+  train_start: "2009-01-01"
+  train_end: "2020-12-31"
+  val_start: "2021-01-01"
+  val_end: "2026-01-01"
+  
+  base_timeframe_minutes: 1
+  target_timeframe_minutes: 15
+  precomputed_paths: "nexus_packaged/v30/data/processed/v30_paths.npy"
+
+model:
+  feature_dim: 144
+  generator:
+    path: "nexus_packaged/protection/model_enc.bin"
+    num_paths: 64
+    horizon: 20
+    lookback: 128
+    feature_dim: 144
+    device: "cuda"
+    norm_stats_path: "config/diffusion_norm_stats_6m.json"
+  
+  evaluator:
+    path: "nexus_packaged/v30/models/checkpoints"
+    hidden_dim: 256
+    num_layers: 3
+    dropout: 0.1
+
+training:
+  batch_size: 32
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  max_epochs: 100
+  patience: 10
+  
+  # Loss weights
+  loss_weights:
+    direction: 0.4
+    magnitude: 0.3
+    structure: 0.3
+
+  # Optimizer
+  optimizer: "adam"
+  scheduler: "cosine"
+  warmup_steps: 500
+
+evaluation:
+  metrics:
+    - "directional_accuracy"
+    - "expected_reward"
+    - "calibration_error"
+    - "sharpe_ratio"
+  
+  # Trading thresholds
+  confidence_threshold: 0.55
+  min_ev_threshold: 0.0001
+
+inference:
+  batch_size: 1
+  device: "cuda"
+  cache_dir: "nexus_packaged/v30/models/checkpoints"
