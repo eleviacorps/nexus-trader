@@ -294,12 +294,16 @@ def validate(
         context_seqs = context_seqs.to(device)
         
         B = context_seqs.shape[0]
-        context = context_seqs.mean(dim=1)
+        seq_len = config.horizon
+        C = config.in_channels
+        
+        context_seq = context_seqs.view(B, seq_len, C)
+        context = context_seq[:, -1, :]  # Last timestep for regime: (B, C)
         
         # Generate paths
         regime_state = regime_detector(context)
         regime_emb = regime_state.regime_embedding
-        quant_emb = quant_extractor(target_seqs.permute(0, 1, 2).to(device))
+        quant_emb = torch.zeros(B, config.quant_dim, device=device)
         
         paths = model.quick_generate(
             context=context,
