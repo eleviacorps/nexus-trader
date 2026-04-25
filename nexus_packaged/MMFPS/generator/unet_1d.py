@@ -221,7 +221,8 @@ class DiffusionUNet1D(nn.Module):
         ch = [base_channels * m for m in channel_multipliers]
         num_levels = len(ch)
         
-        cond_dim = regime_dim + quant_dim  # Combined conditioning dimension
+        # Include temporal in combined conditioning
+        cond_dim = regime_dim + quant_dim + time_dim  # Combined conditioning dimension
 
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(time_dim),
@@ -287,6 +288,7 @@ class DiffusionUNet1D(nn.Module):
         context: Optional[Tensor] = None,
         regime_emb: Optional[Tensor] = None,
         quant_emb: Optional[Tensor] = None,
+        temporal_emb: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass - predicts epsilon.
 
@@ -296,19 +298,24 @@ class DiffusionUNet1D(nn.Module):
             context: Context embedding (B, ctx_dim).
             regime_emb: Regime embedding (B, regime_dim).
             quant_emb: Quant embedding (B, quant_dim).
+            temporal_emb: Temporal encoder embedding (B, time_dim).
 
         Returns:
             Predicted epsilon (B, C, L).
         """
         t_emb = self.time_embed(t)
         
-        # Combine regime and quant conditioning
-        if regime_emb is not None and quant_emb is not None:
-            cond_emb = torch.cat([regime_emb, quant_emb], dim=-1)
-        elif regime_emb is not None:
-            cond_emb = regime_emb
-        elif quant_emb is not None:
-            cond_emb = quant_emb
+        # Combine regime + quant + temporal conditioning
+        cond_parts = []
+        if regime_emb is not None:
+            cond_parts.append(regime_emb)
+        if quant_emb is not None:
+            cond_parts.append(quant_emb)
+        if temporal_emb is not None:
+            cond_parts.append(temporal_emb)
+        
+        if cond_parts:
+            cond_emb = torch.cat(cond_parts, dim=-1)
         else:
             cond_emb = None
 

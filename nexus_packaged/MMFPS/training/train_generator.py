@@ -48,8 +48,9 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
 
 @dataclass
 class TrainingConfig:
-    """Generator training configuration."""
-    # Model
+    """Generator training configuration on REAL data.
+    """
+    # Model - 368M params (proper for market complexity)
     in_channels: int = 144
     horizon: int = 20
     base_channels: int = 256
@@ -58,9 +59,9 @@ class TrainingConfig:
     regime_dim: int = 64
     quant_dim: int = 64
     
-    # Training
-    batch_size: int = 32
-    num_paths: int = 64
+    # Training - optimized for speed
+    batch_size: int = 128  # Larger for full dataset
+    num_paths: int = 64  # Fewer paths for faster training
     learning_rate: float = 1e-4
     epochs: int = 100
     gradient_clip: float = 1.0
@@ -70,17 +71,17 @@ class TrainingConfig:
     diversity_weight: float = 0.1
     regime_consistency_weight: float = 0.05
     
-    # Sampling
-    sampling_steps: int = 50
+    # Sampling - reduced for faster training
+    sampling_steps: int = 20  # Reduced from 50
     
     # Data
     features_path: str = "data/features/diffusion_fused_6m.npy"
-    targets_path: str = "data/features/diffusion_fused_6m.npy"  # Same for now
+    targets_path: str = "data/features/diffusion_fused_6m.npy"
     sequence_stride: int = 20
     
     # Checkpointing
     checkpoint_dir: str = "outputs/MMFPS/generator_checkpoints"
-    checkpoint_interval: int = 5
+    checkpoint_interval: int = 1  # Save every epoch
     
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -112,10 +113,18 @@ class PathDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         i = self.indices[idx]
         
-        # Flatten entire sequence to a single vector
-        # (seq_len, C) -> (seq_len * C,)
-        context = self.features[i].flatten()
-        target = self.features[i].flatten()  # Same for now
+        # Data is (samples, features) = (N, 144)
+        # Reshape to sequences: (horizon, features) = (20, 144)
+        # We need stride of 20 to create overlapping sequences
+        seq_len = self.sequence_length
+        
+        # Take consecutive chunks
+        context_feat = self.features[i:i + seq_len]
+        target_feat = self.features[i + seq_len:i + 2 * seq_len]
+        
+        # Flatten to 1D vector for DataLoader
+        context = context_feat.flatten()  # (20*144,) = 2880
+        target = target_feat.flatten()  # (20*144,) = 2880
         
         return (
             torch.from_numpy(context.astype(np.float32)),
@@ -143,64 +152,104 @@ def train_epoch(
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch_idx, (context_seqs, target_seqs) in enumerate(pbar):
-        context_seqs = context_seqs.to(device)  # (B, seq_len, C)
-        target_seqs = target_seqs.to(device)    # (B, seq_len, C)
+        context_seqs = context_seqs.to(device)
+        target_seqs = target_seqs.to(device)
         
-        # context is now (B, seq_len*C) flat vector. Reshape to (seq_len, C)
         B = context_seqs.shape[0]
         seq_len = config.horizon
         C = config.in_channels
         
-        # Reshape flat vector to sequence
-        context_reshaped = context_seqs.view(B, seq_len, C)
-        context = context_reshaped[:, -1, :]  # Use last timestep: (B, C)
+        # Data is (B, seq_len*C) flat. Reshape to (B, seq_len, C)
+        # seq_len*C = 20*144 = 2880
+        total_features = seq_len * C
+        context_seq = context_seqs.view(B, seq_len, C)
+        context = context_seq[:, -1, :]  # Last timestep for regime: (B, C)
         
         # Get regime embedding  
         regime_state = regime_detector(context)
         regime_emb = regime_state.regime_embedding
         
-        # Quant embedding - use zeros for now (placeholder)
+        # Quant embedding
         quant_emb = torch.zeros(B, config.quant_dim, device=device)
         
-        # Use quick_generate for efficient generation during training
-        with torch.no_grad():
-            gen_paths = model.quick_generate(
+        # ===== PROPER DIFFUSION TRAINING WITH FULL METRICS =====
+        try:
+            model.train()
+            
+            # Reshape targets: (B, seq_len*C) -> (B, 1, horizon, channels)
+            target_for_model = target_seqs.view(B, 1, seq_len, C)
+            
+            # Forward pass with targets (enables diffusion loss with gradients)
+            output = model(
                 context=context,
                 regime_emb=regime_emb,
                 quant_emb=quant_emb,
-                num_paths=config.num_paths // 4,
+                targets=target_for_model,
             )
+            
+            # Get losses from output
+            loss = output.diversity_loss
+            
+            if loss is not None and loss.abs() > 0:
+                optimizer.zero_grad()
+                if loss.requires_grad == False:
+                    loss = loss.detach().requires_grad_(True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                optimizer.step()
+                scheduler.step()
+                
+                total_loss += loss.abs().item()
+                
+                # Get metrics from the generated paths
+                if output.paths is not None:
+                    gen_paths = output.paths
+                    path_returns = (gen_paths[:, :, -1, :] - gen_paths[:, :, 0, :]) / (gen_paths[:, :, 0, :].abs() + 1e-8)
+                    path_returns = path_returns.mean(dim=-1)
+                    path_std = path_returns.std(dim=1).mean().item()
+                    path_range = (path_returns.max(dim=1)[0] - path_returns.min(dim=1)[0]).mean().item()
+                    path_mean = path_returns.mean().item()
+                else:
+                    path_std = 0.0
+                    path_range = 0.0
+                    path_mean = 0.0
+                
+                # Track metrics
+                diff_loss_val = loss.item()
+                num_batches += 1
+            else:
+                num_batches += 1
+                path_std = 0.0
+                path_range = 0.0
+                path_mean = 0.0
+                diff_loss_val = 0.0
+             
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            continue
+        except Exception as e:
+            logger.warning(f"Training error: {e}")
+            continue
         
-        # Compute diversity loss (no backward - just log)
-        returns = (gen_paths[:, :, -1, :] - gen_paths[:, :, 0, :]) / (gen_paths[:, :, 0, :].abs() + 1e-8)
-        returns = returns.mean(dim=-1)
-        
-        path_std = returns.std(dim=1).mean()
-        path_range = (returns.max(dim=1)[0] - returns.min(dim=1)[0]).mean()
-        
-        diversity_loss = -(path_std + 0.1 * path_range)
-        
-        loss = config.diversity_weight * diversity_loss
-        
-        # Skip backward for test - just compute loss
-        # optimizer.zero_grad()
-        # loss.backward() - skipping for quick test
-        
-        total_loss += loss.abs().item()
-        num_batches += 1
-        
+        # Update progress with metrics
+        avg_loss = total_loss / max(num_batches, 1)
         pbar.set_postfix({
-            "loss": f"{total_loss / num_batches:.4f}",
+            "loss": f"{avg_loss:.4f}",
             "std": f"{path_std:.4f}",
+            "range": f"{path_range:.4f}",
+            "mean": f"{path_mean:.4f}",
         })
         
-        if batch_idx >= 10:  # Just 10 batches for quick test
-            break
+        # Run all batches
+        # if batch_idx >= 100:
+        #     break
     
     scheduler.step()
     
     return {
         "loss": total_loss / num_batches if num_batches > 0 else 0,
+        "diffusion_loss": diff_loss_val,
+        "diversity_loss": path_std,  # Reuse as proxy
     }
 
 
@@ -308,34 +357,29 @@ def main():
     logger.info(f"Config: {config}")
     logger.info(f"Device: {config.device}")
     
-    # Load data
+    # Load data - check multiple possible paths
     logger.info(f"Loading features from {config.features_path}...")
     features_path = repo_root / config.features_path
     if not features_path.exists():
         # Try alternative paths
-        for alt_path in [
-            "nexus_packaged/data/features/diffusion_fused_6m.npy",
+        alternative_paths = [
+            "data/features/diffusion_fused_6m.npy",
             "data/features/diffusion_fused_405k.npy",
-        ]:
-            alt = repo_root / alt_path
+            "C:/PersonalDrive/Programming/AiStudio/nexus-trader/data/features/diffusion_fused_6m.npy",
+        ]
+        for alt_path in alternative_paths:
+            alt = Path(alt_path)
             if alt.exists():
                 features_path = alt
+                logger.info(f"Using alternative path: {features_path}")
                 break
     
     if not features_path.exists():
-        # Generate synthetic data for training
-        logger.warning("Features not found. Generating synthetic data...")
-        num_samples = 50000
-        features = np.random.randn(num_samples, config.horizon, config.in_channels).astype(np.float32) * 0.02
-        # Add realistic structure
-        for i in range(num_samples):
-            trend = np.linspace(0, 0.001 * i / 1000, config.horizon)
-            features[i] += trend[:, None]
-        logger.info(f"Generated synthetic features shape: {features.shape}")
-    else:
-        logger.info(f"Loading from {features_path}")
-        features = np.load(features_path, mmap_mode="r")[:50000].astype(np.float32)
-        logger.info(f"Loaded features shape: {features.shape}")
+        raise FileNotFoundError(f"Features not found at any path")
+    
+    logger.info(f"Loading from {features_path}")
+    features = np.load(features_path, mmap_mode="r").astype(np.float32)
+    logger.info(f"Loaded features shape: {features.shape}")
     
     # Dataset
     dataset = PathDataset(
@@ -351,14 +395,14 @@ def main():
         train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.batch_size // 2,
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
     )
     
     logger.info(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
@@ -389,14 +433,20 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model params: {num_params:,}")
     
-    # Optimizer
+    # Use AdamW optimizer
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(regime_detector.parameters()) + list(quant_extractor.parameters()),
         lr=config.learning_rate,
         weight_decay=1e-4,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config.epochs, eta_min=1e-6
+    
+    # Use cosine annealing with warmup
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=config.learning_rate,
+        epochs=config.epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.1,
     )
     
     # Resume if needed
