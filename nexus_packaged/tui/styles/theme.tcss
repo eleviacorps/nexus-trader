@@ -1,0 +1,80 @@
+Screen {
+    background: #0a0a0f;
+    color: #d6f7ff;
+}
+
+#main-layout {
+    layout: grid;
+    grid-size: 2 5;
+    grid-rows: 35% 30% 15% 10% 10%;
+    grid-columns: 1fr 1fr;
+    padding: 1;
+}
+
+#chart-view {
+    column-span: 2;
+    border: solid #00e5ff;
+}
+
+#diffusion-panel {
+    border: solid #00e5ff;
+}
+
+#news-panel {
+    border: solid #00e5ff;
+}
+
+#status-panel {
+    column-span: 2;
+    border: solid #00e5ff;
+}
+
+#trading-panel {
+    column-span: 2;
+    border: solid #00e5ff;
+}
+
+#manual-panel {
+    column-span: 2;
+    border: solid #00e5ff;
+}
+
+#help-overlay {
+    layer: overlay;
+    dock: top;
+    width: 100%;
+    background: #101520;
+    color: #00e5ff;
+}
+
+#splash {
+    layer: overlay;
+    align: center middle;
+    content-align: center middle;
+    background: #0a0a0f 80%;
+    color: #00e5ff;
+    text-style: bold;
+}
+
+#init-progress {
+    layer: overlay;
+    dock: top;
+}
+
+Button {
+    background: #0f1b22;
+    color: #00e5ff;
+    border: solid #00e5ff;
+}
+
+Input {
+    background: #111720;
+    color: #d6f7ff;
+    border: solid #00e5ff;
+}
+
+Scrollbar {
+    color: #00e5ff;
+    background: #111720;
+}
+

@@ -1,0 +1,281 @@
+{
+  "macro": [
+    {
+      "name": "fed_funds",
+      "kind": "fred_csv",
+      "series_id": "FEDFUNDS",
+      "filename": "fred/FEDFUNDS.csv",
+      "priority": "high"
+    },
+    {
+      "name": "effective_fed_funds",
+      "kind": "fred_csv",
+      "series_id": "DFF",
+      "filename": "fred/DFF.csv",
+      "priority": "high"
+    },
+    {
+      "name": "cpi_all_items",
+      "kind": "fred_csv",
+      "series_id": "CPIAUCSL",
+      "filename": "fred/CPIAUCSL.csv",
+      "priority": "high"
+    },
+    {
+      "name": "vix",
+      "kind": "fred_csv",
+      "series_id": "VIXCLS",
+      "filename": "fred/VIXCLS.csv",
+      "priority": "high"
+    },
+    {
+      "name": "ten_year_yield",
+      "kind": "fred_csv",
+      "series_id": "DGS10",
+      "filename": "fred/DGS10.csv",
+      "priority": "high"
+    },
+    {
+      "name": "ten_year_breakeven",
+      "kind": "fred_csv",
+      "series_id": "T10YIE",
+      "filename": "fred/T10YIE.csv",
+      "priority": "high"
+    },
+    {
+      "name": "broad_dollar_index",
+      "kind": "fred_csv",
+      "series_id": "DTWEXBGS",
+      "filename": "fred/DTWEXBGS.csv",
+      "priority": "high"
+    },
+    {
+      "name": "five_year_breakeven",
+      "kind": "fred_csv",
+      "series_id": "T5YIE",
+      "filename": "fred/T5YIE.csv",
+      "priority": "high"
+    },
+    {
+      "name": "ten_year_real_yield",
+      "kind": "fred_csv",
+      "series_id": "DFII10",
+      "filename": "fred/DFII10.csv",
+      "priority": "high"
+    },
+    {
+      "name": "oil_wti_spot",
+      "kind": "fred_csv",
+      "series_id": "DCOILWTICO",
+      "filename": "fred/DCOILWTICO.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "nonfarm_payrolls",
+      "kind": "fred_csv",
+      "series_id": "PAYEMS",
+      "filename": "fred/PAYEMS.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "unemployment_rate",
+      "kind": "fred_csv",
+      "series_id": "UNRATE",
+      "filename": "fred/UNRATE.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "gold_etf_gld",
+      "kind": "yfinance_csv",
+      "ticker": "GLD",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/GLD.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "gold_futures_gc",
+      "kind": "yfinance_csv",
+      "ticker": "GC=F",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/GC=F.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "dollar_etf_uup",
+      "kind": "yfinance_csv",
+      "ticker": "UUP",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/UUP.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "treasury_etf_tlt",
+      "kind": "yfinance_csv",
+      "ticker": "TLT",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/TLT.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "spy_equity_proxy",
+      "kind": "yfinance_csv",
+      "ticker": "SPY",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/SPY.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "btcusd_context",
+      "kind": "yfinance_csv",
+      "ticker": "BTC-USD",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/BTC-USD.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "eurusd_context",
+      "kind": "yfinance_csv",
+      "ticker": "EURUSD=X",
+      "period": "max",
+      "interval": "1d",
+      "filename": "yfinance/EURUSD=X.csv",
+      "priority": "medium"
+    }
+  ],
+  "news": [
+    {
+      "name": "gold_macro_headlines",
+      "kind": "gdelt_doc",
+      "query": "(gold OR XAUUSD OR bullion) AND (Fed OR CPI OR inflation OR rates OR dollar OR DXY)",
+      "timespan": "365d",
+      "maxrecords": 250,
+      "mode": "ArtList",
+      "format": "CSV",
+      "filename": "gdelt/gold_macro_headlines.csv",
+      "priority": "high"
+    },
+    {
+      "name": "geopolitical_gold_headlines",
+      "kind": "gdelt_doc",
+      "query": "(gold OR bullion OR XAUUSD) AND (war OR sanctions OR missile OR reserve OR central bank)",
+      "timespan": "365d",
+      "maxrecords": 250,
+      "mode": "ArtList",
+      "format": "CSV",
+      "filename": "gdelt/geopolitical_gold_headlines.csv",
+      "priority": "high"
+    },
+    {
+      "name": "macro_policy_headlines",
+      "kind": "gdelt_doc",
+      "query": "(Fed OR FOMC OR CPI OR inflation OR payrolls OR yields) AND (gold OR dollar OR XAUUSD OR EURUSD OR BTCUSD)",
+      "timespan": "365d",
+      "maxrecords": 250,
+      "mode": "ArtList",
+      "format": "CSV",
+      "filename": "gdelt/macro_policy_headlines.csv",
+      "priority": "high"
+    },
+    {
+      "name": "fx_dollar_headlines",
+      "kind": "gdelt_doc",
+      "query": "(DXY OR dollar OR EURUSD OR forex) AND (Fed OR CPI OR yields OR inflation)",
+      "timespan": "365d",
+      "maxrecords": 250,
+      "mode": "ArtList",
+      "format": "CSV",
+      "filename": "gdelt/fx_dollar_headlines.csv",
+      "priority": "medium"
+    },
+    {
+      "name": "crypto_macro_headlines",
+      "kind": "gdelt_doc",
+      "query": "(BTCUSD OR bitcoin OR crypto) AND (Fed OR CPI OR inflation OR yields OR dollar)",
+      "timespan": "365d",
+      "maxrecords": 250,
+      "mode": "ArtList",
+      "format": "CSV",
+      "filename": "gdelt/crypto_macro_headlines.csv",
+      "priority": "medium"
+    }
+  ],
+  "crowd": [
+    {
+      "name": "crypto_fear_greed_history",
+      "kind": "json_api",
+      "url": "https://api.alternative.me/fng/?limit=0&format=json",
+      "filename": "sentiment/alternative_me_fng.json",
+      "priority": "high"
+    },
+    {
+      "name": "cftc_financial_futures_2025",
+      "kind": "direct",
+      "url": "https://www.cftc.gov/files/dea/history/fut_fin_txt_2025.zip",
+      "filename": "cftc/fut_fin_txt_2025.zip",
+      "priority": "high"
+    },
+    {
+      "name": "cftc_financial_futures_2024",
+      "kind": "direct",
+      "url": "https://www.cftc.gov/files/dea/history/fut_fin_txt_2024.zip",
+      "filename": "cftc/fut_fin_txt_2024.zip",
+      "priority": "high"
+    },
+    {
+      "name": "cftc_financial_combined_2025",
+      "kind": "direct",
+      "url": "https://www.cftc.gov/files/dea/history/com_fin_txt_2025.zip",
+      "filename": "cftc/com_fin_txt_2025.zip",
+      "priority": "medium"
+    },
+    {
+      "name": "cftc_disaggregated_2025",
+      "kind": "direct",
+      "url": "https://www.cftc.gov/files/dea/history/fut_disagg_txt_2025.zip",
+      "filename": "cftc/fut_disagg_txt_2025.zip",
+      "priority": "medium"
+    },
+    {
+      "name": "reddit_wallstreetbets_macro",
+      "kind": "reddit_search_json",
+      "subreddit": "wallstreetbets",
+      "query": "gold xauusd fed cpi inflation dxy btcusd eurusd",
+      "limit": 100,
+      "filename": "reddit/wallstreetbets_macro.json",
+      "priority": "medium"
+    },
+    {
+      "name": "reddit_stocks_macro",
+      "kind": "reddit_search_json",
+      "subreddit": "stocks",
+      "query": "gold xauusd fed cpi inflation dxy btcusd eurusd",
+      "limit": 100,
+      "filename": "reddit/stocks_macro.json",
+      "priority": "medium"
+    },
+    {
+      "name": "reddit_forex_macro",
+      "kind": "reddit_search_json",
+      "subreddit": "Forex",
+      "query": "gold xauusd fed cpi inflation dxy eurusd",
+      "limit": 100,
+      "filename": "reddit/forex_macro.json",
+      "priority": "medium"
+    },
+    {
+      "name": "reddit_crypto_macro",
+      "kind": "reddit_search_json",
+      "subreddit": "CryptoCurrency",
+      "query": "gold fed cpi inflation dxy btcusd",
+      "limit": 100,
+      "filename": "reddit/crypto_macro.json",
+      "priority": "medium"
+    }
+  ]
+}
