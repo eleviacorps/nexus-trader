@@ -28,3 +28,12 @@ nexus_packaged/ui/frontend/dist/
 nexus_packaged/ui/frontend/*.tsbuildinfo
 nexus_packaged/nexus_packaged/.env.local
 nexus_packaged/nexus_packaged/node_modules/
+nexus_packaged/nexus_packaged/MMFPS/models/
+nexus_packaged/nexus_packaged/MMFPS/outputs/
+nexus_packaged/nexus_packaged/MMFPS/__pycache__/
+nexus_packaged/nexus_packaged/MMFPS/.pytest_cache/
+nexus_packaged/nexus_packaged/MMFPS/.mypy_cache/
+nexus_packaged/nexus_packaged/MMFPS/ui/frontend/node_modules/
+nexus_packaged/nexus_packaged/MMFPS/ui/frontend/dist/
+nexus_packaged/nexus_packaged/MMFPS/ui/frontend/*.tsbuildinfo
+nexus_packaged/nexus_packaged/MMFPS/nexus_packaged/.env.local

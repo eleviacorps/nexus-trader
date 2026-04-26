@@ -480,7 +480,7 @@ def main():
     global_step = 0
     if args.resume:
         logger.info(f"Resuming from {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=config.device)
+        checkpoint = torch.load(args.resume, map_location=config.device, weights_only=False)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         global_step = checkpoint.get("step", 0)
@@ -611,8 +611,16 @@ def main():
             
             global_step += 1
             pbar.update(1)
+            pbar.refresh()
             
-            # Checkpoint every 200 steps
+            # Log every 50 steps
+            if global_step % 50 == 0:
+                logger.info(
+                    f"[{global_step}] loss={loss_val:.4f}, ema={loss_ema:.4f}, "
+                    f"std={path_std:.2f}"
+                )
+            
+            # Checkpoint every 50 steps
             if global_step % config.checkpoint_every == 0:
                 torch.save({
                     "step": global_step,
