@@ -349,35 +349,18 @@ class DiffusionPathGenerator(nn.Module):
         """
         B, n_paths, horizon, C = paths.shape
         
-        # Compute per-path returns
-        returns = (paths[:, :, -1, :] - paths[:, :, 0, :]) / (paths[:, :, 0, :].abs() + 1.0)  # +1.0 prevents division explosion
-        returns = returns.mean(dim=-1)  # (B, n_paths)
-        
-        # Clamp returns ONLY (localized, doesn't kill capacity)
-        returns = torch.clamp(returns, -10, 10)
-        
-        # Standard deviation of returns (want high)
-        ret_std = returns.std(dim=1).mean()
-        
-        # Range of returns (want high)
-        ret_range = (returns.max(dim=1)[0] - returns.min(dim=1)[0]).mean()
-        
-        # Pairwise distance (want high)
-        returns_exp = returns.unsqueeze(2) - returns.unsqueeze(1)
-        pairwise_dist = returns_exp.abs()
-        eye = torch.eye(n_paths, device=pairwise_dist.device).unsqueeze(0)
-        pairwise_dist = pairwise_dist * (1 - eye)
-        avg_sep = pairwise_dist.sum() / (B * n_paths * (n_paths - 1) + 1e-8)
-        
-        # Log-tranformed diversity (stable, prevents explosion)
-        # Maps ret_std from [0, inf] to [0, 3] range
-        log_std = torch.log1p(ret_std.clamp(0, 10))
-        
-        # Magnitude penalty to prevent extreme values
+        # Minimal loss: only magnitude regularization
+        # No diversity incentive - model learns natural distribution
         magnitude_penalty = (paths ** 2).mean()
         
-        # Diversity loss: log-transformed std + separation penalty + magnitude penalty
-        diversity_loss = -log_std + 0.01 * avg_sep + 0.05 * magnitude_penalty
+        # Return mean regularization (keep centered)
+        returns = (paths[:, :, -1, :] - paths[:, :, 0, :]) / (paths[:, :, 0, :].abs() + 1.0)
+        returns = returns.mean(dim=-1)
+        returns = torch.tanh(returns * 3.0)  # soft clamp
+        mean_reg = returns.mean() ** 2
+        
+        # Pure magnitude + mean regularization only
+        diversity_loss = magnitude_penalty * 0.1 + mean_reg * 0.5
         
         return diversity_loss
 

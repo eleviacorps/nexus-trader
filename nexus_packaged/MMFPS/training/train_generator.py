@@ -68,7 +68,7 @@ class TrainingConfig:
     
     # Loss weights
     diffusion_weight: float = 1.0
-    diversity_weight: float = 0.01  # Reduced further to prevent over-diversification
+    diversity_weight: float = 0.0  # Disabled - pure diffusion only
     regime_consistency_weight: float = 0.05
     
     # Sampling - reduced for speed
