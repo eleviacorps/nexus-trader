@@ -59,3 +59,8 @@ checkpoints/
 # Python
 __pycache__/
 *.pyc
+
+# Local index/cache and safety backups
+meta/file_index.sqlite
+*.bundle
+nexus_packaged/logs/

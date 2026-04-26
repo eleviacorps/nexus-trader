@@ -68,7 +68,7 @@ class TrainingConfig:
     
     # Loss weights
     diffusion_weight: float = 1.0
-    diversity_weight: float = 0.05  # Reduced to prevent spikes
+    diversity_weight: float = 0.01  # Reduced further to prevent over-diversification
     regime_consistency_weight: float = 0.05
     
     # Sampling - reduced for speed
@@ -482,7 +482,8 @@ def main():
         logger.info(f"Resuming from {args.resume}")
         checkpoint = torch.load(args.resume, map_location=config.device, weights_only=False)
         model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        if "optimizer" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer"])
         global_step = checkpoint.get("step", 0)
         start_step = global_step + 1
     

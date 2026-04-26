@@ -369,13 +369,15 @@ class DiffusionPathGenerator(nn.Module):
         pairwise_dist = pairwise_dist * (1 - eye)
         avg_sep = pairwise_dist.sum() / (B * n_paths * (n_paths - 1) + 1e-8)
         
+        # Log-tranformed diversity (stable, prevents explosion)
+        # Maps ret_std from [0, inf] to [0, 3] range
+        log_std = torch.log1p(ret_std.clamp(0, 10))
+        
         # Magnitude penalty to prevent extreme values
         magnitude_penalty = (paths ** 2).mean()
         
-        # Diversity loss: minimize negative of these + small magnitude penalty
-        # Diversity loss: use only std and separation (no ret_range which rewards extremes)
-        # Increase magnitude penalty from 0.01 to 0.05 for stronger regularization
-        diversity_loss = -(ret_std + 0.01 * avg_sep) + 0.05 * magnitude_penalty
+        # Diversity loss: log-transformed std + separation penalty + magnitude penalty
+        diversity_loss = -log_std + 0.01 * avg_sep + 0.05 * magnitude_penalty
         
         return diversity_loss
 
