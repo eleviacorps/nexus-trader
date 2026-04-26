@@ -1,0 +1,990 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+
+from config.project_config import (
+    FUSED_FEATURE_MATRIX_PATH,
+    FUSED_TIMESTAMPS_PATH,
+    GATE_CONTEXT_PATH,
+    META_GATE_PATH,
+    AMP_DTYPE,
+    AMP_ENABLED,
+    MODEL_MANIFEST_PATH,
+    NUM_WORKERS,
+    PIN_MEMORY,
+    LEGACY_PRICE_FEATURES_CSV,
+    LEGACY_PRICE_FEATURES_PARQUET,
+    PRICE_FEATURES_CSV_FALLBACK,
+    PRICE_FEATURES_PATH,
+    PREFETCH_FACTOR,
+    PRECISION_GATE_PATH,
+    PERSISTENT_WORKERS,
+    TARGETS_PATH,
+    TARGETS_MULTIHORIZON_PATH,
+    TFT_CHECKPOINT_PATH,
+    TFT_MODEL_DIR,
+    VAL_YEARS,
+)
+from src.backtest.engine import (
+    capital_backtest_from_unit_pnl as backtest_capital_backtest_from_unit_pnl,
+    confidence_from_probabilities as backtest_confidence_from_probabilities,
+    directional_backtest as run_directional_backtest,
+    fixed_risk_capital_backtest_from_unit_pnl as backtest_fixed_risk_capital_backtest_from_unit_pnl,
+)
+from src.backtest.event_engine import event_driven_directional_backtest
+from src.backtest.fees import FixedBpsFeeModel
+from src.backtest.slippage import VolatilityScaledSlippageModel
+from src.data.fused_dataset import DatasetSlice, FusedMultiHorizonSequenceDataset, FusedSequenceDataset
+from src.models.nexus_tft import NexusTFT, NexusTFTConfig, load_checkpoint_with_expansion
+from src.pipeline.fusion import load_price_frame
+from src.training.meta_gate import apply_meta_gate, combine_gate_scores, load_meta_gate
+from src.training.train_tft import (
+    apply_precision_gate,
+    autocast_context,
+    build_calibration_report,
+    collect_binary_metrics,
+    collect_multihorizon_metrics,
+    split_multihorizon_heads_numpy,
+)
+from src.v9.regret_gate import regret_gate_scores
+
+try:
+    import torch  # type: ignore
+    from torch.utils.data import DataLoader  # type: ignore
+except ImportError:  # pragma: no cover
+    torch = None
+    DataLoader = None
+
+
+@dataclass(frozen=True)
+class FoldReport:
+    year: int
+    sample_count: int
+    threshold: float
+    metrics_raw: dict[str, float]
+    metrics_calibrated: dict[str, float]
+    calibration: dict[str, Any]
+    backtest: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _resolve_price_feature_path() -> Path:
+    if PRICE_FEATURES_PATH.exists():
+        return PRICE_FEATURES_PATH
+    if PRICE_FEATURES_CSV_FALLBACK.exists():
+        return PRICE_FEATURES_CSV_FALLBACK
+    if LEGACY_PRICE_FEATURES_PARQUET.exists():
+        return LEGACY_PRICE_FEATURES_PARQUET
+    if LEGACY_PRICE_FEATURES_CSV.exists():
+        return LEGACY_PRICE_FEATURES_CSV
+    raise FileNotFoundError("Price feature artifact is required for event-driven evaluation.")
+
+
+def _normalize_price_frame(frame: Any) -> Any:
+    if "datetime" in frame.columns:
+        frame = frame.copy()
+        frame.index = frame["datetime"]
+    return frame
+
+
+def load_event_price_frame() -> Any:
+    frame = load_price_frame(_resolve_price_feature_path())
+    return _normalize_price_frame(frame)
+
+
+def _parse_horizon_minutes(label: str) -> int:
+    digits = "".join(character for character in str(label) if character.isdigit())
+    return max(1, int(digits or "1"))
+
+
+def _slice_event_bars(
+    price_frame: Any,
+    row_slice: DatasetSlice,
+    *,
+    sequence_len: int,
+    hold_bars: int,
+) -> dict[str, np.ndarray]:
+    start = int(row_slice.start + sequence_len - 1)
+    stop = int(row_slice.stop + sequence_len + max(1, hold_bars))
+    subset = price_frame.iloc[start:stop].copy()
+    if len(subset) < 2:
+        raise ValueError("Not enough price bars available for event-driven backtesting.")
+    timestamps = subset.index.astype(str).to_numpy()
+    payload = {
+        "open_prices": subset["open"].to_numpy(dtype=np.float32, copy=True),
+        "high_prices": subset["high"].to_numpy(dtype=np.float32, copy=True),
+        "low_prices": subset["low"].to_numpy(dtype=np.float32, copy=True),
+        "close_prices": subset["close"].to_numpy(dtype=np.float32, copy=True),
+        "volumes": subset["volume"].to_numpy(dtype=np.float32, copy=True) if "volume" in subset.columns else None,
+        "timestamps": np.asarray(timestamps),
+    }
+    if "atr_pct" in subset.columns:
+        payload["volatility_scale"] = np.clip(
+            np.abs(subset["atr_pct"].to_numpy(dtype=np.float32, copy=True)) * 100.0,
+            0.25,
+            4.0,
+        )
+    else:
+        payload["volatility_scale"] = None
+    return payload
+
+
+def build_event_driven_backtest(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    row_slice: DatasetSlice,
+    sequence_len: int,
+    hold_bars: int,
+    decision_threshold: float,
+    confidence_floor: float,
+    gate_scores: np.ndarray | None,
+    gate_threshold: float,
+    hold_probabilities: np.ndarray | None,
+    hold_threshold: float,
+    confidence_probabilities: np.ndarray | None,
+    price_frame: Any,
+) -> dict[str, Any]:
+    event_inputs = _slice_event_bars(price_frame, row_slice, sequence_len=sequence_len, hold_bars=hold_bars)
+    report = event_driven_directional_backtest(
+        targets,
+        probabilities,
+        open_prices=event_inputs["open_prices"],
+        high_prices=event_inputs["high_prices"],
+        low_prices=event_inputs["low_prices"],
+        close_prices=event_inputs["close_prices"],
+        decision_threshold=decision_threshold,
+        confidence_floor=confidence_floor,
+        gate_scores=gate_scores,
+        gate_threshold=gate_threshold,
+        hold_probabilities=hold_probabilities,
+        hold_threshold=hold_threshold,
+        confidence_probabilities=confidence_probabilities,
+        fee_model=FixedBpsFeeModel(entry_bps=2.0, exit_bps=2.0),
+        slippage_model=VolatilityScaledSlippageModel(base_bps=2.0, volatility_weight=1.0, confidence_weight=0.5),
+        volatility_scale=event_inputs.get("volatility_scale"),
+        timestamps=event_inputs["timestamps"],
+        volumes=event_inputs.get("volumes"),
+        hold_bars=hold_bars,
+        position_size=1.0,
+    )
+    report["order_count"] = int(len(report.get("orders", [])))
+    report["fill_count"] = int(len(report.get("fills", [])))
+    report["trade_record_count"] = int(len(report.get("trades", [])))
+    report.pop("orders", None)
+    report.pop("fills", None)
+    report.pop("trades", None)
+    return report
+
+
+def summarize_event_backtests(reports: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    if not reports:
+        return {"execution_mode": "event_driven", "trade_count": 0, "hold_count": 0, "participation_rate": 0.0, "win_rate": 0.0}
+
+    trade_count = int(sum(int(report.get("trade_count", 0)) for report in reports))
+    hold_count = int(sum(int(report.get("hold_count", 0)) for report in reports))
+    weights = np.asarray([max(1, int(report.get("trade_count", 0))) for report in reports], dtype=np.float32)
+
+    def _weighted_mean(key: str) -> float:
+        values = np.asarray([float(report.get(key, 0.0)) for report in reports], dtype=np.float32)
+        return round(float(np.average(values, weights=weights)), 6)
+
+    return {
+        "execution_mode": "event_driven",
+        "fold_count": int(len(reports)),
+        "trade_count": trade_count,
+        "hold_count": hold_count,
+        "participation_rate": round(float(np.mean([float(report.get("participation_rate", 0.0)) for report in reports])), 6),
+        "win_rate": _weighted_mean("win_rate"),
+        "loss_rate": _weighted_mean("loss_rate"),
+        "long_win_rate": _weighted_mean("long_win_rate"),
+        "short_win_rate": _weighted_mean("short_win_rate"),
+        "avg_unit_pnl": _weighted_mean("avg_unit_pnl"),
+        "gross_avg_unit_pnl": _weighted_mean("gross_avg_unit_pnl"),
+        "cumulative_unit_pnl": round(float(sum(float(report.get("cumulative_unit_pnl", 0.0)) for report in reports)), 6),
+        "gross_cumulative_unit_pnl": round(float(sum(float(report.get("gross_cumulative_unit_pnl", 0.0)) for report in reports)), 6),
+        "max_drawdown_units": round(float(max(float(report.get("max_drawdown_units", 0.0)) for report in reports)), 6),
+        "decision_threshold": float(reports[-1].get("decision_threshold", 0.0)),
+        "confidence_floor": float(reports[-1].get("confidence_floor", 0.0)),
+        "gate_threshold": float(reports[-1].get("gate_threshold", 0.0)),
+        "hold_threshold": float(reports[-1].get("hold_threshold", 0.0)),
+        "fee_model": str(reports[-1].get("fee_model", "")),
+        "slippage_model": str(reports[-1].get("slippage_model", "")),
+        "capital_backtests": {
+            key: {
+                "final_capital_mean": round(
+                    float(
+                        np.mean(
+                            [
+                                float(report.get("capital_backtests", {}).get(key, {}).get("final_capital", 0.0) or 0.0)
+                                for report in reports
+                            ]
+                        )
+                    ),
+                    6,
+                ),
+                "max_drawdown_pct_mean": round(
+                    float(
+                        np.mean(
+                            [
+                                float(report.get("capital_backtests", {}).get(key, {}).get("max_drawdown_pct", 0.0) or 0.0)
+                                for report in reports
+                            ]
+                        )
+                    ),
+                    6,
+                ),
+                "trade_count": trade_count,
+            }
+            for key in ("usd_10", "usd_1000", "usd_10_fixed_risk", "usd_1000_fixed_risk")
+        },
+    }
+
+
+def _resolve_checkpoint() -> Path:
+    if TFT_CHECKPOINT_PATH.exists():
+        return TFT_CHECKPOINT_PATH
+    raise FileNotFoundError("No trained checkpoint available for walk-forward evaluation.")
+
+
+def load_manifest(path: Path = MODEL_MANIFEST_PATH) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError("Model manifest is required for walk-forward evaluation.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resolve_checkpoint_path(manifest: dict[str, Any], manifest_path: Path) -> Path:
+    configured_path = Path(manifest.get("checkpoint_path", str(_resolve_checkpoint())))
+    if configured_path.exists():
+        return configured_path
+    local_by_name = TFT_MODEL_DIR / configured_path.name
+    if local_by_name.exists():
+        return local_by_name
+    local_by_manifest_tag = TFT_MODEL_DIR / manifest_path.with_suffix(".ckpt").name.replace("model_manifest", "final_tft")
+    if local_by_manifest_tag.exists():
+        return local_by_manifest_tag
+    fallback = _resolve_checkpoint()
+    if fallback.exists():
+        return fallback
+    raise FileNotFoundError(
+        f"Unable to resolve checkpoint for manifest {manifest_path}. "
+        f"Tried {configured_path}, {local_by_name}, and {local_by_manifest_tag}."
+    )
+
+
+def resolve_precision_gate_path(manifest: dict[str, Any]) -> Path | None:
+    configured = Path(manifest.get("precision_gate_path", str(PRECISION_GATE_PATH)))
+    if configured.exists():
+        return configured
+    local_by_name = TFT_MODEL_DIR / configured.name
+    if local_by_name.exists():
+        return local_by_name
+    run_tag = str(manifest.get("run_tag", "")).strip()
+    if run_tag:
+        tagged_local = TFT_MODEL_DIR / f"{PRECISION_GATE_PATH.stem}_{run_tag}{PRECISION_GATE_PATH.suffix}"
+        if tagged_local.exists():
+            return tagged_local
+    if PRECISION_GATE_PATH.exists():
+        return PRECISION_GATE_PATH
+    return None
+
+
+def resolve_meta_gate_path(manifest: dict[str, Any]) -> Path | None:
+    configured = Path(manifest.get("meta_gate_path", str(META_GATE_PATH)))
+    if configured.exists():
+        return configured
+    local_by_name = TFT_MODEL_DIR / configured.name
+    if local_by_name.exists():
+        return local_by_name
+    run_tag = str(manifest.get("run_tag", "")).strip()
+    if run_tag:
+        tagged_local = TFT_MODEL_DIR / f"{META_GATE_PATH.stem}_{run_tag}{META_GATE_PATH.suffix}"
+        if tagged_local.exists():
+            return tagged_local
+    if META_GATE_PATH.exists():
+        return META_GATE_PATH
+    return None
+
+
+def resolve_gate_context_path(manifest: dict[str, Any]) -> Path | None:
+    configured = Path(manifest.get("gate_context_path", str(GATE_CONTEXT_PATH)))
+    if configured.exists():
+        return configured
+    local_by_name = GATE_CONTEXT_PATH.parent / configured.name
+    if local_by_name.exists():
+        return local_by_name
+    if GATE_CONTEXT_PATH.exists():
+        return GATE_CONTEXT_PATH
+    return None
+
+
+def load_model(device: str | None = None, manifest_path: Path = MODEL_MANIFEST_PATH) -> tuple[Any, dict[str, Any], Any]:
+    if torch is None:
+        raise ImportError("PyTorch is required for walk-forward evaluation.")
+    manifest = load_manifest(manifest_path)
+    config_payload = manifest.get("model_config", {})
+    feature_dim = int(manifest.get("feature_dim", config_payload.get("input_dim", 100)))
+    model = NexusTFT(
+        NexusTFTConfig(
+            input_dim=feature_dim,
+            hidden_dim=int(config_payload.get("hidden_dim", 128)),
+            lstm_layers=int(config_payload.get("lstm_layers", 2)),
+            dropout=float(config_payload.get("dropout", 0.1)),
+            output_dim=int(config_payload.get("output_dim", 1)),
+            regime_count=int(config_payload.get("regime_count", 4)),
+            router_hidden_dim=int(config_payload.get("router_hidden_dim", 64)),
+            router_temperature=float(config_payload.get("router_temperature", 1.0)),
+        )
+    )
+    target_device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    checkpoint_path = resolve_checkpoint_path(manifest, manifest_path)
+    load_checkpoint_with_expansion(model, checkpoint_path, new_input_dim=feature_dim)
+    model = model.to(target_device)
+    model.eval()
+    return model, manifest, target_device
+
+
+def yearly_slices(timestamps: Sequence[str], sequence_len: int, years: Sequence[int] | None = None) -> list[tuple[int, DatasetSlice]]:
+    values = np.asarray(timestamps, dtype="datetime64[ns]")
+    year_view = values.astype("datetime64[Y]").astype(int) + 1970
+    usable = len(values) - sequence_len
+    if usable <= 0:
+        raise ValueError("Not enough rows for walk-forward evaluation.")
+    target_years = year_view[sequence_len - 1 : sequence_len - 1 + usable]
+    selected_years = [int(year) for year in (years or sorted(set(target_years.tolist())))]
+    output: list[tuple[int, DatasetSlice]] = []
+    for year in selected_years:
+        positions = np.flatnonzero(target_years == year)
+        if positions.size == 0:
+            continue
+        output.append((year, DatasetSlice(int(positions[0]), int(positions[-1] + 1))))
+    return output
+
+
+def slice_gate_context(path: Path | None, row_slice: DatasetSlice, sequence_len: int) -> np.ndarray | None:
+    if path is None or not path.exists():
+        return None
+    context = np.load(path, mmap_mode="r")
+    start = row_slice.start + sequence_len - 1
+    stop = row_slice.stop + sequence_len - 1
+    return np.asarray(context[start:stop], dtype=np.float32)
+
+
+def predict_for_slice(
+    model: Any,
+    device: Any,
+    row_slice: DatasetSlice,
+    *,
+    feature_path: Path = FUSED_FEATURE_MATRIX_PATH,
+    target_path: Path = TARGETS_PATH,
+    sequence_len: int,
+    batch_size: int = 1024,
+    amp_enabled: bool = AMP_ENABLED,
+    amp_dtype: str = AMP_DTYPE,
+) -> tuple[np.ndarray, np.ndarray]:
+    if torch is None or DataLoader is None:
+        raise ImportError("PyTorch is required for walk-forward evaluation.")
+    dataset = FusedSequenceDataset(feature_path, target_path, sequence_len=sequence_len, row_slice=row_slice)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, **_loader_kwargs())
+    probabilities: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
+    with torch.no_grad():
+        for features, labels in dataloader:
+            features = features.to(device, non_blocking=True)
+            with autocast_context(device, amp_enabled, amp_dtype):
+                outputs = model(features).detach().float().cpu().numpy().astype(np.float32)
+            probabilities.append(outputs)
+            targets.append(labels.detach().cpu().numpy().astype(np.float32))
+    probs = np.concatenate(probabilities) if probabilities else np.empty(0, dtype=np.float32)
+    trgs = np.concatenate(targets) if targets else np.empty(0, dtype=np.float32)
+    return trgs, probs
+
+
+def predict_multihorizon_for_slice(
+    model: Any,
+    device: Any,
+    row_slice: DatasetSlice,
+    *,
+    feature_path: Path = FUSED_FEATURE_MATRIX_PATH,
+    target_bundle_path: Path = TARGETS_MULTIHORIZON_PATH,
+    target_keys: Sequence[str],
+    sequence_len: int,
+    batch_size: int = 1024,
+    amp_enabled: bool = AMP_ENABLED,
+    amp_dtype: str = AMP_DTYPE,
+) -> tuple[np.ndarray, np.ndarray]:
+    if torch is None or DataLoader is None:
+        raise ImportError("PyTorch is required for walk-forward evaluation.")
+    dataset = FusedMultiHorizonSequenceDataset(feature_path, target_bundle_path, target_keys=target_keys, sequence_len=sequence_len, row_slice=row_slice)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, **_loader_kwargs())
+    probabilities: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
+    with torch.no_grad():
+        for features, labels in dataloader:
+            features = features.to(device, non_blocking=True)
+            with autocast_context(device, amp_enabled, amp_dtype):
+                outputs = model(features).detach().float().cpu().numpy().astype(np.float32)
+            probabilities.append(outputs)
+            targets.append(labels.detach().cpu().numpy().astype(np.float32))
+    probs = np.concatenate(probabilities) if probabilities else np.empty((0, 0), dtype=np.float32)
+    trgs = np.concatenate(targets) if targets else np.empty((0, 0), dtype=np.float32)
+    return trgs, probs
+
+
+def apply_bucket_calibration(probabilities: np.ndarray, calibration_report: dict[str, Any]) -> np.ndarray:
+    probabilities = np.asarray(probabilities, dtype=np.float32)
+    bins = list(calibration_report.get("bins", []))
+    if probabilities.size == 0 or not bins:
+        return probabilities.copy()
+    calibrated = probabilities.copy()
+    for bucket in bins:
+        left = float(bucket.get("left", 0.0))
+        right = float(bucket.get("right", 1.0))
+        observed = float(bucket.get("observed_rate", bucket.get("predicted_mean", 0.5)))
+        if right >= 1.0:
+            mask = (probabilities >= left) & (probabilities <= right)
+        else:
+            mask = (probabilities >= left) & (probabilities < right)
+        calibrated[mask] = observed
+    return calibrated
+
+
+def confidence_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    return backtest_confidence_from_probabilities(probabilities)
+
+
+def strategic_view_from_multihorizon(targets: np.ndarray, probabilities: np.ndarray, horizon_labels: Sequence[str]) -> dict[str, np.ndarray]:
+    direction_targets, hold_targets, confidence_targets = split_multihorizon_heads_numpy(targets, len(horizon_labels))
+    direction_probabilities, hold_probabilities, confidence_probabilities = split_multihorizon_heads_numpy(probabilities, len(horizon_labels))
+    strategic_target = (direction_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_probability = direction_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_hold_target = (hold_targets[:, -2:].mean(axis=1) >= 0.5).astype(np.float32)
+    strategic_hold_probability = hold_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_confidence_target = confidence_targets[:, -2:].mean(axis=1).astype(np.float32)
+    strategic_confidence_probability = confidence_probabilities[:, -2:].mean(axis=1).astype(np.float32)
+    return {
+        "strategic_target": strategic_target,
+        "strategic_probability": strategic_probability,
+        "strategic_hold_target": strategic_hold_target,
+        "strategic_hold_probability": strategic_hold_probability,
+        "strategic_confidence_target": strategic_confidence_target,
+        "strategic_confidence_probability": strategic_confidence_probability,
+    }
+
+
+def directional_backtest(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    decision_threshold: float = 0.5,
+    confidence_floor: float = 0.12,
+    gate_scores: np.ndarray | None = None,
+    gate_threshold: float = 0.5,
+    hold_probabilities: np.ndarray | None = None,
+    hold_threshold: float = 0.5,
+    confidence_probabilities: np.ndarray | None = None,
+) -> dict[str, Any]:
+    return run_directional_backtest(
+        targets,
+        probabilities,
+        decision_threshold=decision_threshold,
+        confidence_floor=confidence_floor,
+        gate_scores=gate_scores,
+        gate_threshold=gate_threshold,
+        hold_probabilities=hold_probabilities,
+        hold_threshold=hold_threshold,
+        confidence_probabilities=confidence_probabilities,
+    )
+
+
+def capital_backtest_from_unit_pnl(
+    pnl: np.ndarray,
+    *,
+    initial_capital: float,
+    risk_fraction: float = 0.02,
+) -> dict[str, Any]:
+    return backtest_capital_backtest_from_unit_pnl(pnl, initial_capital=initial_capital, risk_fraction=risk_fraction)
+
+
+def _loader_kwargs() -> dict[str, Any]:
+    env_workers = os.environ.get("NEXUS_NUM_WORKERS", "").strip()
+    if env_workers:
+        try:
+            workers = max(0, int(env_workers))
+        except ValueError:
+            workers = max(0, int(NUM_WORKERS))
+    else:
+        # Windows sandboxed sessions regularly fail when PyTorch opens worker pipes.
+        # Keep Linux/remote training behavior unchanged while making local evaluation reliable.
+        workers = 0 if os.name == "nt" else max(0, int(NUM_WORKERS))
+    kwargs: dict[str, Any] = {
+        "num_workers": workers,
+        "pin_memory": bool(PIN_MEMORY and workers > 0),
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = bool(PERSISTENT_WORKERS)
+        kwargs["prefetch_factor"] = max(2, int(PREFETCH_FACTOR))
+    return kwargs
+
+
+def build_v12_regime_isolation_report(
+    frame: Any,
+    *,
+    outcome_col: str = "setl_target_net_unit_pnl",
+    trade_mask: np.ndarray | None = None,
+    regime_col: str = "dominant_regime",
+) -> dict[str, Any]:
+    from src.v12.wfri import build_regime_isolation_report
+
+    return build_regime_isolation_report(frame, outcome_col=outcome_col, trade_mask=trade_mask, regime_col=regime_col)
+
+
+def fixed_risk_capital_backtest_from_unit_pnl(
+    pnl: np.ndarray,
+    *,
+    initial_capital: float,
+    risk_fraction: float = 0.02,
+) -> dict[str, Any]:
+    return backtest_fixed_risk_capital_backtest_from_unit_pnl(
+        pnl,
+        initial_capital=initial_capital,
+        risk_fraction=risk_fraction,
+    )
+
+
+def optimize_backtest_thresholds(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    hold_probabilities: np.ndarray | None = None,
+    confidence_probabilities: np.ndarray | None = None,
+    gate_scores: np.ndarray | None = None,
+    gate_threshold: float | None = None,
+) -> dict[str, float]:
+    best = {
+        "decision_threshold": 0.56,
+        "confidence_floor": 0.12,
+        "hold_threshold": 0.62,
+        "gate_threshold": float(gate_threshold) if gate_threshold is not None else 0.5,
+        "score": 0.0,
+    }
+    target_participation = 0.18
+    hold_candidates = np.linspace(0.55, 0.85, 7) if hold_probabilities is not None else [0.5]
+    gate_candidates: list[float]
+    if gate_scores is not None:
+        gate_values = np.asarray(gate_scores, dtype=np.float32)
+        quantile_points = [0.08, 0.12, 0.16, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.88, 0.94, 0.98]
+        gate_candidates = sorted({float(np.quantile(gate_values, q)) for q in quantile_points})
+        if gate_threshold is not None:
+            gate_candidates.append(float(gate_threshold))
+            gate_candidates = sorted(set(gate_candidates))
+    else:
+        gate_candidates = [0.5]
+    best_backup = None
+    best_backup_score = float("-inf")
+    for threshold in np.linspace(0.53, 0.75, 12):
+        for floor in np.linspace(0.06, 0.30, 13):
+            for hold_threshold_value in hold_candidates:
+                for gate_threshold_value in gate_candidates:
+                    report = directional_backtest(
+                        targets,
+                        probabilities,
+                        decision_threshold=float(threshold),
+                        confidence_floor=float(floor),
+                        gate_scores=gate_scores,
+                        gate_threshold=float(gate_threshold_value),
+                        hold_probabilities=hold_probabilities,
+                        hold_threshold=float(hold_threshold_value),
+                        confidence_probabilities=confidence_probabilities,
+                    )
+                    participation = float(report["participation_rate"])
+                    participation_reward = max(0.0, 1.0 - abs(participation - target_participation) / max(1e-6, target_participation))
+                    nonzero_trade_reward = 1.0 if float(report["trade_count"]) > 0 else 0.0
+                    drawdown_penalty = min(1.0, float(report.get("max_drawdown_units", 0.0)) / max(1.0, float(report["trade_count"])))
+                    score = (
+                        float(report["win_rate"]) * 0.42
+                        + float(report["avg_unit_pnl"]) * 0.28
+                        + participation_reward * 0.18
+                        + nonzero_trade_reward * 0.08
+                        + (1.0 - drawdown_penalty) * 0.04
+                    )
+                    if 0.02 <= participation <= 0.45 and score > best["score"]:
+                        best = {
+                            "decision_threshold": float(threshold),
+                            "confidence_floor": float(floor),
+                            "hold_threshold": float(hold_threshold_value),
+                            "gate_threshold": float(gate_threshold_value),
+                            "score": float(score),
+                        }
+                    if participation > 0.0 and score > best_backup_score:
+                        best_backup = {
+                            "decision_threshold": float(threshold),
+                            "confidence_floor": float(floor),
+                            "hold_threshold": float(hold_threshold_value),
+                            "gate_threshold": float(gate_threshold_value),
+                            "score": float(score),
+                        }
+                        best_backup_score = float(score)
+    if best["score"] <= 0.0 and best_backup is not None:
+        best = best_backup
+    return best
+
+
+def _serialize_meta_gate(meta_gate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not meta_gate:
+        return None
+    return {key: value for key, value in meta_gate.items() if key != "model"}
+
+
+def _combined_gate_scores(
+    probabilities: np.ndarray,
+    precision_gate: dict[str, Any] | None,
+    meta_gate: dict[str, Any] | None,
+    *,
+    context_features: np.ndarray | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    try:
+        precision_scores = (
+            apply_precision_gate(probabilities, precision_gate, context_features=context_features)
+            if precision_gate is not None
+            else None
+        )
+    except Exception:
+        precision_scores = None
+    try:
+        meta_scores = apply_meta_gate(probabilities, meta_gate, context_features=context_features) if meta_gate is not None else None
+    except Exception:
+        meta_scores = None
+    regret_scores = None
+    try:
+        probability_array = np.asarray(probabilities, dtype=np.float32)
+        confidence_probabilities = None
+        if probability_array.ndim == 2 and probability_array.shape[1] > 8:
+            horizon_count = probability_array.shape[1] // 3
+            direction_probabilities, _, confidence_parts = split_multihorizon_heads_numpy(probability_array, horizon_count)
+            confidence_probabilities = confidence_parts[:, -1] if confidence_parts.shape[1] else None
+            base_probabilities = direction_probabilities[:, -1]
+        else:
+            base_probabilities = probability_array.reshape(-1)
+        regret_scores = regret_gate_scores(
+            base_probabilities,
+            confidence_probabilities=confidence_probabilities,
+            context_features=context_features,
+        )
+    except Exception:
+        regret_scores = None
+    combined_scores = combine_gate_scores(precision_scores, meta_scores, regret_scores)
+    return precision_scores, meta_scores, regret_scores, combined_scores
+
+
+def run_walkforward_evaluation(
+    *,
+    years: Sequence[int],
+    batch_size: int = 1024,
+    max_windows_per_year: int = 0,
+    max_calibration_windows: int = 12000,
+    feature_path: Path = FUSED_FEATURE_MATRIX_PATH,
+    target_path: Path = TARGETS_PATH,
+    target_bundle_path: Path = TARGETS_MULTIHORIZON_PATH,
+    timestamps_path: Path = FUSED_TIMESTAMPS_PATH,
+    manifest_path: Path = MODEL_MANIFEST_PATH,
+) -> dict[str, Any]:
+    manifest = load_manifest(manifest_path)
+    sequence_len = int(manifest.get("sequence_len", 120))
+    model, manifest, device = load_model(manifest_path=manifest_path)
+    price_frame = load_event_price_frame()
+    timestamps = np.load(timestamps_path, mmap_mode="r")
+    folds = yearly_slices(timestamps, sequence_len=sequence_len, years=years)
+    if not folds:
+        raise ValueError("No walk-forward folds were produced for the requested years.")
+    multi_horizon = bool(manifest.get("multi_horizon", False)) and target_bundle_path.exists()
+    horizon_labels = list(manifest.get("horizon_labels", ["5m"]))
+    horizon_keys = ([f"target_{label}" for label in horizon_labels] + [f"hold_{label}" for label in horizon_labels] + [f"confidence_{label}" for label in horizon_labels]) if multi_horizon else []
+    threshold = float(manifest.get("classification_threshold", 0.5))
+    precision_gate_path = resolve_precision_gate_path(manifest)
+    precision_gate = json.loads(precision_gate_path.read_text(encoding="utf-8")) if precision_gate_path is not None and precision_gate_path.exists() else None
+    meta_gate_path = resolve_meta_gate_path(manifest)
+    try:
+        meta_gate = load_meta_gate(meta_gate_path) if meta_gate_path is not None else None
+    except Exception:
+        meta_gate = None
+    gate_context_path = resolve_gate_context_path(manifest)
+
+    reports: list[FoldReport] = []
+    all_targets: list[np.ndarray] = []
+    all_probs_raw: list[np.ndarray] = []
+    all_probs_calibrated: list[np.ndarray] = []
+    all_probs_multi: list[np.ndarray] = []
+    all_hold_probs: list[np.ndarray] = []
+    all_conf_probs: list[np.ndarray] = []
+    all_gate_scores: list[np.ndarray] = []
+    all_event_backtests: list[dict[str, Any]] = []
+    event_backtests_by_horizon: dict[str, list[dict[str, Any]]] = {}
+    validation_years = manifest.get("split_report", {}).get("val_years", []) or list(VAL_YEARS)
+    validation_folds = yearly_slices(timestamps, sequence_len=sequence_len, years=validation_years)
+    if not validation_folds:
+        validation_folds = folds
+        validation_years = [int(year) for year, _ in folds]
+    calibration_targets: list[np.ndarray] = []
+    calibration_probabilities: list[np.ndarray] = []
+    calibration_hold_probabilities: list[np.ndarray] = []
+    calibration_conf_probabilities: list[np.ndarray] = []
+    calibration_gate_scores_collection: list[np.ndarray] = []
+    for _, fold_slice in validation_folds:
+        active_slice = fold_slice
+        if max_calibration_windows > 0 and len(fold_slice) > max_calibration_windows:
+            active_slice = DatasetSlice(fold_slice.start, fold_slice.start + max_calibration_windows)
+        gate_context_val = slice_gate_context(gate_context_path, active_slice, sequence_len)
+        if multi_horizon:
+            targets_val, probabilities_val = predict_multihorizon_for_slice(
+                model,
+                device,
+                active_slice,
+                feature_path=feature_path,
+                target_bundle_path=target_bundle_path,
+                target_keys=horizon_keys,
+                sequence_len=sequence_len,
+                batch_size=batch_size,
+            )
+            strategic_val = strategic_view_from_multihorizon(targets_val, probabilities_val, horizon_labels)
+            calibration_targets.append(strategic_val["strategic_target"])
+            calibration_probabilities.append(strategic_val["strategic_probability"])
+            calibration_hold_probabilities.append(strategic_val["strategic_hold_probability"])
+            calibration_conf_probabilities.append(strategic_val["strategic_confidence_probability"])
+            _, _, _, combined_gate = _combined_gate_scores(
+                probabilities_val,
+                precision_gate,
+                meta_gate,
+                context_features=gate_context_val,
+            )
+            if combined_gate is not None:
+                calibration_gate_scores_collection.append(combined_gate)
+            continue
+        targets_val, probabilities_val = predict_for_slice(model, device, active_slice, feature_path=feature_path, target_path=target_path, sequence_len=sequence_len, batch_size=batch_size)
+        calibration_targets.append(targets_val)
+        calibration_probabilities.append(probabilities_val)
+    calibration_targets_np = np.concatenate(calibration_targets) if calibration_targets else np.empty(0, dtype=np.float32)
+    calibration_probabilities_np = np.concatenate(calibration_probabilities) if calibration_probabilities else np.empty(0, dtype=np.float32)
+    global_calibration = build_calibration_report(calibration_targets_np, calibration_probabilities_np)
+    calibration_gate_scores = np.concatenate(calibration_gate_scores_collection) if calibration_gate_scores_collection else None
+    optimized_thresholds = optimize_backtest_thresholds(
+        calibration_targets_np,
+        apply_bucket_calibration(calibration_probabilities_np, global_calibration),
+        hold_probabilities=np.concatenate(calibration_hold_probabilities) if calibration_hold_probabilities else None,
+        confidence_probabilities=np.concatenate(calibration_conf_probabilities) if calibration_conf_probabilities else None,
+        gate_scores=calibration_gate_scores,
+        gate_threshold=float(
+            (meta_gate or {}).get(
+                "threshold",
+                (precision_gate or {}).get("threshold", 0.5),
+            )
+        )
+        if multi_horizon
+        else None,
+    )
+    decision_threshold = float(optimized_thresholds["decision_threshold"])
+    confidence_floor = float(optimized_thresholds["confidence_floor"])
+    optimized_hold_threshold = float(optimized_thresholds.get("hold_threshold", 0.5))
+    optimized_gate_threshold = float(optimized_thresholds.get("gate_threshold", 0.5))
+
+    for year, fold_slice in folds:
+        active_slice = fold_slice
+        if max_windows_per_year > 0 and len(fold_slice) > max_windows_per_year:
+            active_slice = DatasetSlice(fold_slice.start, fold_slice.start + max_windows_per_year)
+        gate_context_year = slice_gate_context(gate_context_path, active_slice, sequence_len)
+        if multi_horizon:
+            targets_year, probabilities_year = predict_multihorizon_for_slice(
+                model,
+                device,
+                active_slice,
+                feature_path=feature_path,
+                target_bundle_path=target_bundle_path,
+                target_keys=horizon_keys,
+                sequence_len=sequence_len,
+                batch_size=batch_size,
+            )
+            strategic_view = strategic_view_from_multihorizon(targets_year, probabilities_year, horizon_labels)
+            primary_targets_year = strategic_view["strategic_target"]
+            primary_probabilities_year = strategic_view["strategic_probability"]
+            direction_targets_year, hold_targets_year, confidence_targets_year = split_multihorizon_heads_numpy(
+                targets_year,
+                len(horizon_labels),
+            )
+            direction_probabilities_year, hold_probabilities_year, confidence_probabilities_year = split_multihorizon_heads_numpy(
+                probabilities_year,
+                len(horizon_labels),
+            )
+        else:
+            targets_year, probabilities_year = predict_for_slice(
+                model,
+                device,
+                active_slice,
+                feature_path=feature_path,
+                target_path=target_path,
+                sequence_len=sequence_len,
+                batch_size=batch_size,
+            )
+            primary_targets_year = targets_year
+            primary_probabilities_year = probabilities_year
+            direction_targets_year = hold_targets_year = confidence_targets_year = None
+            direction_probabilities_year = hold_probabilities_year = confidence_probabilities_year = None
+        calibrated_probabilities = apply_bucket_calibration(primary_probabilities_year, global_calibration)
+        if multi_horizon:
+            raw_metrics = collect_multihorizon_metrics(targets_year, probabilities_year, thresholds=[0.5, 0.5, threshold, threshold], horizon_labels=horizon_labels)
+            calibrated_metrics = {
+                "primary": collect_binary_metrics(primary_targets_year, calibrated_probabilities, threshold=threshold),
+                "horizons": raw_metrics["horizons"],
+                "strategic": raw_metrics.get("strategic", {}),
+                "hold_horizons": raw_metrics.get("hold_horizons", {}),
+                "confidence_horizons": raw_metrics.get("confidence_horizons", {}),
+            }
+        else:
+            raw_metrics = collect_binary_metrics(primary_targets_year, primary_probabilities_year, threshold=threshold)
+            calibrated_metrics = collect_binary_metrics(primary_targets_year, calibrated_probabilities, threshold=threshold)
+        fold_calibration = build_calibration_report(primary_targets_year, calibrated_probabilities)
+        gate_scores = None
+        gate_threshold = 0.5
+        if multi_horizon:
+            _, _, _, gate_scores = _combined_gate_scores(
+                probabilities_year,
+                precision_gate,
+                meta_gate,
+                context_features=gate_context_year,
+            )
+            gate_threshold = optimized_gate_threshold if gate_scores is not None else 0.5
+            strategic_hold_probability = strategic_view["strategic_hold_probability"]
+            strategic_confidence_probability = strategic_view["strategic_confidence_probability"]
+        else:
+            strategic_hold_probability = None
+            strategic_confidence_probability = None
+        backtest = directional_backtest(
+            primary_targets_year,
+            calibrated_probabilities,
+            decision_threshold=decision_threshold,
+            confidence_floor=confidence_floor,
+            gate_scores=gate_scores,
+            gate_threshold=gate_threshold,
+            hold_probabilities=strategic_hold_probability,
+            hold_threshold=optimized_hold_threshold,
+            confidence_probabilities=strategic_confidence_probability,
+        )
+        event_backtest = build_event_driven_backtest(
+            primary_targets_year,
+            calibrated_probabilities,
+            row_slice=active_slice,
+            sequence_len=sequence_len,
+            hold_bars=max(1, _parse_horizon_minutes(horizon_labels[-1])) if multi_horizon else 1,
+            decision_threshold=decision_threshold,
+            confidence_floor=confidence_floor,
+            gate_scores=gate_scores,
+            gate_threshold=gate_threshold,
+            hold_probabilities=strategic_hold_probability,
+            hold_threshold=optimized_hold_threshold,
+            confidence_probabilities=strategic_confidence_probability,
+            price_frame=price_frame,
+        )
+        if multi_horizon and direction_targets_year is not None and direction_probabilities_year is not None:
+            event_by_horizon: dict[str, Any] = {}
+            for horizon_index, horizon_label in enumerate(horizon_labels):
+                horizon_probabilities = apply_bucket_calibration(
+                    direction_probabilities_year[:, horizon_index],
+                    global_calibration,
+                )
+                event_horizon_report = build_event_driven_backtest(
+                    direction_targets_year[:, horizon_index],
+                    horizon_probabilities,
+                    row_slice=active_slice,
+                    sequence_len=sequence_len,
+                    hold_bars=_parse_horizon_minutes(horizon_label),
+                    decision_threshold=decision_threshold,
+                    confidence_floor=confidence_floor,
+                    gate_scores=gate_scores,
+                    gate_threshold=gate_threshold,
+                    hold_probabilities=hold_probabilities_year[:, horizon_index],
+                    hold_threshold=optimized_hold_threshold,
+                    confidence_probabilities=confidence_probabilities_year[:, horizon_index],
+                    price_frame=price_frame,
+                )
+                event_by_horizon[horizon_label] = event_horizon_report
+                event_backtests_by_horizon.setdefault(horizon_label, []).append(event_horizon_report)
+            backtest["event_driven_by_horizon"] = event_by_horizon
+        backtest["event_driven"] = event_backtest
+        all_event_backtests.append(event_backtest)
+        if gate_scores is not None:
+            backtest["gate_positive_rate"] = round(float((gate_scores >= optimized_gate_threshold).mean()), 6)
+        report = FoldReport(
+            year=int(year),
+            sample_count=int(len(primary_targets_year)),
+            threshold=threshold,
+            metrics_raw=raw_metrics,
+            metrics_calibrated=calibrated_metrics,
+            calibration=fold_calibration,
+            backtest=backtest,
+        )
+        reports.append(report)
+        all_targets.append(primary_targets_year)
+        all_probs_raw.append(primary_probabilities_year)
+        all_probs_calibrated.append(calibrated_probabilities)
+        if multi_horizon:
+            all_probs_multi.append(probabilities_year)
+            all_hold_probs.append(strategic_view["strategic_hold_probability"])
+            all_conf_probs.append(strategic_view["strategic_confidence_probability"])
+        if gate_scores is not None:
+            all_gate_scores.append(gate_scores)
+
+    all_targets_np = np.concatenate(all_targets) if all_targets else np.empty(0, dtype=np.float32)
+    all_probs_raw_np = np.concatenate(all_probs_raw) if all_probs_raw else np.empty(0, dtype=np.float32)
+    all_probs_calibrated_np = np.concatenate(all_probs_calibrated) if all_probs_calibrated else np.empty(0, dtype=np.float32)
+    overall_gate_scores = np.concatenate(all_gate_scores) if all_gate_scores else None
+    overall = {
+        "raw_metrics": collect_binary_metrics(all_targets_np, all_probs_raw_np, threshold=threshold),
+        "calibrated_metrics": collect_binary_metrics(all_targets_np, all_probs_calibrated_np, threshold=threshold),
+        "calibration": build_calibration_report(all_targets_np, all_probs_calibrated_np),
+        "backtest": directional_backtest(
+            all_targets_np,
+            all_probs_calibrated_np,
+            decision_threshold=decision_threshold,
+            confidence_floor=confidence_floor,
+            gate_scores=overall_gate_scores,
+            gate_threshold=optimized_gate_threshold if overall_gate_scores is not None else 0.5,
+            hold_probabilities=np.concatenate(all_hold_probs) if multi_horizon and all_hold_probs else None,
+            hold_threshold=optimized_hold_threshold,
+            confidence_probabilities=np.concatenate(all_conf_probs) if multi_horizon and all_conf_probs else None,
+        ),
+    }
+    overall["event_driven_backtest"] = summarize_event_backtests(all_event_backtests)
+    if event_backtests_by_horizon:
+        overall["event_driven_by_horizon"] = {
+            horizon_label: {
+                "trade_count": int(sum(report.get("trade_count", 0) for report in reports_for_horizon)),
+                "participation_rate_mean": round(float(np.mean([report.get("participation_rate", 0.0) for report in reports_for_horizon])), 6),
+                "win_rate_mean": round(float(np.mean([report.get("win_rate", 0.0) for report in reports_for_horizon])), 6),
+                "avg_unit_pnl_mean": round(float(np.mean([report.get("avg_unit_pnl", 0.0) for report in reports_for_horizon])), 6),
+            }
+            for horizon_label, reports_for_horizon in event_backtests_by_horizon.items()
+        }
+    if precision_gate is not None:
+        overall["precision_gate"] = precision_gate
+    if meta_gate is not None:
+        overall["meta_gate"] = _serialize_meta_gate(meta_gate)
+    if overall_gate_scores is not None:
+        overall["gate_positive_rate"] = round(float((overall_gate_scores >= optimized_gate_threshold).mean()), 6)
+    return {
+        "sequence_len": sequence_len,
+        "feature_dim": int(manifest.get("feature_dim", 100)),
+        "years": [int(year) for year, _ in folds],
+        "calibration_source_years": [int(year) for year in validation_years],
+        "optimized_thresholds": optimized_thresholds,
+        "multi_horizon": multi_horizon,
+        "horizon_labels": horizon_labels,
+        "overall": overall,
+        "folds": [report.to_dict() for report in reports],
+    }

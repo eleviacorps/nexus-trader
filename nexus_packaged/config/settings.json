@@ -1,0 +1,169 @@
+{
+  "version": "v27.1",
+  "model": {
+    "encrypted_weights_path": "nexus_packaged/protection/model_enc.bin",
+    "key_env_var": "NEXUS_MODEL_KEY",
+    "key_salt": "nexus_trader_salt_2024",
+    "lookback": 128,
+    "num_paths": 64,
+    "horizon": 20,
+    "feature_dim": 144,
+    "inference_interval_seconds": 60,
+    "device": "auto",
+    "norm_stats_path": "config/diffusion_norm_stats_6m.json"
+  },
+  "data": {
+    "symbol": "XAUUSD",
+    "base_timeframe_minutes": 1,
+    "start_date": "2009-01-01",
+    "end_date": "2026-01-01",
+    "ohlcv_path": "nexus_packaged/data/ohlcv.parquet",
+    "features_path": "nexus_packaged/data/diffusion_fused_6m.npy"
+  },
+  "auto_trade": {
+    "enabled": false,
+    "mode": "frequency",
+    "confidence_threshold": 0.51,
+    "frequency_every_n_cycles": 1,
+    "interval_minutes": 15,
+    "max_trade_count": 0,
+    "lot_mode": "fixed",
+    "fixed_lot_size": 1.0,
+    "lot_min": 1.0,
+    "lot_max": 1.0,
+    "lot_range_mode": "confidence",
+    "risk_pct_per_trade": 1.0,
+    "kelly_fraction": 0.25,
+    "max_open_trades": 3,
+    "max_daily_trades": 100,
+    "max_daily_loss_pct": 5.0,
+    "max_drawdown_pct": 10.0,
+    "risk_reward": 2.0,
+    "sl_atr_multiplier": 1.5,
+    "trade_expiry_bars": 10,
+    "allowed_directions": [
+      "BUY",
+      "SELL"
+    ],
+    "paper_mode": true
+  },
+  "backtest": {
+    "default_timeframe_minutes": 15,
+    "default_mode": "selective",
+    "default_confidence_threshold": 0.6,
+    "default_min_trades": 30,
+    "default_risk_reward": 2.0,
+    "default_trade_expiry_bars": 10,
+    "default_lot_mode": "fixed",
+    "default_fixed_lot_size": 0.01,
+    "default_lot_min": 0.01,
+    "default_lot_max": 0.1,
+    "default_lot_range_mode": "confidence",
+    "default_risk_pct_per_trade": 1.0,
+    "default_kelly_fraction": 0.25,
+    "default_leverage": 200,
+    "default_initial_equity": 10000.0,
+    "default_commission_per_lot_round_trip": 7.0,
+    "default_spread_pips": 0.3,
+    "default_sl_atr_multiplier": 1.5,
+    "default_allowed_directions": [
+      "BUY",
+      "SELL"
+    ],
+    "default_max_open_trades": 3,
+    "contract_size": 100.0,
+    "pip_value_per_lot": 1.0
+  },
+  "broker": {
+    "lot_min": 0.01,
+    "lot_max": 500.0,
+    "lot_step": 0.01,
+    "stops_level_points": 10,
+    "contract_size": 100.0,
+    "pip_value_per_lot": 1.0,
+    "max_leverage": 3000
+  },
+  "mt5": {
+    "login": 106219438,
+    "password": "X_Is2pWs",
+    "server": "MetaQuotes-Demo",
+    "execution_enabled": true,
+    "reconnect_attempts": 5,
+    "reconnect_delay_seconds": 5
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8766,
+    "cors_origins": [
+      "http://localhost:3000"
+    ]
+  },
+  "news": {
+    "cache_ttl_seconds": 300,
+    "fetch_timeout_seconds": 10,
+    "max_display_items": 15,
+    "min_relevance_score": 0.1,
+    "rss_sources": [
+      {
+        "name": "Reuters Markets",
+        "url": "https://feeds.reuters.com/reuters/businessNews",
+        "category": "macro"
+      },
+      {
+        "name": "FXStreet Gold",
+        "url": "https://www.fxstreet.com/rss/news",
+        "category": "commodities"
+      },
+      {
+        "name": "Investing Commodities",
+        "url": "https://www.investing.com/rss/news_1.rss",
+        "category": "commodities"
+      },
+      {
+        "name": "Federal Reserve",
+        "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+        "category": "central_bank"
+      },
+      {
+        "name": "BIS",
+        "url": "https://www.bis.org/rss/cpmi.rss",
+        "category": "central_bank"
+      }
+    ]
+  },
+  "ui": {
+    "max_fps": 10,
+    "splash_duration_seconds": 1.5,
+    "chart_initial_bars": 500
+  },
+  "logging": {
+    "level": "INFO",
+    "system_log": "nexus_packaged/logs/system.log",
+    "inference_log": "nexus_packaged/logs/inference.log",
+    "trades_log": "nexus_packaged/logs/trades.log",
+    "error_log": "nexus_packaged/logs/errors.log",
+    "max_file_size_mb": 50,
+    "backup_count": 3
+  },
+  "regime": {
+    "hurst_window": 100,
+    "trending_threshold": 0.6,
+    "ranging_threshold": 0.4,
+    "signal_confidence_threshold": 0.55
+  },
+  "execution": {
+    "state_update_interval_seconds": 0.5,
+    "state_stuck_after_seconds": 5.0,
+    "ev_k": 0.02,
+    "conf_min": 0.1,
+    "snapshot_bars": 10,
+    "min_tick": 0.01,
+    "output_normalized": false,
+    "output_mean": 0.0,
+    "output_std": 1.0
+  },
+  "hybrid": {
+    "ev_threshold": 0.0002,
+    "frontend_poll_ms": 800
+  }
+}

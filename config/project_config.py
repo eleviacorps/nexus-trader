@@ -1,0 +1,443 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+LOCAL_PROJECT_ROOT = Path(r"C:/PersonalDrive/Programming/AiStudio/nexus-trader")
+REMOTE_DATA_ROOT = Path("/home/rocm-user/jupyter/nexus")
+
+RUNNING_ON_SERVER = REMOTE_DATA_ROOT.exists()
+PROJECT_ROOT = REMOTE_DATA_ROOT if RUNNING_ON_SERVER else LOCAL_PROJECT_ROOT
+USE_REMOTE_DATA = RUNNING_ON_SERVER or os.getenv("NEXUS_USE_REMOTE_DATA", "0") == "1"
+DATA_ROOT = REMOTE_DATA_ROOT if USE_REMOTE_DATA else LOCAL_PROJECT_ROOT
+
+SEQUENCE_LEN = int(os.getenv("NEXUS_SEQUENCE_LEN", "120"))
+LOOKAHEAD = int(os.getenv("NEXUS_LOOKAHEAD", "5"))
+TRAIN_SPLIT = float(os.getenv("NEXUS_TRAIN_SPLIT", "0.70"))
+VAL_SPLIT = float(os.getenv("NEXUS_VAL_SPLIT", "0.15"))
+TEST_SPLIT = float(os.getenv("NEXUS_TEST_SPLIT", "0.15"))
+
+FEATURE_DIM_PRICE = 36
+FEATURE_DIM_NEWS = 32
+FEATURE_DIM_CROWD = 32
+FEATURE_DIM_TOTAL = FEATURE_DIM_PRICE + FEATURE_DIM_NEWS + FEATURE_DIM_CROWD
+
+FILL_LIMIT = 60
+
+BATCH_SIZE_SERVER = 2048
+BATCH_SIZE_LOCAL = 1024
+NUM_WORKERS_SERVER = int(os.getenv("NEXUS_NUM_WORKERS_SERVER", "8"))
+NUM_WORKERS_LOCAL = int(os.getenv("NEXUS_NUM_WORKERS_LOCAL", "2"))
+NUM_WORKERS = NUM_WORKERS_SERVER if RUNNING_ON_SERVER else NUM_WORKERS_LOCAL
+PREFETCH_FACTOR = int(os.getenv("NEXUS_PREFETCH_FACTOR", "4"))
+PERSISTENT_WORKERS = os.getenv("NEXUS_PERSISTENT_WORKERS", "1") == "1"
+PIN_MEMORY = os.getenv("NEXUS_PIN_MEMORY", "1") == "1"
+AMP_ENABLED = os.getenv("NEXUS_AMP_ENABLED", "1") == "1"
+AMP_DTYPE = os.getenv("NEXUS_AMP_DTYPE", "bfloat16")
+TORCH_COMPILE_ENABLED = os.getenv("NEXUS_TORCH_COMPILE", "0") == "1"
+
+TRAIN_YEARS = tuple(range(2009, 2021))
+VAL_YEARS = (2021, 2022, 2023)
+TEST_YEARS = (2024, 2025, 2026)
+
+NOTEBOOK_PIPELINE = [
+    "00_environment_setup.ipynb",
+    "01_data_download.ipynb",
+    "02_price_pipeline.ipynb",
+    "03_news_pipeline.ipynb",
+    "04_crowd_pipeline.ipynb",
+    "05_persona_simulation.ipynb",
+    "06_feature_fusion.ipynb",
+    "07_tft_training.ipynb",
+    "08_future_branching.ipynb",
+    "09_reverse_collapse_and_ui.ipynb",
+    "10_validation_and_tests.ipynb",
+]
+
+PRICE_FEATURE_COLUMNS = [
+    "return_1",
+    "return_3",
+    "return_6",
+    "return_12",
+    "rsi_14",
+    "rsi_7",
+    "macd_hist",
+    "macd",
+    "macd_sig",
+    "stoch_k",
+    "stoch_d",
+    "ema_9_ratio",
+    "ema_21_ratio",
+    "ema_50_ratio",
+    "ema_cross",
+    "atr_pct",
+    "bb_width",
+    "bb_pct",
+    "body_pct",
+    "upper_wick",
+    "lower_wick",
+    "is_bullish",
+    "displacement",
+    "dist_to_high",
+    "dist_to_low",
+    "hh",
+    "ll",
+    "volume_ratio",
+    "session_asian",
+    "session_london",
+    "session_ny",
+    "session_overlap",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+]
+
+NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DATA_DIR = DATA_DIR / "raw"
+RAW_PRICE_DIR = RAW_DATA_DIR / "price"
+RAW_NEWS_DIR = RAW_DATA_DIR / "news"
+RAW_CROWD_DIR = RAW_DATA_DIR / "crowd"
+RAW_MACRO_DIR = RAW_DATA_DIR / "macro"
+PROCESSED_DATA_DIR = DATA_DIR / "processed"
+EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+FEATURES_DIR = DATA_DIR / "features"
+BRANCHES_DIR = DATA_DIR / "branches"
+
+MODELS_DIR = PROJECT_ROOT / "models"
+NEWS_PROJECTION_DIR = MODELS_DIR / "news_projection"
+CROWD_PROJECTION_DIR = MODELS_DIR / "crowd_projection"
+PERSONA_MODEL_DIR = MODELS_DIR / "personas"
+TFT_MODEL_DIR = MODELS_DIR / "tft"
+COLLAPSE_MODEL_DIR = MODELS_DIR / "collapse"
+MODELS_V24_DIR = MODELS_DIR / "v24"
+
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_CHARTS_DIR = OUTPUTS_DIR / "charts"
+OUTPUTS_CONES_DIR = OUTPUTS_DIR / "probability_cones"
+OUTPUTS_EVAL_DIR = OUTPUTS_DIR / "evaluation"
+OUTPUTS_LOGS_DIR = OUTPUTS_DIR / "logs"
+OUTPUTS_V8_DIR = OUTPUTS_DIR / "v8"
+OUTPUTS_V9_DIR = OUTPUTS_DIR / "v9"
+OUTPUTS_V10_DIR = OUTPUTS_DIR / "v10"
+OUTPUTS_V11_DIR = OUTPUTS_DIR / "v11"
+OUTPUTS_V12_DIR = OUTPUTS_DIR / "v12"
+OUTPUTS_V13_DIR = OUTPUTS_DIR / "v13"
+OUTPUTS_V14_DIR = OUTPUTS_DIR / "v14"
+OUTPUTS_V15_DIR = OUTPUTS_DIR / "v15"
+OUTPUTS_V16_DIR = OUTPUTS_DIR / "v16"
+OUTPUTS_V17_DIR = OUTPUTS_DIR / "v17"
+OUTPUTS_V18_DIR = OUTPUTS_DIR / "v18"
+OUTPUTS_V19_DIR = OUTPUTS_DIR / "v19"
+OUTPUTS_V20_DIR = OUTPUTS_DIR / "v20"
+OUTPUTS_V21_DIR = OUTPUTS_DIR / "v21"
+OUTPUTS_V22_DIR = OUTPUTS_DIR / "v22"
+OUTPUTS_V24_DIR = OUTPUTS_DIR / "v24"
+OUTPUTS_V26_DIR = OUTPUTS_DIR / "v26"
+
+LEGACY_DATA_STORE_DIR = PROJECT_ROOT / "data_store"
+LEGACY_PROCESSED_DIR = LEGACY_DATA_STORE_DIR / "processed"
+LEGACY_EMBEDDINGS_DIR = LEGACY_DATA_STORE_DIR / "embeddings"
+LEGACY_SYNTHETIC_DIR = LEGACY_DATA_STORE_DIR / "synthetic"
+LEGACY_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+V9_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v9"
+V10_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v10"
+V11_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v11"
+V12_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v12"
+V13_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v13"
+V14_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v14"
+V15_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v15"
+V17_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v17"
+V19_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v19"
+V20_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v20"
+V21_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v21"
+V22_CHECKPOINT_DIR = LEGACY_CHECKPOINT_DIR / "v22"
+LEGACY_TFT_CHECKPOINT_PATH = LEGACY_CHECKPOINT_DIR / "tft" / "tft_best.pt"
+
+CHECKPOINT_DIR = MODELS_DIR
+TFT_CHECKPOINT_DIR = TFT_MODEL_DIR
+TFT_CHECKPOINT_PATH = TFT_MODEL_DIR / "final_tft.ckpt"
+NEWS_HEAD_CHECKPOINT_PATH = NEWS_PROJECTION_DIR / "news_head_supervised.pt"
+CROWD_HEAD_CHECKPOINT_PATH = CROWD_PROJECTION_DIR / "crowd_head_supervised.pt"
+
+PRICE_FEATURES_PATH = FEATURES_DIR / "price_features.parquet"
+PRICE_FEATURES_CSV_FALLBACK = FEATURES_DIR / "price_features.csv"
+LEGACY_PRICE_FEATURES_CSV = LEGACY_PROCESSED_DIR / "XAUUSD_1m_features.csv"
+LEGACY_PRICE_FEATURES_PARQUET = LEGACY_PROCESSED_DIR / "XAUUSD_1m_features.parquet"
+
+NEWS_EMBEDDINGS_PATH = EMBEDDINGS_DIR / "news_embedding.parquet"
+CROWD_EMBEDDINGS_PATH = EMBEDDINGS_DIR / "crowd_embedding.parquet"
+NEWS_EMBEDDINGS_INDEX_PATH = EMBEDDINGS_DIR / "news_emb_index.parquet"
+CROWD_EMBEDDINGS_INDEX_PATH = EMBEDDINGS_DIR / "crowd_emb_index.parquet"
+NEWS_EMBEDDINGS_NPY_PATH = EMBEDDINGS_DIR / "news_embeddings_32.npy"
+NEWS_EMBEDDINGS_RAW_PATH = EMBEDDINGS_DIR / "news_embeddings.npy"
+CROWD_EMBEDDINGS_NPY_PATH = EMBEDDINGS_DIR / "crowd_embeddings.npy"
+LEGACY_NEWS_EMBEDDINGS_NPY_PATH = LEGACY_EMBEDDINGS_DIR / "news_embeddings_32.npy"
+LEGACY_NEWS_EMBEDDINGS_RAW_PATH = LEGACY_EMBEDDINGS_DIR / "news_embeddings.npy"
+LEGACY_CROWD_EMBEDDINGS_NPY_PATH = LEGACY_EMBEDDINGS_DIR / "crowd_embeddings.npy"
+LEGACY_NEWS_EMBEDDINGS_INDEX_PATH = LEGACY_EMBEDDINGS_DIR / "news_emb_index.parquet"
+LEGACY_CROWD_EMBEDDINGS_INDEX_PATH = LEGACY_EMBEDDINGS_DIR / "crowd_emb_index.parquet"
+
+PERSONA_OUTPUTS_PATH = PROCESSED_DATA_DIR / "persona_outputs.parquet"
+PERSONA_WEIGHT_HISTORY_PATH = PROCESSED_DATA_DIR / "persona_weight_history.parquet"
+MACRO_FEATURES_PATH = PROCESSED_DATA_DIR / "macro_features.parquet"
+QUANT_FEATURES_PATH = PROCESSED_DATA_DIR / "quant_features.parquet"
+QUANT_FEATURES_CSV_FALLBACK = PROCESSED_DATA_DIR / "quant_features.csv"
+MARKET_DYNAMICS_LABELS_PATH = PROCESSED_DATA_DIR / "market_dynamics_labels.parquet"
+NEWS_EVENTS_PATH = PROCESSED_DATA_DIR / "news_events.parquet"
+CROWD_EVENTS_PATH = PROCESSED_DATA_DIR / "crowd_events.parquet"
+SIM_TARGETS_PATH = FEATURES_DIR / "sim_targets.npy"
+SIM_CONFIDENCE_PATH = FEATURES_DIR / "sim_confidence.npy"
+SAMPLE_WEIGHTS_PATH = FEATURES_DIR / "sample_weights.npy"
+FUSED_TENSOR_PATH = FEATURES_DIR / "fused_tensor.npy"
+TARGETS_PATH = FEATURES_DIR / "targets.npy"
+TARGETS_MULTIHORIZON_PATH = FEATURES_DIR / "targets_multihorizon.npz"
+TARGET_HOLD_MASK_PATH = FEATURES_DIR / "target_hold_mask.npy"
+GATE_CONTEXT_PATH = FEATURES_DIR / "gate_context.npy"
+FUSED_FEATURE_MATRIX_PATH = FEATURES_DIR / "fused_features.npy"
+FUSED_TIMESTAMPS_PATH = FEATURES_DIR / "timestamps.npy"
+FUSION_REPORT_PATH = OUTPUTS_EVAL_DIR / "fusion_report.json"
+FEATURE_IMPORTANCE_REPORT_PATH = OUTPUTS_EVAL_DIR / "feature_importance.json"
+CALIBRATION_REPORT_PATH = OUTPUTS_EVAL_DIR / "calibration_report.json"
+TRAINING_SUMMARY_PATH = OUTPUTS_EVAL_DIR / "training_summary.json"
+FUTURE_BRANCHES_PATH = BRANCHES_DIR / "future_branches.json"
+LATEST_MARKET_SNAPSHOT_PATH = OUTPUTS_EVAL_DIR / "latest_market_snapshot.json"
+LIVE_SIMULATION_HISTORY_PATH = OUTPUTS_EVAL_DIR / "live_simulation_history.json"
+FINAL_TFT_METRICS_PATH = OUTPUTS_EVAL_DIR / "tft_metrics.json"
+ANALOG_REPORT_PATH = OUTPUTS_EVAL_DIR / "analog_report.json"
+WALKFORWARD_REPORT_PATH = OUTPUTS_EVAL_DIR / "walkforward_report.json"
+BACKTEST_REPORT_PATH = OUTPUTS_EVAL_DIR / "backtest_report.json"
+MODEL_MANIFEST_PATH = TFT_MODEL_DIR / "model_manifest.json"
+V24_META_AGGREGATOR_PATH = MODELS_V24_DIR / "meta_aggregator_latest.pt"
+V24_META_AGGREGATOR_CONFIG = MODELS_V24_DIR / "meta_aggregator_config.json"
+V24_META_AGGREGATOR_REPORT = OUTPUTS_V24_DIR / "meta_aggregator_training_report.json"
+V24_DIFFUSION_FUSED_PATH = FEATURES_DIR / "diffusion_fused_405k.npy"
+V24_DIFFUSION_TARGETS_PATH = FEATURES_DIR / "diffusion_targets_405k.npy"
+V24_DIFFUSION_TIMESTAMPS_PATH = FEATURES_DIR / "diffusion_timestamps_405k.npy"
+V24_DIFFUSION_NORM_STATS_PATH = PROJECT_ROOT / "config" / "diffusion_norm_stats.json"
+V24_DIFFUSION_FUSED_6M_PATH = FEATURES_DIR / "diffusion_fused_6m.npy"
+V24_DIFFUSION_TIMESTAMPS_6M_PATH = FEATURES_DIR / "diffusion_timestamps_6m.npy"
+V24_DIFFUSION_NORM_STATS_6M_PATH = PROJECT_ROOT / "config" / "diffusion_norm_stats_6m.json"
+V24_DIFFUSION_CHECKPOINT_PATH = MODELS_V24_DIR / "diffusion_unet1d_v2.pt"
+V24_DIFFUSION_CHECKPOINT_6M_PATH = MODELS_V24_DIR / "diffusion_unet1d_v2_6m.pt"
+PRECISION_GATE_PATH = TFT_MODEL_DIR / "precision_gate.json"
+META_GATE_PATH = TFT_MODEL_DIR / "meta_gate.pkl"
+V8_HMM_FRAME_PATH = OUTPUTS_V8_DIR / "hmm_regime_features.parquet"
+V8_HMM_MODEL_PATH = OUTPUTS_V8_DIR / "hmm_regime.pkl"
+V8_GARCH_FRAME_PATH = OUTPUTS_V8_DIR / "garch_volatility_features.parquet"
+V8_GARCH_MODEL_PATH = OUTPUTS_V8_DIR / "garch_model.pkl"
+V8_FAIR_VALUE_FRAME_PATH = OUTPUTS_V8_DIR / "fair_value_features.parquet"
+V8_FAIR_VALUE_MODEL_PATH = OUTPUTS_V8_DIR / "fair_value_model.pkl"
+V8_ANALOG_CACHE_PATH = OUTPUTS_V8_DIR / "analog_cache.npz"
+V8_ANALOG_CACHE_META_PATH = OUTPUTS_V8_DIR / "analog_cache_meta.json"
+V8_BRANCH_ARCHIVE_PATH = OUTPUTS_V8_DIR / "branch_archive.parquet"
+V8_BRANCH_SELECTOR_PATH = OUTPUTS_V8_DIR / "branch_selector.pkl"
+V8_QUANT_STACK_REPORT_PATH = OUTPUTS_EVAL_DIR / "v8_quant_stack_report.json"
+V8_BRANCH_ARCHIVE_REPORT_PATH = OUTPUTS_EVAL_DIR / "v8_branch_archive_report.json"
+V8_BRANCH_SELECTOR_REPORT_PATH = OUTPUTS_EVAL_DIR / "v8_branch_selector_report.json"
+V8_EVALUATION_REPORT_PATH = OUTPUTS_EVAL_DIR / "v8_evaluation_report.json"
+V8_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v8_summary.json"
+V8_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v8_summary.md"
+V9_BRANCH_LABELS_PATH = OUTPUTS_V9_DIR / "branch_labels.parquet"
+V9_BRANCH_FEATURES_PATH = OUTPUTS_V9_DIR / "branch_features_v9.parquet"
+V9_BRANCH_FEATURES_ENRICHED_PATH = OUTPUTS_V9_DIR / "branch_features_v9_enriched.parquet"
+V9_PERSONA_CALIBRATION_HISTORY_PATH = OUTPUTS_V9_DIR / "persona_calibration_history.parquet"
+V9_MEMORY_BANK_REPORT_PATH = OUTPUTS_V9_DIR / "memory_bank_report.json"
+V9_CONTRADICTION_REPORT_PATH = OUTPUTS_V9_DIR / "contradiction_report.json"
+V9_SELECTOR_CHECKPOINT_PATH = V9_CHECKPOINT_DIR / "selector_torch.pt"
+V9_MEMORY_BANK_DIR = V9_CHECKPOINT_DIR / "memory_bank"
+V9_MEMORY_BANK_ENCODER_PATH = V9_MEMORY_BANK_DIR / "encoder.pt"
+V9_MEMORY_BANK_INDEX_PATH = V9_MEMORY_BANK_DIR / "index.npz"
+V9_CONTRADICTION_MODEL_PATH = V9_CHECKPOINT_DIR / "contradiction_detector.pkl"
+V9_SELECTOR_RESULTS_PATH = OUTPUTS_V9_DIR / "selector_experiment_results.json"
+V9_SELECTOR_RESULTS_MD_PATH = OUTPUTS_V9_DIR / "selector_experiment_results.md"
+V9_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v9_summary.json"
+V9_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v9_summary.md"
+V10_BRANCH_AUDIT_PATH = OUTPUTS_V10_DIR / "branch_diversity_audit.json"
+V10_BRANCH_AUDIT_MD_PATH = OUTPUTS_V10_DIR / "branch_diversity_audit.md"
+V10_BRANCH_ARCHIVE_PATH = OUTPUTS_V10_DIR / "branch_archive_v10.parquet"
+V10_BRANCH_ARCHIVE_FULL_PATH = OUTPUTS_V10_DIR / "branch_archive_v10_full.parquet"
+V10_BRANCH_ARCHIVE_REPORT_PATH = OUTPUTS_V10_DIR / "branch_archive_v10.report.json"
+V10_BRANCH_FEATURES_PATH = OUTPUTS_V10_DIR / "branch_features_v10.parquet"
+V10_BRANCH_LABELS_PATH = OUTPUTS_V10_DIR / "branch_labels_v10.parquet"
+V10_SELECTOR_CHECKPOINT_PATH = V10_CHECKPOINT_DIR / "selector_torch_v10.pt"
+V10_SELECTOR_RESULTS_PATH = OUTPUTS_V10_DIR / "selector_experiment_results_v10.json"
+V10_SELECTOR_RESULTS_MD_PATH = OUTPUTS_V10_DIR / "selector_experiment_results_v10.md"
+V10_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v10_summary.json"
+V10_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v10_summary.md"
+V11_RESEARCH_BACKTEST_PATH = OUTPUTS_V11_DIR / "research_backtest.json"
+V11_RESEARCH_BACKTEST_MD_PATH = OUTPUTS_V11_DIR / "research_backtest.md"
+V11_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v11_summary.json"
+V11_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v11_summary.md"
+V11_SETL_MODEL_PATH = V11_CHECKPOINT_DIR / "setl_regressor.pkl"
+V11_PCOP_STAGE5_MODEL_PATH = V11_CHECKPOINT_DIR / "pcop_stage5.pkl"
+V11_PCOP_STAGE10_MODEL_PATH = V11_CHECKPOINT_DIR / "pcop_stage10.pkl"
+V11_SELECTOR_MODEL_PATH = V11_CHECKPOINT_DIR / "selector_ranker.pkl"
+V12_FEATURE_CONSISTENCY_REPORT_PATH = OUTPUTS_V12_DIR / "feature_consistency_report.json"
+V12_SARV_REPORT_PATH = OUTPUTS_V12_DIR / "sarv_report.json"
+V12_TCTL_EVALUATION_REPORT_PATH = OUTPUTS_V12_DIR / "tctl_evaluation_report.json"
+V12_TCTL_MODEL_PATH = V12_CHECKPOINT_DIR / "tctl_ranker.pt"
+V12_CONFIDENCE_CALIBRATOR_PATH = V12_CHECKPOINT_DIR / "confidence_calibrator.pkl"
+V12_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v12_summary.json"
+V12_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v12_summary.md"
+V13_CABR_MODEL_PATH = V13_CHECKPOINT_DIR / "cabr.pt"
+V13_RCPC_CALIBRATOR_PATH = V13_CHECKPOINT_DIR / "rcpc_calibrator.pkl"
+V13_CABR_EVALUATION_REPORT_PATH = OUTPUTS_V13_DIR / "cabr_evaluation_report.json"
+V13_TCTL_BASELINE_REPORT_PATH = OUTPUTS_V13_DIR / "tctl_regime_fixed_report.json"
+V13_BACKTRADER_MONTH_REPORT_PATH = OUTPUTS_V13_DIR / "backtrader_month_2023_12_v13.json"
+V13_BACKTRADER_WALKFORWARD_REPORT_PATH = OUTPUTS_V13_DIR / "backtrader_walkforward_v13.json"
+V13_PAPER_TRADE_LOG_PATH = OUTPUTS_V13_DIR / "paper_trades.jsonl"
+V13_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v13_summary.json"
+V13_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v13_summary.md"
+V14_BRANCH_ARCHIVE_PATH = OUTPUTS_V14_DIR / "branch_archive_v14.parquet"
+V14_BRANCH_FEATURES_PATH = OUTPUTS_V14_DIR / "branch_features_v14.parquet"
+V14_CABR_TEMPORAL_MODEL_PATH = V14_CHECKPOINT_DIR / "cabr_temporal.pt"
+V14_SSC_MODEL_PATH = V14_CHECKPOINT_DIR / "ssc.pt"
+V14_RSC_CALIBRATOR_PATH = V14_CHECKPOINT_DIR / "rsc.pkl"
+V14_CABR_EVALUATION_REPORT_PATH = OUTPUTS_V14_DIR / "cabr_temporal_evaluation_report.json"
+V14_SSC_EVALUATION_REPORT_PATH = OUTPUTS_V14_DIR / "ssc_evaluation_report.json"
+V14_BACKTRADER_MONTH_REPORT_PATH = OUTPUTS_V14_DIR / "backtrader_month_2023_12_v14.json"
+V14_BACKTRADER_WALKFORWARD_REPORT_PATH = OUTPUTS_V14_DIR / "backtrader_walkforward_v14.json"
+V14_PAPER_TRADE_LOG_PATH = OUTPUTS_V14_DIR / "paper_trades.jsonl"
+V14_LDRG_STATUS_PATH = OUTPUTS_V14_DIR / "ldrg_status.json"
+V14_RESEARCH_PAPER_OUTLINE_PATH = OUTPUTS_V14_DIR / "research_paper_outline.md"
+V14_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v14_summary.json"
+V14_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v14_summary.md"
+V15_PARTICIPATION_AUDIT_PATH = OUTPUTS_V15_DIR / "participation_audit_v14.json"
+V15_CPM_LABELS_PATH = OUTPUTS_V15_DIR / "cpm_labels.parquet"
+V15_CPM_SUMMARY_PATH = OUTPUTS_V15_DIR / "cpm_summary.json"
+V15_BACKTRADER_MONTH_REPORT_PATH = OUTPUTS_V15_DIR / "backtrader_month_2023_12_v15.json"
+V15_BACKTRADER_WALKFORWARD_REPORT_PATH = OUTPUTS_V15_DIR / "backtrader_walkforward_v15.json"
+V15_PAPER_TRADE_LOG_PATH = OUTPUTS_V15_DIR / "paper_trades.jsonl"
+V15_RSC_BOOTSTRAPPED_PATH = V15_CHECKPOINT_DIR / "rsc_bootstrapped.pkl"
+V15_RSC_RUNTIME_PATH = V15_CHECKPOINT_DIR / "rsc_runtime.pkl"
+V15_ECI_CALENDAR_DIR = DATA_DIR / "economic_calendar"
+V15_ECI_CALENDAR_PATH = V15_ECI_CALENDAR_DIR / "historical_events.csv"
+V15_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v15_summary.json"
+V15_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v15_summary.md"
+V16_PAPER_TRADE_STATE_PATH = OUTPUTS_V16_DIR / "paper_trading_state.json"
+V16_BACKTRADER_MONTH_FREQUENCY_PATH = OUTPUTS_V16_DIR / "backtrader_month_2023_12_frequency.json"
+V16_BACKTRADER_MONTH_PRECISION_PATH = OUTPUTS_V16_DIR / "backtrader_month_2023_12_precision.json"
+V16_BACKTRADER_WALKFORWARD_FREQUENCY_PATH = OUTPUTS_V16_DIR / "backtrader_walkforward_v16_frequency.json"
+V16_BACKTRADER_WALKFORWARD_PRECISION_PATH = OUTPUTS_V16_DIR / "backtrader_walkforward_v16_precision.json"
+V16_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v16_summary.json"
+V16_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v16_summary.md"
+V17_MMM_FEATURES_PATH = OUTPUTS_V17_DIR / "mmm_features.parquet"
+V17_KIMI_PACKET_LOG_PATH = OUTPUTS_V17_DIR / "kimi_packet_log.jsonl"
+V17_CABR_MODEL_PATH = V17_CHECKPOINT_DIR / "cabr_v17.pt"
+V17_CABR_EVALUATION_REPORT_PATH = OUTPUTS_V17_DIR / "cabr_evaluation_report_v17.json"
+V17_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v17_summary.json"
+V17_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v17_summary.md"
+V18_KIMI_PACKET_LOG_PATH = OUTPUTS_V18_DIR / "kimi_packet_log.jsonl"
+V18_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v18_summary.json"
+V18_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v18_summary.md"
+V19_TRAINING_LOG_DIR = OUTPUTS_V19_DIR / "training_logs"
+V19_SJD_DATASET_PATH = OUTPUTS_V19_DIR / "sjd_dataset.parquet"
+V19_SJD_FEATURE_NAMES_PATH = OUTPUTS_V19_DIR / "sjd_feature_names.json"
+V19_SJD_TEACHER_CACHE_PATH = OUTPUTS_V19_DIR / "nim_teacher_cache.jsonl"
+V19_SJD_DATASET_REPORT_PATH = OUTPUTS_V19_DIR / "sjd_dataset_report.json"
+V19_BRANCH_ARCHIVE_PATH = OUTPUTS_V19_DIR / "branch_archive_100k.parquet"
+V19_BRANCH_ARCHIVE_REPORT_PATH = OUTPUTS_V19_DIR / "branch_archive_100k.report.json"
+V19_CABR_TRAINING_REPORT_PATH = OUTPUTS_V19_DIR / "cabr_v19_training_report.json"
+V19_LEPL_REPORT_PATH = OUTPUTS_V19_DIR / "lepl_training_report.json"
+V19_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v19_summary.json"
+V19_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v19_summary.md"
+V19_SJD_MODEL_PATH = V19_CHECKPOINT_DIR / "sjd_best.pt"
+V19_SJD_MODEL_NPZ_PATH = V19_CHECKPOINT_DIR / "sjd_best.npz"
+V19_CABR_BASE_MODEL_PATH = V19_CHECKPOINT_DIR / "cabr_v19_base.pt"
+V19_CABR_MODEL_PATH = V19_CHECKPOINT_DIR / "cabr_v19.pt"
+V19_CABR_RL_MODEL_PATH = V19_CHECKPOINT_DIR / "cabr_v19_rl.pt"
+V19_LEPL_MODEL_PATH = V19_CHECKPOINT_DIR / "lepl.pkl"
+V20_DENOISED_OHLCV_PATH = FEATURES_DIR / "v20_ohlcv_denoised.parquet"
+V20_MACRO_FEATURES_PATH = FEATURES_DIR / "macro_features.parquet"
+V20_REGIME_LABELS_PATH = FEATURES_DIR / "regime_labels.parquet"
+V20_FEATURES_PATH = FEATURES_DIR / "v20_features.parquet"
+V20_FEATURES_METADATA_PATH = FEATURES_DIR / "v20_features_metadata.json"
+V20_HMM_MODEL_PATH = V20_CHECKPOINT_DIR / "hmm_6state.pkl"
+V20_MAMBA_MODEL_PATH = V20_CHECKPOINT_DIR / "mamba_best.pt"
+V20_BRANCH_DECODER_PATH = V20_CHECKPOINT_DIR / "branch_decoder_best.pt"
+V20_CABR_MODEL_PATH = V20_CHECKPOINT_DIR / "cabr_v20_final.pt"
+V20_SJD_MODEL_PATH = V20_CHECKPOINT_DIR / "sjd_v20_best.pt"
+V20_RL_SUBAGENTS_DIR = V20_CHECKPOINT_DIR / "rl_sub_agents"
+V20_RL_HYPER_AGENT_PATH = V20_CHECKPOINT_DIR / "rl_hyper_agent.pt"
+V20_CONFORMAL_CONE_PATH = V20_CHECKPOINT_DIR / "conformal_cone.pkl"
+V20_MAMBA_TRAINING_LOG_PATH = OUTPUTS_V20_DIR / "mamba_training_log.jsonl"
+V20_BRANCH_PAIR_DATASET_PATH = OUTPUTS_V20_DIR / "branch_pairs_1m.parquet"
+V20_SJD_DATASET_PATH = OUTPUTS_V20_DIR / "sjd_dataset_v20.parquet"
+V20_WALKFORWARD_RESULTS_PATH = OUTPUTS_V20_DIR / "walkforward_results.json"
+V20_WALKFORWARD_SUMMARY_PATH = OUTPUTS_V20_DIR / "walkforward_summary.md"
+V20_BACKTEST_MONTH_REPORT_PATH = OUTPUTS_V20_DIR / "backtest_month_2023_12_v20.json"
+V20_HOST_STDOUT_PATH = OUTPUTS_V20_DIR / "server_8020.out.log"
+V20_HOST_STDERR_PATH = OUTPUTS_V20_DIR / "server_8020.err.log"
+V20_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v20_summary.json"
+V20_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v20_summary.md"
+V21_REMOTE_ARCHIVE_PATH = DATA_DIR / "raw" / "xauusd_1min_2007_2024.parquet"
+V21_DENOISED_OHLCV_PATH = FEATURES_DIR / "v21_ohlcv_denoised.parquet"
+V21_MACRO_FEATURES_PATH = FEATURES_DIR / "v21_macro_features.parquet"
+V21_REGIME_LABELS_PATH = FEATURES_DIR / "regime_labels_full.parquet"
+V21_FEATURES_PATH = FEATURES_DIR / "v21_features.parquet"
+V21_FEATURES_METADATA_PATH = FEATURES_DIR / "v21_features_metadata.json"
+V21_HMM_MODEL_PATH = V21_CHECKPOINT_DIR / "hmm_6state.pkl"
+V21_XLSTM_MODEL_PATH = V21_CHECKPOINT_DIR / "xlstm_best.pt"
+V21_BIMAMBA_MODEL_PATH = V21_CHECKPOINT_DIR / "bimamba_best.pt"
+V21_PHASE1_SUMMARY_PATH = OUTPUTS_V21_DIR / "phase1_features_summary.json"
+V21_REMOTE_PHASE1_LOG_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase1.log"
+V21_REMOTE_PHASE1_PID_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase1.pid"
+V21_XLSTM_REPORT_PATH = OUTPUTS_V21_DIR / "xlstm_training_report.json"
+V21_BIMAMBA_REPORT_PATH = OUTPUTS_V21_DIR / "bimamba_training_report.json"
+V21_REMOTE_PHASE2_SUMMARY_PATH = OUTPUTS_V21_DIR / "phase2_training_summary.json"
+V21_REMOTE_PHASE2_LOG_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase2.log"
+V21_REMOTE_PHASE2_PID_PATH = OUTPUTS_LOGS_DIR / "remote_v21_phase2.pid"
+V21_RAAM_INDEX_PATH = V21_CHECKPOINT_DIR / "raam_index.faiss"
+V21_RAAM_OUTCOMES_PATH = V21_CHECKPOINT_DIR / "raam_outcomes.json"
+V21_MT5_TESTER_DIR = OUTPUTS_V21_DIR / "mt5_tester"
+V21_MT5_TESTER_SIGNALS_PATH = V21_MT5_TESTER_DIR / "v21_mt5_tester_signals.csv"
+V21_MT5_TESTER_SUMMARY_PATH = V21_MT5_TESTER_DIR / "v21_mt5_tester_summary.json"
+V21_MT5_TESTER_EA_PATH = PROJECT_ROOT / "mt5_tester" / "NexusTraderV21TesterBridge.mq5"
+V21_SUMMARY_JSON_PATH = OUTPUTS_EVAL_DIR / "v21_summary.json"
+V21_SUMMARY_MD_PATH = OUTPUTS_EVAL_DIR / "v21_summary.md"
+MACRO_REPORT_PATH = OUTPUTS_EVAL_DIR / "macro_report.json"
+QUANT_REPORT_PATH = OUTPUTS_EVAL_DIR / "quant_report.json"
+MARKET_DYNAMICS_REPORT_PATH = OUTPUTS_EVAL_DIR / "market_dynamics_report.json"
+NEWS_REPORT_PATH = OUTPUTS_EVAL_DIR / "news_report.json"
+CROWD_REPORT_PATH = OUTPUTS_EVAL_DIR / "crowd_report.json"
+PROBABILITY_CONE_HTML_PATH = OUTPUTS_CHARTS_DIR / "probability_cone.html"
+PERSONA_BREAKDOWN_HTML_PATH = OUTPUTS_CHARTS_DIR / "persona_breakdown.html"
+FINAL_DASHBOARD_HTML_PATH = OUTPUTS_CHARTS_DIR / "nexus_dashboard.html"
+MODEL_SERVICE_HOST = os.getenv("NEXUS_MODEL_HOST", "0.0.0.0")
+MODEL_SERVICE_PORT = int(os.getenv("NEXUS_MODEL_PORT", "8000"))
+LLM_PROVIDER_DEFAULT = os.getenv("NEXUS_LLM_PROVIDER", "lm_studio")
+LM_STUDIO_BASE_URL = os.getenv("NEXUS_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234")
+LM_STUDIO_MODEL = os.getenv("NEXUS_LM_STUDIO_MODEL", "openai/gpt-oss-20b")
+LM_STUDIO_TIMEOUT_SECONDS = int(os.getenv("NEXUS_LM_STUDIO_TIMEOUT_SECONDS", "45"))
+LM_STUDIO_ENABLED = os.getenv("NEXUS_LM_STUDIO_ENABLED", "1") == "1"
+OLLAMA_BASE_URL = os.getenv("NEXUS_OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("NEXUS_OLLAMA_MODEL", "minimax-m2.7:cloud")
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("NEXUS_OLLAMA_TIMEOUT_SECONDS", "60"))
+OLLAMA_ENABLED = os.getenv("NEXUS_OLLAMA_ENABLED", "1") == "1"
+NVIDIA_NIM_BASE_URL = os.getenv("NEXUS_NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+NVIDIA_NIM_MODEL = os.getenv("NEXUS_NVIDIA_NIM_MODEL", "moonshotai/kimi-k2-instruct")
+NVIDIA_NIM_TIMEOUT_SECONDS = int(os.getenv("NEXUS_NVIDIA_NIM_TIMEOUT_SECONDS", "25"))
+NVIDIA_NIM_ENABLED = os.getenv("NEXUS_NVIDIA_NIM_ENABLED", "1") == "1"
+NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "")
+NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE = int(os.getenv("NEXUS_NVIDIA_NIM_MAX_REQUESTS_PER_MINUTE", "40"))
+V10_DIVERSE_BRANCHING_ENABLED = os.getenv("NEXUS_V10_DIVERSE_BRANCHING", "0") == "1"
+
+NORM_STATS_PATH = PROJECT_ROOT / "config" / "norm_stats_1m.json"
+PERSONA_CONFIG_PATH = PROJECT_ROOT / "config" / "persona_config.json"
+DATASET_MANIFEST_PATH = PROJECT_ROOT / "config" / "dataset_manifest.json"
+DOWNLOAD_REPORT_PATH = OUTPUTS_LOGS_DIR / "download_report.json"
+MT5_COMMON_FILES_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "MetaQuotes" / "Terminal" / "Common" / "Files"
+
+
+def get_data_path(*parts: str) -> Path:
+    return DATA_DIR.joinpath(*parts)
+
+
+def get_local_path(*parts: str) -> Path:
+    return LOCAL_PROJECT_ROOT.joinpath(*parts)
+
+
+def get_project_path(*parts: str) -> Path:
+    return PROJECT_ROOT.joinpath(*parts)
