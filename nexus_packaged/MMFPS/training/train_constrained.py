@@ -6,24 +6,19 @@ This implements the vNext architecture with:
 3. Envelope transformation → bounded returns
 """
 
-import sys
+import argparse
 import gc
+import re
+import sys
 from pathlib import Path
 _p = Path(__file__).resolve().parents[2]
 if str(_p) not in sys.path:
     sys.path.insert(0, str(_p))
 
-import os
-import random
-from datetime import datetime
-from pathlib import Path
-
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
 
 from MMFPS.generator.constrained_diffusion_generator import (
     ConstrainedDiffusionGenerator,
@@ -59,7 +54,6 @@ def train_one_step(
     optimizer: optim.Optimizer,
     batch: torch.Tensor,
     device: torch.device,
-    scaler: GradScaler,
 ) -> dict:
     """Train one step."""
     model.train()
@@ -75,24 +69,21 @@ def train_one_step(
     regime_emb = torch.zeros(B, 64, device=device)
     quant_emb = torch.zeros(B, 64, device=device)
     
-    # Forward pass
-    with autocast():
-        output = model(
-            context=context,
-            regime_emb=regime_emb,
-            quant_emb=quant_emb,
-            targets=batch.unsqueeze(1),  # Add path dim
-        )
+    # Forward pass (no AMP until stability is fully verified)
+    output = model(
+        context=context,
+        regime_emb=regime_emb,
+        quant_emb=quant_emb,
+        targets=batch.unsqueeze(1),  # Add path dim
+    )
     
     loss = output.diversity_loss
     
     # Backward
     optimizer.zero_grad()
-    scaler.scale(loss).backward()
-    scaler.unscale_(optimizer)
+    loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-    scaler.step(optimizer)
-    scaler.update()
+    optimizer.step()
     
     return {
         'loss': loss.item(),
@@ -150,20 +141,58 @@ def validate(
     }
 
 
+def _resolve_resume_checkpoint(
+    checkpoint_dir: Path,
+    resume_mode: str,
+    resume_path: str | None,
+) -> Path | None:
+    if resume_mode == "none":
+        return None
+    if resume_mode == "best":
+        p = checkpoint_dir / "best_model.pt"
+        return p if p.exists() else None
+    if resume_mode == "latest":
+        candidates = list(checkpoint_dir.glob("checkpoint_step_*.pt"))
+        if not candidates:
+            return None
+        def _step(path: Path) -> int:
+            m = re.search(r"checkpoint_step_(\d+)\.pt$", path.name)
+            return int(m.group(1)) if m else -1
+        return max(candidates, key=_step)
+    if resume_mode == "specific":
+        if not resume_path:
+            raise ValueError("--resume-mode=specific requires --resume-path")
+        p = Path(resume_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {p}")
+        return p
+    raise ValueError(f"Unknown resume_mode={resume_mode}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Train constrained MMFPS diffusion generator")
+    parser.add_argument("--data-path", type=str, default="C:/PersonalDrive/Programming/AiStudio/nexus-trader/data/features/diffusion_fused_6m.npy")
+    parser.add_argument("--checkpoint-dir", type=str, default="C:/PersonalDrive/Programming/AiStudio/nexus-trader/nexus_packaged/outputs/MMFPS/generator_checkpoints")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-steps", type=int, default=25000)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--resume-mode", type=str, choices=["none", "latest", "best", "specific"], default="latest")
+    parser.add_argument("--resume-path", type=str, default=None)
+    parser.add_argument("--from-scratch", action="store_true")
+    args = parser.parse_args()
+
     # Config
-    data_path = "C:/PersonalDrive/Programming/AiStudio/nexus-trader/data/features/diffusion_fused_6m.npy"
-    checkpoint_dir = Path("C:/PersonalDrive/Programming/AiStudio/nexus-trader/nexus_packaged/outputs/MMFPS/generator_checkpoints")
+    data_path = args.data_path
+    checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Hyperparameters
-    batch_size = 64
-    num_steps = 25000
-    lr = 5e-5
-    gradient_accumulation = 1
+    batch_size = int(args.batch_size)
+    num_steps = int(args.num_steps)
+    lr = float(args.lr)
     
     # Model
     config = DiffusionGeneratorConfig(
@@ -185,26 +214,30 @@ def main():
     model = ConstrainedDiffusionGenerator(config).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Resume from checkpoint if exists
-    resume_path = checkpoint_dir / "checkpoint_step_18000.pt"
+    # Resume from checkpoint if configured
     resume_step = 0
-    if resume_path.exists():
+    resume_ckpt = None if args.from_scratch else _resolve_resume_checkpoint(
+        checkpoint_dir=checkpoint_dir,
+        resume_mode=args.resume_mode,
+        resume_path=args.resume_path,
+    )
+    if resume_ckpt is not None:
+        resume_path = Path(resume_ckpt)
         print(f"Resuming from {resume_path}")
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model'])
-        resume_step = ckpt['step']
+        resume_step = int(ckpt.get('step', 0))
         print(f"Loaded model from step {resume_step}")
     
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    remaining_steps = num_steps - resume_step
+    remaining_steps = max(num_steps - resume_step, 1)
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=lr,
         total_steps=remaining_steps,
         pct_start=0.1,
     )
-    scaler = GradScaler()
     
     # Dataset
     dataset = DiffusionDataset(data_path, seq_len=20, stride=1)
@@ -248,7 +281,7 @@ def main():
             train_iter = iter(train_loader)
             batch = next(train_iter)
         
-        metrics = train_one_step(model, optimizer, batch, device, scaler)
+        metrics = train_one_step(model, optimizer, batch, device)
         scheduler.step()
         step += 1
         

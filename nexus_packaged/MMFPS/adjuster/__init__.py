@@ -1,0 +1,2 @@
+"""MMFPS diffusion adjuster module."""
+

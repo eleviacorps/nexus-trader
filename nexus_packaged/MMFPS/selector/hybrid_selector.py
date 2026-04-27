@@ -48,9 +48,9 @@ class HybridIntelligenceSelector(nn.Module):
         feature_dim: int = 144,
         path_len: int = 20,
         num_paths: int = 128,
-        d_model: int = 256,
-        num_heads: int = 8,
-        num_gru_layers: int = 2,
+        d_model: int = 384,
+        num_heads: int = 12,
+        num_gru_layers: int = 3,
         dropout: float = 0.1,
         use_diffusion: bool = True,
         use_xgboost: bool = True,
@@ -92,7 +92,7 @@ class HybridIntelligenceSelector(nn.Module):
                 dropout=dropout,
                 batch_first=True,
             ),
-            num_layers=4,
+            num_layers=6,
         )
         
         self.temporal_gru = nn.GRU(
@@ -102,7 +102,7 @@ class HybridIntelligenceSelector(nn.Module):
         
         # xLSTM-style memory (simplified - using LSTM with enhanced memory)
         self.temporal_lstm = nn.LSTM(
-            d_model, d_model, 3,
+            d_model, d_model, 4,
             batch_first=True, dropout=dropout if num_gru_layers > 1 else 0
         )
         
@@ -121,7 +121,7 @@ class HybridIntelligenceSelector(nn.Module):
             nn.GELU(),
         )
         
-        self.path_gru = nn.GRU(d_model, d_model, 2, batch_first=True, dropout=dropout)
+        self.path_gru = nn.GRU(d_model, d_model, 3, batch_first=True, dropout=dropout)
         
         # Cross-attention: context attends to paths
         self.cross_attn = nn.MultiheadAttention(
@@ -204,33 +204,34 @@ class HybridIntelligenceSelector(nn.Module):
     ) -> SelectorOutput:
         B = context.shape[0]
         
-        # Compute path returns
-        path_returns = (paths[:, :, -1] - paths[:, :, 0]) / (paths[:, :, 0].abs() + 1e-8)
+        # Compute path returns (use diff, not pct return to avoid near-zero division)
+        path_returns = (paths[:, :, -1] - paths[:, :, 0])
         
         # Encode context and paths
         context_enc = self.encode_context(context).unsqueeze(1)  # (B, 1, d_model)
         path_enc = self.encode_paths(paths)  # (B, P, d_model)
         
-        # Cross-attention
+        # Cross-attention: context attends to paths
+        # Output: (B, 1, d_model), weights: (B, 1, P)
         attn_out, attn_weights = self.cross_attn(
-            query=context_enc, 
-            key=path_enc, 
+            query=context_enc,
+            key=path_enc,
             value=path_enc
         )
-        attn_weights = attn_weights.squeeze(1)  # (B, P)
-        
+        # attn_weights: (B, 1, P) -> (B, P) - these are the attention scores over paths
+        raw_scores = attn_weights.squeeze(1)  # (B, P)
+
         # Diffusion scoring (if enabled)
         if self.use_diffusion and self.diffusion_scorer is not None:
             diff_scores = self.diffusion_scorer(paths, context_enc.squeeze(1))  # (B, P, 1)
         else:
             diff_scores = torch.zeros(B, self.num_paths, 1, device=paths.device)
-        
+
         # Combine attention and diffusion scores
         if self.use_diffusion:
-            combined = torch.cat([attn_out, diff_scores], dim=-1)
+            combined = torch.cat([raw_scores.unsqueeze(-1), diff_scores], dim=-1)
             raw_scores = self.score_fusion(combined).squeeze(-1)
-        else:
-            raw_scores = attn_out.squeeze(1)
+        # If use_diffusion=False, raw_scores is already (B, P) from attn_weights
         
         # Temperature-scaled softmax for weights
         temperature = F.softplus(self.log_temperature).clamp(min=0.1, max=5.0)
@@ -255,7 +256,7 @@ class HybridIntelligenceSelector(nn.Module):
             uncertainty=uncertainty,
             prob_up=prob_up,
             entropy=entropy,
-            scores=raw_scores if return_scores else None,
+            scores=raw_scores if (isinstance(return_scores, bool) and return_scores) else None,
         )
 
 

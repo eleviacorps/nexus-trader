@@ -62,6 +62,11 @@ class DiffusionGeneratorConfig:
     # Target distribution (from real data analysis)
     target_std: float = 0.05   # Match realistic spread (~5%)
     target_mean: float = 0.0   # Centered at zero
+    diversity_weight: float = 0.15
+    rank_spread_weight: float = 0.10
+    tail_bias: float = 0.35
+    vol_cond_scale: float = 0.40
+    mom_cond_scale: float = 0.50
 
 
 class ContextEncoder(nn.Module):
@@ -233,6 +238,57 @@ class ConstrainedDiffusionGenerator(nn.Module):
         outputs, hidden = self.temporal_gru(sequence)
         final_hidden = hidden[-1]
         return self.temporal_film(final_hidden)
+
+    def _extract_market_condition(self, sequence: Tensor) -> tuple[Tensor, Tensor]:
+        """Extract volatility and momentum from context sequence."""
+        price = sequence[:, :, 0]
+        if price.shape[1] > 1:
+            rets = (price[:, 1:] - price[:, :-1]) / (price[:, :-1].abs() + 1e-6)
+        else:
+            rets = torch.zeros(price.shape[0], 1, device=price.device, dtype=price.dtype)
+        vol = rets.std(dim=1)
+        tail_n = min(5, rets.shape[1])
+        momentum = rets[:, -tail_n:].mean(dim=1)
+        return vol, momentum
+
+    def _condition_envelope(
+        self,
+        envelope: DistributionEnvelope,
+        vol: Tensor,
+        momentum: Tensor,
+    ) -> DistributionEnvelope:
+        """Condition envelope with volatility and momentum statistics."""
+        vol_scale = 1.0 + self.config.vol_cond_scale * torch.tanh(vol * 10.0)
+        sigma = (envelope.sigma * vol_scale).clamp(min=0.01, max=0.5)
+        mu = envelope.mu + self.config.mom_cond_scale * momentum
+
+        low = torch.minimum(envelope.low_bound, mu - 2.5 * sigma)
+        high = torch.maximum(envelope.high_bound, mu + 2.5 * sigma)
+        low = torch.clamp(low, min=-0.75, max=0.0)
+        high = torch.clamp(high, min=0.0, max=0.75)
+        return DistributionEnvelope(mu=mu, sigma=sigma, low_bound=low, high_bound=high)
+
+    def _path_tail_scale(self, batch_size: int, n_paths: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        """Tail-biased per-path scale for diverse candidate trajectories."""
+        q = torch.linspace(-1.0, 1.0, n_paths, device=device, dtype=dtype)
+        scale = 1.0 + self.config.tail_bias * q.abs()
+        return scale.unsqueeze(0).expand(batch_size, -1).reshape(batch_size * n_paths)
+
+    def _envelope_diversity_objective(self, envelope: DistributionEnvelope, n_paths: int) -> tuple[Tensor, Tensor]:
+        """Differentiable spread objective over envelope-implied terminal returns."""
+        q = torch.linspace(-2.0, 2.0, n_paths, device=envelope.mu.device, dtype=envelope.mu.dtype)
+        candidates = envelope.mu.unsqueeze(1) + envelope.sigma.unsqueeze(1) * q.unsqueeze(0)
+        candidates = torch.maximum(candidates, envelope.low_bound.unsqueeze(1))
+        candidates = torch.minimum(candidates, envelope.high_bound.unsqueeze(1))
+
+        pairwise = torch.cdist(candidates.unsqueeze(-1), candidates.unsqueeze(-1), p=1)
+        eye = torch.eye(n_paths, device=pairwise.device, dtype=pairwise.dtype).unsqueeze(0)
+        pairwise = pairwise * (1.0 - eye)
+        mean_pairwise = pairwise.sum() / (candidates.shape[0] * n_paths * max(n_paths - 1, 1) + 1e-6)
+        diversity_loss = -mean_pairwise
+
+        rank_spread_loss = -candidates.std(dim=1).mean()
+        return diversity_loss, rank_spread_loss
     
     def z_to_returns(
         self,
@@ -281,6 +337,8 @@ class ConstrainedDiffusionGenerator(nn.Module):
         # Step 1: Get distribution envelope from context
         if temporal_sequence is not None:
             envelope = self.encode_context(temporal_sequence)
+            vol, momentum = self._extract_market_condition(temporal_sequence)
+            envelope = self._condition_envelope(envelope, vol, momentum)
             temporal_emb = self.encode_temporal(temporal_sequence)
         else:
             # Default envelope if no sequence provided - TIGHT bounds
@@ -305,11 +363,13 @@ class ConstrainedDiffusionGenerator(nn.Module):
         sigma_exp = envelope.sigma.repeat_interleave(n_paths)
         low_exp = envelope.low_bound.repeat_interleave(n_paths)
         high_exp = envelope.high_bound.repeat_interleave(n_paths)
+        tail_scale = self._path_tail_scale(B, n_paths, context.device, context.dtype)
         z_paths = self._sample_parallel(
             context=ctx_exp,
             regime_emb=reg_exp,
             quant_emb=quant_exp,
             temporal_emb=temp_exp,
+            tail_scale=tail_scale,
             num_steps=steps,
         )
         
@@ -338,6 +398,7 @@ class ConstrainedDiffusionGenerator(nn.Module):
         regime_emb: Tensor,
         quant_emb: Tensor,
         temporal_emb: Tensor,
+        tail_scale: Optional[Tensor] = None,
         num_steps: int = 50,
     ) -> Tensor:
         """Sample in z-space using DDIM."""
@@ -351,6 +412,8 @@ class ConstrainedDiffusionGenerator(nn.Module):
         
         # Start from standard normal
         x = torch.randn(B, C, H, device=device)
+        if tail_scale is not None:
+            x = x * tail_scale.view(-1, 1, 1)
         
         for i, t_val in enumerate(timesteps):
             t = torch.full((B,), t_val, device=device, dtype=torch.long)
@@ -418,6 +481,8 @@ class ConstrainedDiffusionGenerator(nn.Module):
             
             # Predict envelope from context
             envelope = self.encode_context(target_seq)
+            vol, momentum = self._extract_market_condition(target_seq)
+            envelope = self._condition_envelope(envelope, vol, momentum)
             
             # Transform targets to z-space for diffusion loss
             returns_for_z = target_seq[:, :, 0:1]  # (B, H, 1)
@@ -491,7 +556,18 @@ class ConstrainedDiffusionGenerator(nn.Module):
                 # NO velocity loss - it causes std collapse
                 temporal_loss = 0.05 * corr_loss + 0.2 * std_floor_loss
                 
-                aux_loss = 0.7 * std_loss + 1.0 * mean_loss + 0.1 * extreme_penalty + temporal_loss
+                diversity_reg, rank_spread_reg = self._envelope_diversity_objective(
+                    envelope=envelope,
+                    n_paths=max(n_paths_actual, self.config.num_paths),
+                )
+                aux_loss = (
+                    0.7 * std_loss
+                    + 1.0 * mean_loss
+                    + 0.1 * extreme_penalty
+                    + temporal_loss
+                    + self.config.diversity_weight * diversity_reg
+                    + self.config.rank_spread_weight * rank_spread_reg
+                )
             else:
                 aux_loss = torch.tensor(0.0, device=noisy_targets.device)
             
