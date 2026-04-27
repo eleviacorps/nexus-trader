@@ -95,6 +95,7 @@ class EpochStats:
     loss_recon: float
     loss_dir: float
     loss_mag: float
+    mag_ratio_mean: float
     loss_vel: float
     loss_accel: float
     nan_steps: int
@@ -126,6 +127,7 @@ def _epoch_pass(
     total_recon = 0.0
     total_dir = 0.0
     total_mag = 0.0
+    total_mag_ratio = 0.0
     total_vel = 0.0
     total_accel = 0.0
     nan_steps = 0
@@ -169,7 +171,8 @@ def _epoch_pass(
 
         pred_max = refined.abs().max(dim=1).values
         target_max = target_future.abs().max(dim=1).values
-        loss_mag = (pred_max - target_max).abs().mean()
+        ratio = pred_max / (target_max + 1e-6)
+        loss_mag = torch.relu(0.7 - ratio).mean()
 
         vel = refined[:, 1:] - refined[:, :-1]
         accel = vel[:, 1:] - vel[:, :-1]
@@ -179,7 +182,7 @@ def _epoch_pass(
             loss_diff
             + 0.5 * loss_recon
             + 0.2 * loss_dir
-            + 0.3 * loss_mag
+            + 0.6 * loss_mag
             + 0.1 * loss_vel
             + 0.05 * loss_accel
         )
@@ -200,6 +203,7 @@ def _epoch_pass(
         total_recon += float(loss_recon.detach().item())
         total_dir += float(loss_dir.detach().item())
         total_mag += float(loss_mag.detach().item())
+        total_mag_ratio += float(ratio.mean().detach().item())
         total_vel += float(loss_vel.detach().item())
         total_accel += float(loss_accel.detach().item())
 
@@ -209,6 +213,7 @@ def _epoch_pass(
             recon=f"{loss_recon.item():.5f}",
             dir=f"{loss_dir.item():.5f}",
             mag=f"{loss_mag.item():.5f}",
+            mag_ratio=f"{ratio.mean().item():.4f}",
         )
 
     n = max(len(loader) - nan_steps, 1)
@@ -218,6 +223,7 @@ def _epoch_pass(
         loss_recon=total_recon / n,
         loss_dir=total_dir / n,
         loss_mag=total_mag / n,
+        mag_ratio_mean=total_mag_ratio / n,
         loss_vel=total_vel / n,
         loss_accel=total_accel / n,
         nan_steps=nan_steps,
@@ -320,12 +326,15 @@ def main() -> int:
         va = _epoch_pass(model, schedule, val_loader, device, optimizer=None)
         print(
             f"train: loss={tr.loss:.6f} diff={tr.loss_diff:.6f} recon={tr.loss_recon:.6f} "
-            f"dir={tr.loss_dir:.6f} mag={tr.loss_mag:.6f} vel={tr.loss_vel:.6f} acc={tr.loss_accel:.6f} "
+            f"dir={tr.loss_dir:.6f} mag={tr.loss_mag:.6f} mag_ratio_mean={tr.mag_ratio_mean:.4f} "
+            f"vel={tr.loss_vel:.6f} acc={tr.loss_accel:.6f} "
             f"nan={tr.nan_steps} | "
             f"val: loss={va.loss:.6f} diff={va.loss_diff:.6f} recon={va.loss_recon:.6f} "
-            f"dir={va.loss_dir:.6f} mag={va.loss_mag:.6f} vel={va.loss_vel:.6f} acc={va.loss_accel:.6f} "
+            f"dir={va.loss_dir:.6f} mag={va.loss_mag:.6f} mag_ratio_mean={va.mag_ratio_mean:.4f} "
+            f"vel={va.loss_vel:.6f} acc={va.loss_accel:.6f} "
             f"nan={va.nan_steps}"
         )
+        print(f"mag_ratio_mean={tr.mag_ratio_mean:.4f}")
 
         state = {
             "model_state": model.state_dict(),
