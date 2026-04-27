@@ -7,6 +7,7 @@ This implements the vNext architecture with:
 """
 
 import sys
+import gc
 from pathlib import Path
 _p = Path(__file__).resolve().parents[2]
 if str(_p) not in sys.path:
@@ -159,9 +160,9 @@ def main():
     print(f"Using device: {device}")
     
     # Hyperparameters
-    batch_size = 64  # Smaller batch for new architecture
+    batch_size = 64
     num_steps = 25000
-    lr = 1e-4
+    lr = 5e-5
     gradient_accumulation = 1
     
     # Model
@@ -184,12 +185,23 @@ def main():
     model = ConstrainedDiffusionGenerator(config).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
+    # Resume from checkpoint if exists
+    resume_path = checkpoint_dir / "checkpoint_step_18000.pt"
+    resume_step = 0
+    if resume_path.exists():
+        print(f"Resuming from {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model'])
+        resume_step = ckpt['step']
+        print(f"Loaded model from step {resume_step}")
+    
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    remaining_steps = num_steps - resume_step
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=lr,
-        total_steps=num_steps,
+        total_steps=remaining_steps,
         pct_start=0.1,
     )
     scaler = GradScaler()
@@ -220,11 +232,11 @@ def main():
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
     # Training loop
-    step = 0
+    step = resume_step
     best_val_loss = float('inf')
     log_file = checkpoint_dir.parent / "train.log"
     
-    print(f"Starting training for {num_steps} steps...")
+    print(f"Starting training for {num_steps} steps (resuming from {resume_step})...")
     print(f"Logging to {log_file}")
     
     train_iter = iter(train_loader)
@@ -240,14 +252,19 @@ def main():
         scheduler.step()
         step += 1
         
+        # Periodic memory cleanup
+        if step % 500 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
+        
         # Logging
         if step % 10 == 0:
-            print(f"Training: {step}/{num_steps} [{step/num_steps*100:.1f}%] | loss={metrics['loss']:.4f}")
+            print(f"Training: {step}/{num_steps} [{step/num_steps*100:.1f}%] | loss={metrics['loss']:.4f}", flush=True)
         
         # Validation
         if step % 500 == 0:
             val_metrics = validate(model, val_loader, device)
-            print(f"Validation [{step}]: loss={val_metrics['loss']:.4f}, returns_std={val_metrics['returns_std']:.4f}, range=[{val_metrics['returns_p5']:.2f}, {val_metrics['returns_p95']:.2f}]")
+            print(f"Validation [{step}]: loss={val_metrics['loss']:.4f}, returns_std={val_metrics['returns_std']:.4f}, range=[{val_metrics['returns_p5']:.2f}, {val_metrics['returns_p95']:.2f}]", flush=True)
             
             # Save if better
             if val_metrics['loss'] < best_val_loss:

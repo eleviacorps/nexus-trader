@@ -60,8 +60,8 @@ class DiffusionGeneratorConfig:
     sampling_steps: int = 50
     
     # Target distribution (from real data analysis)
-    target_std: float = 0.25   # Target return std
-    target_mean: float = 0.0     # Target return mean
+    target_std: float = 0.05   # Match realistic spread (~5%)
+    target_mean: float = 0.0   # Centered at zero
 
 
 class ContextEncoder(nn.Module):
@@ -115,12 +115,12 @@ class ContextEncoder(nn.Module):
         with torch.no_grad():
             # mu: near 0 (neutral return)
             self.fc[-1].bias[0] = 0.0
-            # log_sigma: ~ -1.4 (sigma ≈ 0.25)
-            self.fc[-1].bias[1] = -1.386
-            # low_bound: p5 ≈ -0.4
-            self.fc[-1].bias[2] = -0.4
-            # high_bound: p95 ≈ 0.4
-            self.fc[-1].bias[3] = 0.4
+            # log_sigma: ~ -3.0 (sigma ≈ 0.05) - REALISTIC for short horizon
+            self.fc[-1].bias[1] = -3.0
+            # low_bound: p5 ≈ -0.1 (-10%)
+            self.fc[-1].bias[2] = -0.1
+            # high_bound: p95 ≈ 0.1 (+10%)
+            self.fc[-1].bias[3] = 0.1
     
     def forward(self, sequence: Tensor) -> DistributionEnvelope:
         """Encode sequence to distribution envelope.
@@ -242,6 +242,9 @@ class ConstrainedDiffusionGenerator(nn.Module):
         """Transform z-space to returns using envelope - with HARD bounds."""
         z_price = z[:, :, 0:1]
         
+        # Clamp z to prevent extreme values BEFORE transformation
+        z_price = torch.clamp(z_price, -3.0, 3.0)
+        
         # Transform: returns = mu + sigma * z
         mu = envelope.mu.view(-1, 1, 1)
         sigma = envelope.sigma.view(-1, 1, 1)
@@ -252,7 +255,6 @@ class ConstrainedDiffusionGenerator(nn.Module):
         low = envelope.low_bound.view(-1, 1, 1)
         high = envelope.high_bound.view(-1, 1, 1)
         
-        # Clamp hard
         returns = torch.clamp(returns, low, high)
         
         # Replace first channel
@@ -281,12 +283,12 @@ class ConstrainedDiffusionGenerator(nn.Module):
             envelope = self.encode_context(temporal_sequence)
             temporal_emb = self.encode_temporal(temporal_sequence)
         else:
-            # Default envelope if no sequence provided
+            # Default envelope if no sequence provided - TIGHT bounds
             envelope = DistributionEnvelope(
                 mu=torch.zeros(B, device=context.device),
-                sigma=torch.ones(B, device=context.device) * self.config.target_std,
-                low_bound=torch.ones(B, device=context.device) * -0.4,
-                high_bound=torch.ones(B, device=context.device) * 0.4,
+                sigma=torch.ones(B, device=context.device) * 0.05,
+                low_bound=torch.ones(B, device=context.device) * -0.1,
+                high_bound=torch.ones(B, device=context.device) * 0.1,
             )
             temporal_emb = torch.zeros(B, self.config.time_dim, device=context.device)
         
@@ -320,6 +322,9 @@ class ConstrainedDiffusionGenerator(nn.Module):
         )
         
         returns = self.z_to_returns(z_paths, path_envelope)
+        
+        # Final hard clamp - cannot exceed bounds even with numerical issues
+        returns = torch.clamp(returns, -0.5, 0.5)
         
         # Reshape: (B*n_paths, horizon, C) -> (B, n_paths, horizon, C)
         returns = returns.reshape(B, n_paths, self.config.horizon, self.config.in_channels)
@@ -449,22 +454,50 @@ class ConstrainedDiffusionGenerator(nn.Module):
             # Diffusion loss
             diff_loss = F.mse_loss(eps_pred, noise)
             
-            # Envelope matching loss
-            pred_std = envelope.sigma.mean()
-            pred_mean = envelope.mu.mean()
+            # Only compute auxiliary losses at reasonable timesteps (< 800)
+            # At high t, sqrt_alpha is near zero causing x0_pred division instability
+            use_aux = (t < 800).float().mean()
             
-            std_loss = (pred_std - self.target_std) ** 2
-            mean_loss = (pred_mean - self.target_mean) ** 2
+            if use_aux > 0:
+                sqrt_alphas_cumprod_t = self.scheduler._extract(self.scheduler.sqrt_alphas_cumprod, t, noisy_targets.shape)
+                sqrt_one_minus_t = self.scheduler._extract(self.scheduler.sqrt_one_minus_alphas_cumprod, t, noisy_targets.shape)
+                sqrt_alphas_cumprod_t = torch.clamp(sqrt_alphas_cumprod_t, min=1e-6)
+                x0_pred = (noisy_targets - sqrt_one_minus_t * eps_pred) / sqrt_alphas_cumprod_t
+                x0_pred = torch.clamp(x0_pred, min=-5.0, max=5.0)
+                x0_pred = x0_pred.permute(0, 2, 1)
+                
+                raw_magnitude = x0_pred.abs()
+                extreme_penalty = (raw_magnitude > 0.15).float().mean() * 2.0
+                
+                raw_returns = x0_pred[:, :, 0]
+                raw_std = raw_returns.std(dim=1).mean()
+                raw_mean = raw_returns.mean()
+                
+                std_loss = (raw_std - self.target_std) ** 2
+                mean_loss = (raw_mean - self.target_mean) ** 2
+                
+                # Correlation-aware temporal loss: normalize r_t, r_{t-1} independently so correlation is scale-invariant
+                r_t = raw_returns[:, :-1]
+                r_tp1 = raw_returns[:, 1:]
+                r_t_norm = r_t / (r_t.std(dim=1, keepdim=True) + 1e-6)
+                r_tp1_norm = r_tp1 / (r_tp1.std(dim=1, keepdim=True) + 1e-6)
+                corr = (r_t_norm * r_tp1_norm).mean()
+                corr_loss = torch.clamp(1.0 - corr, min=0.0, max=2.0)
+                
+                # Variance floor: prevent std collapse below viable volatility
+                min_std = 0.035
+                std_floor_loss = F.relu(min_std - raw_std)
+                
+                # NO velocity loss - it causes std collapse
+                temporal_loss = 0.05 * corr_loss + 0.2 * std_floor_loss
+                
+                aux_loss = 0.7 * std_loss + 1.0 * mean_loss + 0.1 * extreme_penalty + temporal_loss
+            else:
+                aux_loss = torch.tensor(0.0, device=noisy_targets.device)
             
-            # Simple boundary penalty using targets (not transformed)
-            final_returns = target_seq[:, -1, 0]  # (B,)
-            boundary_violations = F.relu(final_returns.abs() - 0.5)  # Beyond ±50%
-            boundary_loss = boundary_violations.mean()
+            total_loss = diff_loss + use_aux * aux_loss
+            total_loss = torch.clamp(total_loss, max=100.0)
             
-            # Total loss
-            total_loss = diff_loss + 0.5 * std_loss + 0.5 * mean_loss + 0.1 * boundary_loss
-            
-            # Skip diversity loss computation during training to save memory
             diversity_loss = torch.tensor(0.0, device=context.device)
             
             return GeneratorOutput(
@@ -485,21 +518,23 @@ class ConstrainedDiffusionGenerator(nn.Module):
             )
     
     def _compute_diversity_loss(self, paths: Tensor) -> Tensor:
-        """Compute diversity loss for generated paths."""
+        """Compute diversity loss - MATCH target distribution, NOT maximize."""
         B, n_paths, horizon, C = paths.shape
         
         # Get returns from first channel
         returns = paths[:, :, -1, 0]  # (B, n_paths)
         
-        # Path diversity: encourage spread but bounded
+        # Distribution matching (NOT maximization)
         ret_std = returns.std(dim=1).mean()
         ret_mean = returns.mean()
         
-        # Match target distribution
         std_loss = (ret_std - self.target_std) ** 2
         mean_loss = (ret_mean - self.target_mean) ** 2
         
-        return std_loss + mean_loss
+        # Small magnitude penalty for stability
+        magnitude_penalty = (paths ** 2).mean() * 0.01
+        
+        return std_loss + mean_loss + magnitude_penalty
     
     @torch.no_grad()
     def quick_generate(
