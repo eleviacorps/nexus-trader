@@ -53,13 +53,13 @@ class DiffusionSchedule(nn.Module):
 
     def predict_x0_from_eps(
         self,
-        noisy_delta: torch.Tensor,
+        noisy_future: torch.Tensor,
         eps_pred: torch.Tensor,
         t: torch.Tensor,
     ) -> torch.Tensor:
-        sqrt_ab = self.extract(self.alpha_bars.sqrt(), t, noisy_delta.ndim)
-        sqrt_1m = self.extract((1.0 - self.alpha_bars).sqrt(), t, noisy_delta.ndim)
-        return (noisy_delta - sqrt_1m * eps_pred) / (sqrt_ab + 1e-8)
+        sqrt_ab = self.extract(self.alpha_bars.sqrt(), t, noisy_future.ndim)
+        sqrt_1m = self.extract((1.0 - self.alpha_bars).sqrt(), t, noisy_future.ndim)
+        return (noisy_future - sqrt_1m * eps_pred) / (sqrt_ab + 1e-8)
 
     def p_sample_step(
         self,
@@ -131,7 +131,7 @@ class AdjusterDiffusionModel(nn.Module):
         self.horizon = int(horizon)
         self.time_dim = int(time_dim)
 
-        # Path branch: [noisy_delta, selected_path] -> Conv1D -> GRU -> 64
+        # Path branch: [Noisy Future, selected_path] -> Conv1D -> GRU -> 64
         self.path_conv = nn.Sequential(
             nn.Conv1d(2, path_channels, kernel_size=3, padding=1),
             nn.GELU(),
@@ -171,7 +171,7 @@ class AdjusterDiffusionModel(nn.Module):
 
     def forward(
         self,
-        noisy_delta: torch.Tensor,
+        noisy_future: torch.Tensor,
         selected_path: torch.Tensor,
         ctx_120: torch.Tensor,
         ctx_240: torch.Tensor,
@@ -182,7 +182,7 @@ class AdjusterDiffusionModel(nn.Module):
         t: torch.Tensor,
     ) -> torch.Tensor:
         # Path branch
-        path_in = torch.stack([noisy_delta, selected_path], dim=1)  # (B, 2, H)
+        path_in = torch.stack([noisy_future, selected_path], dim=1)  # (B, 2, H)
         p = self.path_conv(path_in)  # (B, 64, H)
         p = p.transpose(1, 2).contiguous()  # (B, H, 64)
         _, p_h = self.path_gru(p)

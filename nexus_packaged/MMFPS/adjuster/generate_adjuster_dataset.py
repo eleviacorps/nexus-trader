@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from math import dist
 from pathlib import Path
 
 import joblib
@@ -103,6 +104,9 @@ def main() -> int:
     parser.add_argument("--max-chunks", type=int, default=0)
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--scale-factor", type=float, default=2.0)
+    parser.add_argument("--augment-factor", type=int, default=1)
+    parser.add_argument("--resample-per-chunk", type=int, default=1)
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -138,6 +142,7 @@ def main() -> int:
     print(f"xgb={xgb_path}")
     print(f"timesteps={args.timesteps}")
     print(f"chunks={len(chunks)}")
+    print(f"[AdjusterDataset] Using fixed scale_factor={args.scale_factor}")
 
     total_samples = 0
     sample_cap = args.max_samples if args.max_samples > 0 else None
@@ -152,26 +157,81 @@ def main() -> int:
         bsz = contexts.shape[0]
         if sample_cap is not None and total_samples >= sample_cap:
             break
-        if sample_cap is not None and total_samples + bsz > sample_cap:
+        effective_bsz = bsz
+
+        if sample_cap is not None and total_samples + effective_bsz > sample_cap:
             keep = sample_cap - total_samples
-            contexts = contexts[:keep]
-            paths = paths[:keep]
+            selected = selected[:keep]
             futures = futures[:keep]
+            contexts = contexts[:keep]
+            clean_delta = clean_delta[:keep]
+            noisy_delta = noisy_delta[:keep]
+            t = t[:keep]
             bsz = keep
 
-        # 1) Select best path by MSE to real future.
-        dist = ((paths - futures[:, None, :]) ** 2).mean(axis=-1)  # (B, N)
-        idx = np.argmin(dist, axis=1)  # (B,)
-        selected = paths[np.arange(bsz), idx]  # (B, H)
+        all_selected = []
+        all_futures = []
+        all_contexts = []
 
-        # 2) Residual target.
-        clean_delta = futures - selected  # (B, H)
+        for _ in range(args.resample_per_chunk):
+
+            dist = ((paths - futures[:, None, :]) ** 2).mean(axis=-1)
+            top_k = 4
+            sorted_idx = np.argsort(dist, axis=1)
+
+            idx = np.zeros(bsz, dtype=np.int32)
+
+            for i in range(bsz):
+                candidates = sorted_idx[i, :top_k]
+                weights = np.array([0.5, 0.3, 0.15, 0.05])
+                weights = weights / weights.sum()
+                idx[i] = np.random.choice(candidates, p=weights)
+
+            selected = paths[np.arange(bsz), idx]
+
+            # small noise
+            noise_sel = np.random.normal(0, 0.005, size=selected.shape)
+            selected = selected + noise_sel
+
+            all_selected.append(selected)
+            all_futures.append(futures)
+            all_contexts.append(contexts)
+
+        # merge
+        selected = np.concatenate(all_selected, axis=0)
+        futures = np.concatenate(all_futures, axis=0)
+        contexts = np.concatenate(all_contexts, axis=0)
+        bsz = selected.shape[0]
+
+        # 2) Residual target with amplified target magnitude signal.
+        target_future = futures
+        scale = args.scale_factor  # already passed
+        clean_future = futures  # (B, H)
+
+        if args.augment_factor > 1:
+            sel_list = []
+            fut_list = []
+            ctx_list = []
+
+            for _ in range(args.augment_factor):
+                noise = np.random.normal(0, 0.003, size=selected.shape)
+                sel_list.append(selected + noise)
+                fut_list.append(futures)
+                ctx_list.append(contexts)
+
+            selected = np.concatenate(sel_list, axis=0)
+            futures = np.concatenate(fut_list, axis=0)
+            contexts = np.concatenate(ctx_list, axis=0)
+            bsz = selected.shape[0]
+
+            # recompute delta after augmentation
+            clean_future = (futures - selected) * scale
 
         # 3) Diffusion noising.
-        t = rng.integers(1, args.timesteps + 1, size=(bsz,), endpoint=False, dtype=np.int32)
-        noise = rng.standard_normal(clean_delta.shape, dtype=np.float32)
+        t = rng.integers(1, args.timesteps + 1, size=(bsz,), dtype=np.int32)
+        noise = rng.standard_normal(clean_future.shape, dtype=np.float32)
         ab = alpha_bars[t][:, None]
-        noisy_delta = np.sqrt(ab) * clean_delta + np.sqrt(1.0 - ab) * noise
+        noisy_future = np.sqrt(ab) * clean_future + np.sqrt(1.0 - ab) * noise 
 
         # 4) Multi-scale context from channel-0.
         ctx_price = contexts[:, :, 0]  # (B, T)
@@ -202,8 +262,8 @@ def main() -> int:
         out_file = output_dir / f"chunk_{out_idx:04d}.npz"
         np.savez_compressed(
             out_file,
-            noisy_delta=noisy_delta.astype(np.float32),
-            clean_delta=clean_delta.astype(np.float32),
+            noisy_future=noisy_future.astype(np.float32),
+            clean_future=clean_future.astype(np.float32),
             t=t.astype(np.int32),
             selected_path=selected.astype(np.float32),
             ctx_120=ctx_120.astype(np.float32),

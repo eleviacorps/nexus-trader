@@ -37,8 +37,8 @@ class AdjusterDataset(Dataset):
             raise FileNotFoundError(f"No adjuster dataset chunks found in {self.data_dir}")
 
         fields = [
-            "noisy_delta",
-            "clean_delta",
+            "noisy_future",
+            "clean_future",
             "t",
             "selected_path",
             "ctx_120",
@@ -55,14 +55,14 @@ class AdjusterDataset(Dataset):
             arr = np.load(c)
             for k in fields:
                 store[k].append(arr[k])
-            print(f"  {c.name}: {arr['noisy_delta'].shape[0]}")
+            print(f"  {c.name}: {arr['noisy_future'].shape[0]}")
 
         self.data: dict[str, np.ndarray] = {
             k: np.concatenate(v, axis=0).astype(np.float32 if k != "t" else np.int64)
             for k, v in store.items()
         }
 
-        total = self.data["noisy_delta"].shape[0]
+        total = self.data["noisy_future"].shape[0]
         if num_samples > 0:
             keep = min(num_samples, total)
             for k in self.data:
@@ -71,12 +71,12 @@ class AdjusterDataset(Dataset):
         print(f"Total adjuster samples: {total}")
 
     def __len__(self) -> int:
-        return int(self.data["noisy_delta"].shape[0])
+        return int(self.data["noisy_future"].shape[0])
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         return {
-            "noisy_delta": torch.from_numpy(self.data["noisy_delta"][idx]),
-            "clean_delta": torch.from_numpy(self.data["clean_delta"][idx]),
+            "noisy_future": torch.from_numpy(self.data["noisy_future"][idx]),
+            "clean_future": torch.from_numpy(self.data["clean_future"][idx]),
             "t": torch.tensor(self.data["t"][idx], dtype=torch.long),
             "selected_path": torch.from_numpy(self.data["selected_path"][idx]),
             "ctx_120": torch.from_numpy(self.data["ctx_120"][idx]),
@@ -95,7 +95,7 @@ class EpochStats:
     loss_recon: float
     loss_dir: float
     loss_mag: float
-    mag_ratio_mean: float
+    step_ratio_mean: float
     loss_vel: float
     loss_accel: float
     nan_steps: int
@@ -119,6 +119,7 @@ def _epoch_pass(
     loader: DataLoader,
     device: torch.device,
     optimizer: optim.Optimizer | None,
+    sampling_step_size: float,
 ) -> EpochStats:
     train = optimizer is not None
     model.train(mode=train)
@@ -127,7 +128,7 @@ def _epoch_pass(
     total_recon = 0.0
     total_dir = 0.0
     total_mag = 0.0
-    total_mag_ratio = 0.0
+    total_step_ratio = 0.0
     total_vel = 0.0
     total_accel = 0.0
     nan_steps = 0
@@ -140,7 +141,7 @@ def _epoch_pass(
             optimizer.zero_grad(set_to_none=True)
 
         eps_pred = model(
-            noisy_delta=batch["noisy_delta"],
+            noisy_future=batch["noisy_future"],
             selected_path=batch["selected_path"],
             ctx_120=batch["ctx_120"],
             ctx_240=batch["ctx_240"],
@@ -152,39 +153,58 @@ def _epoch_pass(
         )
 
         # noise_target = (x_t - sqrt(alpha_bar_t) * x_0) / sqrt(1 - alpha_bar_t)
-        sqrt_ab = schedule.extract(schedule.alpha_bars.sqrt(), batch["t"], batch["clean_delta"].ndim)
-        sqrt_1m = schedule.extract((1.0 - schedule.alpha_bars).sqrt(), batch["t"], batch["clean_delta"].ndim)
-        noise_target = (batch["noisy_delta"] - sqrt_ab * batch["clean_delta"]) / (sqrt_1m + 1e-8)
+        sqrt_ab = schedule.extract(schedule.alpha_bars.sqrt(), batch["t"], batch["clean_future"].ndim)
+        sqrt_1m = schedule.extract((1.0 - schedule.alpha_bars).sqrt(), batch["t"], batch["clean_future"].ndim)
+        noise_target = (batch["noisy_future"] - sqrt_ab * batch["clean_future"]) / (sqrt_1m + 1e-8)
 
         loss_diff = F.mse_loss(eps_pred, noise_target)
         # Reconstruct predicted residual delta from epsilon prediction.
-        pred_delta = schedule.predict_x0_from_eps(batch["noisy_delta"], eps_pred, batch["t"])
-        target_future = batch["selected_path"] + batch["clean_delta"]
-        refined = batch["selected_path"] + pred_delta
+        selected = batch["selected_path"]
+        clean = batch["clean_future"]
 
-        loss_recon = F.mse_loss(refined, target_future)
+        alpha_bar_t = schedule.extract(schedule.alpha_bars, batch["t"], batch["noisy_future"].ndim)
 
-        pred_diff = refined[:, 1:] - refined[:, :-1]
-        target_diff = target_future[:, 1:] - target_future[:, :-1]
-        sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
-        loss_dir = (1.0 - sign_match).mean()
+        pred_future = (
+            batch["noisy_future"] - torch.sqrt(1 - alpha_bar_t) * eps_pred
+        ) / torch.sqrt(alpha_bar_t + 1e-8)
 
-        pred_max = refined.abs().max(dim=1).values
-        target_max = target_future.abs().max(dim=1).values
-        ratio = pred_max / (target_max + 1e-6)
-        loss_mag = torch.relu(0.7 - ratio).mean()
+        target_future = batch["clean_future"]
 
-        vel = refined[:, 1:] - refined[:, :-1]
-        accel = vel[:, 1:] - vel[:, :-1]
-        loss_vel = vel.abs().mean()
-        loss_accel = accel.abs().mean()
+        # ✅ ADD THIS (train = inference alignment)
+        pred_future = torch.clamp(pred_future, -0.30, 0.30)
+
+        # ✅ ADD THIS (final objective)
+        loss_mse_final = F.mse_loss(pred_future, target_future)
+
+        # ✅ ADD THIS (improvement constraint)
+        mse_before = F.mse_loss(selected, target_future)
+        mse_after  = F.mse_loss(pred_future, target_future)
+        loss_improve = torch.relu(mse_after - mse_before)
+
+        loss_mse_final = F.mse_loss(pred_future, target_future)
+
+        # Sampling-consistency step: enforce behavior on generation-like update.
+
+        loss_recon = F.mse_loss(pred_future, target_future)
+
+        loss_dir = 1 - F.cosine_similarity(pred_future, target_future, dim=-1).mean()
+
+        ratio = pred_future.abs().mean() / (target_future.abs().mean() + 1e-6)
+        loss_mag = torch.relu(0.9 - ratio)
+
+        vel = pred_future[:, 1:] - pred_future[:, :-1]
+        acc = vel[:, 1:] - vel[:, :-1]
+
+        loss_vel = vel.pow(2).mean()
+        loss_accel = acc.pow(2).mean()
+
         loss = (
             loss_diff
-            + 0.5 * loss_recon
-            + 0.2 * loss_dir
-            + 0.6 * loss_mag
-            + 0.1 * loss_vel
-            + 0.05 * loss_accel
+            + 0.3 * loss_recon
+            + 1.2 * loss_dir
+            + 1.5 * loss_mag
+            + 0.05 * loss_vel
+            + 0.03 * loss_accel
         )
 
         if not torch.isfinite(loss):
@@ -203,7 +223,7 @@ def _epoch_pass(
         total_recon += float(loss_recon.detach().item())
         total_dir += float(loss_dir.detach().item())
         total_mag += float(loss_mag.detach().item())
-        total_mag_ratio += float(ratio.mean().detach().item())
+        total_step_ratio += float(ratio.mean().detach().item())
         total_vel += float(loss_vel.detach().item())
         total_accel += float(loss_accel.detach().item())
 
@@ -213,7 +233,7 @@ def _epoch_pass(
             recon=f"{loss_recon.item():.5f}",
             dir=f"{loss_dir.item():.5f}",
             mag=f"{loss_mag.item():.5f}",
-            mag_ratio=f"{ratio.mean().item():.4f}",
+            step_ratio=f"{ratio.mean().item():.4f}",
         )
 
     n = max(len(loader) - nan_steps, 1)
@@ -223,7 +243,7 @@ def _epoch_pass(
         loss_recon=total_recon / n,
         loss_dir=total_dir / n,
         loss_mag=total_mag / n,
-        mag_ratio_mean=total_mag_ratio / n,
+        step_ratio_mean=total_step_ratio / n,
         loss_vel=total_vel / n,
         loss_accel=total_accel / n,
         nan_steps=nan_steps,
@@ -251,6 +271,7 @@ def main() -> int:
     parser.add_argument("--beta-end", type=float, default=2e-2)
     parser.add_argument("--num-samples", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling-step-size", type=float, default=0.1)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
@@ -322,19 +343,33 @@ def main() -> int:
 
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
-        tr = _epoch_pass(model, schedule, train_loader, device, optimizer=optimizer)
-        va = _epoch_pass(model, schedule, val_loader, device, optimizer=None)
+        tr = _epoch_pass(
+            model,
+            schedule,
+            train_loader,
+            device,
+            optimizer=optimizer,
+            sampling_step_size=args.sampling_step_size,
+        )
+        va = _epoch_pass(
+            model,
+            schedule,
+            val_loader,
+            device,
+            optimizer=None,
+            sampling_step_size=args.sampling_step_size,
+        )
         print(
             f"train: loss={tr.loss:.6f} diff={tr.loss_diff:.6f} recon={tr.loss_recon:.6f} "
-            f"dir={tr.loss_dir:.6f} mag={tr.loss_mag:.6f} mag_ratio_mean={tr.mag_ratio_mean:.4f} "
+            f"dir={tr.loss_dir:.6f} mag={tr.loss_mag:.6f} step_ratio_mean={tr.step_ratio_mean:.4f} "
             f"vel={tr.loss_vel:.6f} acc={tr.loss_accel:.6f} "
             f"nan={tr.nan_steps} | "
             f"val: loss={va.loss:.6f} diff={va.loss_diff:.6f} recon={va.loss_recon:.6f} "
-            f"dir={va.loss_dir:.6f} mag={va.loss_mag:.6f} mag_ratio_mean={va.mag_ratio_mean:.4f} "
+            f"dir={va.loss_dir:.6f} mag={va.loss_mag:.6f} step_ratio_mean={va.step_ratio_mean:.4f} "
             f"vel={va.loss_vel:.6f} acc={va.loss_accel:.6f} "
             f"nan={va.nan_steps}"
         )
-        print(f"mag_ratio_mean={tr.mag_ratio_mean:.4f}")
+        print(f"step_ratio_mean={tr.step_ratio_mean:.4f}")
 
         state = {
             "model_state": model.state_dict(),
